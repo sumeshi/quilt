@@ -5,7 +5,15 @@ use std::path::{Path, PathBuf};
 
 pub fn partition(df: &LazyFrame, colname: &str, output_dir: &str) {
     // First, check if the column exists in the schema without collecting the DataFrame
-    if df.clone().collect_schema().unwrap().get(colname).is_none() {
+    let schema = match df.clone().collect_schema() {
+        Ok(schema) => schema,
+        Err(e) => {
+            eprintln!("Error getting schema for partition operation: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    if schema.get(colname).is_none() {
         eprintln!("Error: Column '{colname}' not found in DataFrame for partition operation");
         std::process::exit(1);
     }

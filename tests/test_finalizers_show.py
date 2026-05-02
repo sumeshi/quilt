@@ -88,5 +88,12 @@ class TestShow(QsvTestBase):
         ])
         self.assertEqual(result.stdout.strip(), expected_output)
 
+    def test_show_does_not_add_extra_blank_line(self):
+        """Test non-streaming show output ends with a single newline"""
+        result = self.run_qsv_command(f"load {self.get_fixture_path('simple.csv')} - show")
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(result.stdout.endswith("\n"))
+        self.assertFalse(result.stdout.endswith("\n\n"))
+
 if __name__ == "__main__":
     unittest.main()

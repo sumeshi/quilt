@@ -74,5 +74,17 @@ class TestTimeslice(QsvTestBase):
             "2023-01-01 06:00:00,Golf",
         ]))
 
+    def test_timeslice_with_changetz_output(self):
+        """Test timeslice can parse timezone-aware changetz output"""
+        result = self.run_qsv_command(
+            f"load {self.get_fixture_path('simple.csv')} - changetz datetime --from-tz UTC --to-tz Asia/Tokyo - timeslice datetime --start '2023-01-01 22:00:00' --end '2023-01-01 23:00:00' - show"
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "\n".join([
+            "datetime,col1,col2,col3,str",
+            "2023-01-01T22:00:00.000000+09:00,4,5,6,bar",
+            "2023-01-01T23:00:00.000000+09:00,7,8,9,baz",
+        ]))
+
 if __name__ == "__main__":
-    unittest.main() 
+    unittest.main()

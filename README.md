@@ -270,7 +270,7 @@ Changes the timezone of a datetime column.
 | --from-tz | str |         | Source timezone (e.g., `UTC`, `America/New_York`, `local`). Required. |
 | --to-tz | str |         | Target timezone (e.g., `Asia/Tokyo`). Required. |
 | --input-format | str | `auto` | Input datetime format string (e.g., `%Y-%m-%d %H:%M:%S%.f`). `auto` uses intelligent parsing similar to Python's dateutil.parser, supporting fuzzy parsing and automatic format detection. |
-| --output-format | str | `auto` | Output datetime format string (e.g., `%Y/%m/%d %H:%M:%S`). `auto` uses ISO8601 format `%Y-%m-%dT%H:%M:%S%.7f%:z` (100-nanosecond precision for Windows forensics). |
+| --output-format | str | `auto` | Output datetime format string (e.g., `%Y/%m/%d %H:%M:%S`). `auto` uses ISO8601 format `%Y-%m-%dT%H:%M:%S%.6f%:z` (microsecond precision). |
 | --ambiguous | str | `earliest` | Strategy for ambiguous times during DST transitions: `earliest` (first occurrence) or `latest` (second occurrence). |
 
 **Understanding `--ambiguous` option:**
@@ -303,7 +303,7 @@ $ qsv load events.csv - changetz event_time --from-tz EST --to-tz UTC
 # Handles: "Meeting on January 15th, 2023 at 2:30 PM", "Call scheduled for Jan 15 2023"
 ```
 
-**TODO:** Upgrade to 7-digit sub-second precision (100-nanosecond precision for Windows FILETIME compatibility) when chrono-tz library supports it.
+**TODO:** Upgrade to 7-digit sub-second precision (100-nanosecond precision for Windows FILETIME compatibility) when chrono-tz library supports it. Current `auto` output uses microsecond precision.
 
 #### `renamecol`
 Renames a specific column.
@@ -397,16 +397,16 @@ $ qsv load access.log - timeslice timestamp --start "2023-01-01T10:00:00"
 ```
 
 #### `pivot`
-Creates pivot tables with cross-tabulation functionality.
+Creates grouped aggregations over row and column keys.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| --rows | str |         | Comma-separated list of columns for rows. Optional. |
-| --cols | str |         | Comma-separated list of columns for columns. Optional. |
+| --rows | str |         | Comma-separated list of columns for row grouping. Optional. |
+| --cols | str |         | Comma-separated list of columns for column grouping. Optional. |
 | --values | str |         | Column to aggregate values from. Required. |
 | --agg | str |         | Aggregation function: `sum`, `mean`, `count`, `min`, `max`, `median`, `std`. Optional (default behavior depends on implementation). |
 
-At least one of `--rows` or `--cols` must be specified. Creates a cross-tabulation table with specified row and column groupings, aggregating values using the chosen function.
+At least one of `--rows` or `--cols` must be specified. This currently returns a long-form grouped aggregation over the requested row and column keys, not a wide Excel-style cross-tabulation table.
 
 Example:
 ```bash
@@ -536,8 +536,8 @@ Displays the resulting data in a formatted table to standard output. Shows table
 
 **Features:**
 - Displays table size information (rows × columns) like Python Polars
-- For datasets with 8+ rows: shows first 3 rows, truncation indicator (`…`), and last 3 rows
-- For datasets with 7 or fewer rows: shows all rows without truncation
+- For datasets with 9+ rows: shows the first 8 rows and a truncation indicator (`⋮`)
+- For datasets with 8 or fewer rows: shows all rows without truncation
 - Automatically used as default finalizer when no explicit finalizer is specified
 
 This command does not take any arguments or options.
@@ -627,6 +627,23 @@ Within a Quilt YAML file, stages can be of different types to orchestrate the fl
 | `process`      | Executes a series of qsv operations on a dataset.          | `steps`: Dictionary of operations (e.g., `load`, `select`, `head`, `showtable`). Each key is a qsv command, and its value contains arguments/options. <br> `source` (optional): Specifies the output of a previous stage as input. |
 | `concat`       | Concatenates multiple datasets (stages).                   | `sources`: List of stage names whose outputs to concatenate. <br>`params.how` (optional): Method for concatenation, `vertical` (default). Note: `horizontal` concatenation is not yet implemented. |
 | `join`         | Joins datasets from multiple stages based on keys.         | `sources`: List of two stage names whose outputs to join. <br>`params.left_on`/`params.right_on` or `params.on`: Column(s) for joining. <br>`params.how` (optional): Join type (`inner`, `left`, `outer`, `cross`). |
+
+Timeline steps in Quilt use explicit aggregation keys:
+
+```yaml
+stages:
+  hourly_metrics:
+    type: process
+    steps:
+      load:
+        path: metrics.csv
+      timeline:
+        time_column: timestamp
+        interval: 1h
+        agg_type: avg
+        agg_column: cpu_usage
+      show:
+```
 
 ## Huge File Processing
 

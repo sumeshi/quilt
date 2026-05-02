@@ -132,6 +132,11 @@ fn parse_interval(interval: &str) -> Option<Duration> {
     }
 }
 fn time_to_bucket(time_str: &str, interval: Duration) -> Option<String> {
+    let time_str = time_str.trim();
+    if time_str.is_empty() {
+        return None;
+    }
+
     // Try multiple datetime formats
     let formats = [
         "%Y-%m-%d %H:%M:%S%.f",
@@ -148,6 +153,11 @@ fn time_to_bucket(time_str: &str, interval: Duration) -> Option<String> {
         if let Ok(dt) = NaiveDateTime::parse_from_str(time_str, format) {
             parsed_time = Some(dt);
             break;
+        }
+    }
+    if parsed_time.is_none() {
+        if let Ok(dt) = DateTime::parse_from_rfc3339(time_str) {
+            parsed_time = Some(dt.naive_local());
         }
     }
     if parsed_time.is_none() {

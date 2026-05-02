@@ -1,37 +1,54 @@
 import unittest
+import csv
 from test_base import QsvTestBase
 
 class TestPivot(QsvTestBase):
-    
+
+    def parse_csv_output(self, result):
+        rows = list(csv.DictReader(result.stdout.strip().splitlines()))
+        self.assertTrue(rows, "pivot output should contain at least one data row")
+        return rows
+
     def test_pivot_basic_rows_cols(self):
         """Test basic pivot functionality with rows and cols"""
         result = self.run_qsv_command(f"load {self.get_fixture_path('comprehensive.csv')} - pivot --rows region --cols product --values sales --agg sum - show")
         self.assertEqual(result.returncode, 0)
-        # The output should be CSV with pivoted data
         lines = result.stdout.strip().split('\n')
-        self.assertTrue(len(lines) >= 2)  # Header + at least one data row
-        self.assertIn('region', lines[0])  # Should contain region column
+        self.assertEqual(lines[0], 'region,product,sales_sum')
+        self.assertEqual(len(lines), 13)
 
     def test_pivot_rows_only(self):
         """Test pivot with only rows specified"""
         result = self.run_qsv_command(f"load {self.get_fixture_path('comprehensive.csv')} - pivot --rows region --values sales --agg sum - show")
         self.assertEqual(result.returncode, 0)
-        lines = result.stdout.strip().split('\n')
-        self.assertTrue(len(lines) >= 2)
-        self.assertIn('region', lines[0])
+        rows = self.parse_csv_output(result)
+        self.assertEqual({row['region'] for row in rows}, {'North', 'South', 'East', 'West'})
+        expected = {
+            'North': '4650',
+            'South': '5250',
+            'East': '4750',
+            'West': '4250',
+        }
+        self.assertEqual({row['region']: row['sales_sum'] for row in rows}, expected)
 
     def test_pivot_cols_only(self):
         """Test pivot with only cols specified"""
         result = self.run_qsv_command(f"load {self.get_fixture_path('comprehensive.csv')} - pivot --cols product --values sales --agg sum - show")
         self.assertEqual(result.returncode, 0)
-        lines = result.stdout.strip().split('\n')
-        self.assertTrue(len(lines) >= 2)
-        
+        rows = self.parse_csv_output(result)
+        self.assertEqual({row['product'] for row in rows}, {'Laptop', 'Phone', 'Tablet'})
+        expected = {
+            'Laptop': '9100',
+            'Phone': '5950',
+            'Tablet': '3850',
+        }
+        self.assertEqual({row['product']: row['sales_sum'] for row in rows}, expected)
+
     def test_pivot_mean_aggregation(self):
         """Test pivot with mean aggregation"""
         result = self.run_qsv_command(f"load {self.get_fixture_path('comprehensive.csv')} - pivot --rows region --cols product --values sales --agg mean - show")
         self.assertEqual(result.returncode, 0)
-        
+
     def test_pivot_count_aggregation(self):
         """Test pivot with count aggregation"""
         result = self.run_qsv_command(f"load {self.get_fixture_path('comprehensive.csv')} - pivot --rows region --cols product --values sales --agg count - show")
@@ -61,7 +78,7 @@ class TestPivot(QsvTestBase):
         """Test pivot with multiple columns for grouping"""
         result = self.run_qsv_command(f"load {self.get_fixture_path('comprehensive.csv')} - pivot --rows region,quarter --cols product --values sales --agg sum - show")
         self.assertEqual(result.returncode, 0)
-        
+
     def test_pivot_missing_values_option(self):
         """Test pivot without --values option should fail"""
         result = self.run_qsv_command(f"load {self.get_fixture_path('comprehensive.csv')} - pivot --rows region --cols product - show")
@@ -78,12 +95,17 @@ class TestPivot(QsvTestBase):
         """Test pivot with expected output format"""
         result = self.run_qsv_command(f"load {self.get_fixture_path('comprehensive.csv')} - pivot --rows region --values sales --agg sum - show")
         self.assertEqual(result.returncode, 0)
-        lines = result.stdout.strip().split('\n')
-        # Check header
-        self.assertIn('region', lines[0])
-        self.assertIn('sales_sum', lines[0])
-        # Should have data for 4 regions (North, South, East, West)
-        self.assertEqual(len(lines), 5)  # Header + 4 regions
+        rows = self.parse_csv_output(result)
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(
+            {row['region']: row['sales_sum'] for row in rows},
+            {
+                'North': '4650',
+                'South': '5250',
+                'East': '4750',
+                'West': '4250',
+            },
+        )
 
 if __name__ == "__main__":
     unittest.main() 

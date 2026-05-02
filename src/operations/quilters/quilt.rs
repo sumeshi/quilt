@@ -1,7 +1,7 @@
 use crate::controllers::command::parse_batch_size;
 use crate::controllers::dataframe::DataFrameController;
 use crate::controllers::log::LogController;
-use polars::prelude::{col, JoinType, LazyFrame};
+use polars::prelude::{col, lit, JoinType, LazyFrame};
 use serde::{Deserialize, Serialize};
 use serde_yml::Value;
 use std::collections::HashMap;
@@ -9,8 +9,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 // Re-import operations to call them directly with LazyFrame
 use crate::operations::chainables::{
-    changetz, contains, count, grep, head, isin, pivot, renamecol, sed, select, sort, tail,
-    timeline, timeslice, uniq,
+    changetz, contains, convert, count, grep, head, isin, pivot, renamecol, sed, select, sort,
+    tail, timeline, timeround, timeslice, uniq,
 };
 use crate::operations::finalizers::{
     dump as dump_op, dumpcache as dumpcache_op, headers as headers_op, partition as partition_op,
@@ -108,6 +108,16 @@ fn create_chainable_dispatch_table() -> HashMap<&'static str, ChainableOperation
             ambiguous.as_deref().unwrap_or("earliest"),
         )
     });
+    table.insert("convert", |df, args| {
+        let colname = get_string_from_value(args, "colname").unwrap_or_default();
+        let from_format = get_string_from_value(args, "from")
+            .or_else(|| get_string_from_value(args, "from_format"))
+            .unwrap_or_default();
+        let to_format = get_string_from_value(args, "to")
+            .or_else(|| get_string_from_value(args, "to_format"))
+            .unwrap_or_default();
+        convert::convert(df, &colname, &from_format, &to_format)
+    });
     table.insert("renamecol", |df, args| {
         let old_name = get_string_from_value(args, "old_name")
             .or_else(|| get_string_from_value(args, "from"))
@@ -136,6 +146,12 @@ fn create_chainable_dispatch_table() -> HashMap<&'static str, ChainableOperation
         let start_time = get_string_from_value(args, "start");
         let end_time = get_string_from_value(args, "end");
         timeslice::timeslice(df, &time_column, start_time.as_deref(), end_time.as_deref())
+    });
+    table.insert("timeround", |df, args| {
+        let colname = get_string_from_value(args, "colname").unwrap_or_default();
+        let unit = get_string_from_value(args, "unit").unwrap_or_default();
+        let output_colname = get_string_from_value(args, "output");
+        timeround::timeround(df, &colname, &unit, output_colname.as_deref())
     });
     table.insert("pivot", |df, args| {
         let rows_str = get_string_from_value(args, "rows").unwrap_or_default();
@@ -247,6 +263,22 @@ fn get_string_vec_from_value(val: &Value, key: &str) -> Option<Vec<String>> {
             .collect()
     })
 }
+fn get_string_list_from_value(val: &Value, key: &str) -> Option<Vec<String>> {
+    if let Some(value) = get_string_from_value(val, key) {
+        let items: Vec<String> = value
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if items.is_empty() {
+            None
+        } else {
+            Some(items)
+        }
+    } else {
+        get_string_vec_from_value(val, key)
+    }
+}
 fn get_bool_from_value(val: &Value, key: &str) -> bool {
     val.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
 }
@@ -280,6 +312,8 @@ pub fn quilt(
         quilt_config.title,
         quilt_config.stages.len()
     ));
+    let chainable_ops = create_chainable_dispatch_table();
+    let finalizer_ops = create_finalizer_dispatch_table();
     let mut stage_results: HashMap<String, LazyFrame> = HashMap::new();
     let mut last_processed_df: Option<LazyFrame> = None;
     for (stage_name_val, stage_config_val) in &quilt_config.stages {
@@ -316,9 +350,6 @@ pub fn quilt(
         }
         let mut stage_output_df: Option<LazyFrame> = current_stage_input_df.clone();
         if stage_config.stage_type == "process" {
-            // Create dispatch tables
-            let chainable_ops = create_chainable_dispatch_table();
-            let finalizer_ops = create_finalizer_dispatch_table();
             if let Some(steps) = &stage_config.steps {
                 for (command_name_val, command_args_val) in steps {
                     // Handle command name with trailing underscores (for duplicates)
@@ -466,11 +497,18 @@ pub fn quilt(
                                 // Vertical concatenation (row-wise) - default behavior
                                 let mut result = dataframes_to_concat[0].clone();
                                 for df in dataframes_to_concat.into_iter().skip(1) {
-                                    result = polars::prelude::concat(
+                                    result = match polars::prelude::concat(
                                         [result, df],
                                         polars::prelude::UnionArgs::default(),
-                                    )
-                                    .expect("Failed to concatenate DataFrames vertically");
+                                    ) {
+                                        Ok(concat_df) => concat_df,
+                                        Err(e) => {
+                                            eprintln!(
+                                                "Error: Failed to concatenate DataFrames vertically in stage '{stage_name}': {e}"
+                                            );
+                                            std::process::exit(1);
+                                        }
+                                    };
                                 }
                                 result
                             }
@@ -531,43 +569,91 @@ pub fn quilt(
                         let how_str = join_params
                             .and_then(|p| get_string_from_value(p, "how"))
                             .unwrap_or_else(|| "inner".to_string());
-                        let key_col_name = join_params
-                            .and_then(|p| get_string_from_value(p, "key"))
-                            .or_else(|| join_params.and_then(|p| get_string_from_value(p, "on")));
-                        if key_col_name.is_none() {
-                            LogController::error(&format!(
-                                "Join stage '{stage_name}' missing 'key' (or 'on') parameter. Skipping."
-                            ));
-                            continue;
-                        }
-                        let key = key_col_name.unwrap();
                         let join_type = match how_str.to_lowercase().as_str() {
                             "inner" => JoinType::Inner,
                             "left" => JoinType::Left,
                             "outer" | "full" => JoinType::Full,
+                            "cross" => JoinType::Cross,
                             _ => {
                                 LogController::warn(&format!("Unsupported join type '{how_str}' for stage '{stage_name}'. Defaulting to inner join."));
                                 JoinType::Inner
                             }
                         };
+                        let is_cross_join = matches!(join_type, JoinType::Cross);
                         let coalesce = join_params
                             .and_then(|p| p.get("coalesce"))
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false);
-                        let mut join_args = polars::prelude::JoinArgs::new(join_type);
-                        if coalesce {
-                            join_args = join_args
-                                .with_coalesce(polars::prelude::JoinCoalesce::CoalesceColumns);
-                        }
-                        let joined_df_result = left_df.clone().join(
-                            right_df.clone(),
-                            &[col(&key)],
-                            &[col(&key)],
-                            join_args,
-                        );
+                        let joined_df_result = if is_cross_join {
+                            let cross_key = "__qsv_quilt_cross_join_key";
+                            let mut join_args = polars::prelude::JoinArgs::new(JoinType::Inner);
+                            if coalesce {
+                                join_args = join_args
+                                    .with_coalesce(polars::prelude::JoinCoalesce::CoalesceColumns);
+                            }
+                            left_df
+                                .clone()
+                                .with_column(lit(cross_key).alias(cross_key))
+                                .join(
+                                    right_df
+                                        .clone()
+                                        .with_column(lit(cross_key).alias(cross_key)),
+                                    &[col(cross_key)],
+                                    &[col(cross_key)],
+                                    join_args,
+                                )
+                                .select([col("*").exclude([cross_key])])
+                        } else {
+                            let mut join_args = polars::prelude::JoinArgs::new(join_type.clone());
+                            if coalesce {
+                                join_args = join_args
+                                    .with_coalesce(polars::prelude::JoinCoalesce::CoalesceColumns);
+                            }
+                            let (left_on, right_on) = if let Some(on_cols) = join_params
+                                .and_then(|p| get_string_list_from_value(p, "on"))
+                                .filter(|cols| !cols.is_empty())
+                            {
+                                (on_cols.clone(), on_cols)
+                            } else if let Some(key_cols) = join_params
+                                .and_then(|p| get_string_list_from_value(p, "key"))
+                                .filter(|cols| !cols.is_empty())
+                            {
+                                (key_cols.clone(), key_cols)
+                            } else {
+                                let left_cols = join_params
+                                    .and_then(|p| get_string_list_from_value(p, "left_on"))
+                                    .unwrap_or_default();
+                                let right_cols = join_params
+                                    .and_then(|p| get_string_list_from_value(p, "right_on"))
+                                    .unwrap_or_default();
+                                if left_cols.is_empty() || right_cols.is_empty() {
+                                    LogController::error(&format!(
+                                        "Join stage '{stage_name}' missing 'key'/'on' or 'left_on'/'right_on' parameter(s). Skipping."
+                                    ));
+                                    continue;
+                                }
+                                if left_cols.len() != right_cols.len() {
+                                    LogController::error(&format!(
+                                        "Join stage '{stage_name}' has mismatched left_on/right_on column counts. Skipping."
+                                    ));
+                                    continue;
+                                }
+                                (left_cols, right_cols)
+                            };
+                            let left_on_exprs: Vec<_> =
+                                left_on.iter().map(|name| col(name)).collect();
+                            let right_on_exprs: Vec<_> =
+                                right_on.iter().map(|name| col(name)).collect();
+                            left_df.clone().join(
+                                right_df.clone(),
+                                &left_on_exprs,
+                                &right_on_exprs,
+                                join_args,
+                            )
+                        };
                         stage_output_df = Some(joined_df_result); // Result is a LazyFrame, not Result<LazyFrame, Error>
                         LogController::debug(&format!(
-                            "Join stage '{stage_name}' completed using key '{key}', type '{how_str}', coalesce: {coalesce}"
+                            "Join stage '{stage_name}' completed using type '{how_str}', coalesce: {coalesce}"
                         ));
                     } else {
                         let mut missing_sources = Vec::new();

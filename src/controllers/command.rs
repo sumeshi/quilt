@@ -324,7 +324,7 @@ pub fn print_help() {
     println!("  convert      Convert data formats (JSON, YAML, XML, etc.)");
     println!("  timeline     Aggregate data by time intervals");
     println!("  timeslice    Filter data by time range");
-    println!("  pivot        Create pivot tables with cross-tabulation");
+    println!("  pivot        Create grouped aggregations over row and column keys");
     println!("  timeround    Round datetime to specified time unit");
     println!();
     println!("Finalizers:");
@@ -595,7 +595,7 @@ fn print_partition_help() {
     println!("\nNote: Creates one CSV file per unique value in the specified column.");
 }
 fn print_pivot_help() {
-    println!("pivot: Create pivot tables with cross-tabulation\n");
+    println!("pivot: Create grouped aggregations over row and column keys\n");
     println!(
         "Usage: pivot --rows <columns> --cols <columns> --values <column> [--agg <function>]\n"
     );
@@ -610,7 +610,9 @@ fn print_pivot_help() {
     println!("  qsv load sales.csv - pivot --rows region --cols product --values sales_amount --agg sum - show");
     println!("  qsv load data.csv - pivot --rows category --cols year --values revenue --agg mean - show");
     println!("  qsv load logs.csv - pivot --rows date --cols error_type --values count --agg count - show");
-    println!("\nNote: Creates a cross-tabulation table with specified rows and columns.");
+    println!(
+        "\nNote: Returns a long-form grouped aggregation over the requested keys, not a wide cross-tabulation table."
+    );
 }
 fn print_timeround_help() {
     println!("timeround: Round datetime to specified time unit\n");

@@ -1,4 +1,5 @@
 use crate::controllers::log::LogController;
+use chrono::{DateTime, NaiveDateTime};
 use polars::prelude::*;
 
 pub fn timeslice(
@@ -29,15 +30,25 @@ pub fn timeslice(
     // Start with the original dataframe
     let mut result_df = df.clone();
 
-    // Convert the time column to datetime for efficient comparison
-    // Try multiple formats automatically with Polars
     let time_col_expr = col(time_column)
-        .str()
-        .to_datetime(
-            Some(TimeUnit::Milliseconds),
-            None,
-            StrptimeOptions::default(),
-            lit("raise"),
+        .cast(DataType::String)
+        .map(
+            |s_col: Column| {
+                let ca = s_col.str()?;
+                let converted: Vec<Option<String>> = ca
+                    .into_iter()
+                    .map(|opt_time_str| opt_time_str.and_then(parse_datetime_string_canonical))
+                    .collect();
+                Ok(Some(
+                    StringChunked::from_iter_options(
+                        "_temp_datetime".into(),
+                        converted.into_iter(),
+                    )
+                    .into_series()
+                    .into(),
+                ))
+            },
+            GetOutput::from_type(DataType::String),
         )
         .alias("_temp_datetime");
 
@@ -48,8 +59,8 @@ pub fn timeslice(
     if let Some(start) = start_time {
         LogController::debug(&format!("Applying start time filter: {start}"));
 
-        // Parse start time to timestamp
-        let start_datetime = match parse_datetime_string(start) {
+        // Parse start time to a canonical string for lexicographic comparison
+        let start_datetime = match parse_datetime_string_canonical(start) {
             Some(dt) => dt,
             None => {
                 eprintln!("Error: Could not parse start time '{start}'");
@@ -65,8 +76,8 @@ pub fn timeslice(
     if let Some(end) = end_time {
         LogController::debug(&format!("Applying end time filter: {end}"));
 
-        // Parse end time to timestamp
-        let end_datetime = match parse_datetime_string(end) {
+        // Parse end time to a canonical string for lexicographic comparison
+        let end_datetime = match parse_datetime_string_canonical(end) {
             Some(dt) => dt,
             None => {
                 eprintln!("Error: Could not parse end time '{end}'");
@@ -83,8 +94,11 @@ pub fn timeslice(
     result_df.select([cols(original_columns)])
 }
 
-fn parse_datetime_string(time_str: &str) -> Option<i64> {
-    use chrono::NaiveDateTime;
+fn parse_datetime_string_canonical(time_str: &str) -> Option<String> {
+    let time_str = time_str.trim();
+    if time_str.is_empty() {
+        return None;
+    }
 
     // Try multiple datetime formats
     let formats = [
@@ -100,13 +114,19 @@ fn parse_datetime_string(time_str: &str) -> Option<i64> {
 
     for format in &formats {
         if let Ok(dt) = NaiveDateTime::parse_from_str(time_str, format) {
-            return Some(dt.and_utc().timestamp_millis());
+            return Some(dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string());
         }
+    }
+
+    if let Ok(dt) = DateTime::parse_from_rfc3339(time_str) {
+        return Some(dt.naive_local().format("%Y-%m-%d %H:%M:%S%.6f").to_string());
     }
 
     // Try parsing as timestamp
     if let Ok(timestamp) = time_str.parse::<i64>() {
-        return Some(timestamp * 1000); // Convert to milliseconds
+        if let Some(dt) = DateTime::from_timestamp(timestamp, 0) {
+            return Some(dt.naive_utc().format("%Y-%m-%d %H:%M:%S%.6f").to_string());
+        }
     }
 
     None

@@ -105,7 +105,7 @@ fn show_traditional(df: &LazyFrame) {
                 // The `show` command in many tools prints to stdout.
                 // We will write the buffer to stdout.
                 if let Ok(s) = String::from_utf8(buf) {
-                    println!("{s}");
+                    print!("{s}");
                     LogController::debug("Successfully showed DataFrame as CSV to stdout");
                 } else {
                     eprintln!("Error: Could not convert buffer to UTF-8 string");

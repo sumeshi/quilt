@@ -1,4 +1,6 @@
 import unittest
+import os
+import tempfile
 from test_base import QsvTestBase
 
 class TestTimeround(QsvTestBase):
@@ -83,6 +85,40 @@ class TestTimeround(QsvTestBase):
         lines = result.stdout.strip().split('\n')
         self.assertEqual(len(lines), 4)  # Header + 3 data rows
         self.assertEqual(lines[0], "id,date_only,value")
+
+    def test_timeround_with_changetz_output(self):
+        """Test timeround can parse timezone-aware changetz output"""
+        result = self.run_qsv_command(
+            f"load {self.get_fixture_path('simple.csv')} - changetz datetime --from-tz UTC --to-tz Asia/Tokyo - timeround datetime --unit d --output day - select day,col1 - show"
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "\n".join([
+            "day,col1",
+            "2023-01-01,1",
+            "2023-01-01,4",
+            "2023-01-01,7",
+        ]))
+
+    def test_timeround_with_offset_string(self):
+        """Test timeround can parse non-RFC3339 timezone offset strings"""
+        with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False) as f:
+            f.write("datetime,value\n")
+            f.write("2023-01-01 09:15:30 +09:00,1\n")
+            f.write("2023-01-01 10:45:30 +09:00,2\n")
+            path = f.name
+
+        try:
+            result = self.run_qsv_command(
+                f"load {path} - timeround datetime --unit h --output hour - select hour,value - show"
+            )
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stdout.strip(), "\n".join([
+                "hour,value",
+                "2023-01-01 09,1",
+                "2023-01-01 10,2",
+            ]))
+        finally:
+            os.remove(path)
 
 if __name__ == "__main__":
     unittest.main() 
