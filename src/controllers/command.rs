@@ -5,6 +5,7 @@ pub struct Command {
     pub name: String,
     pub args: Vec<String>,
     pub options: HashMap<String, Option<String>>,
+    pub repeated_options: HashMap<String, Vec<String>>,
 }
 impl Command {
     pub fn new(name: String) -> Self {
@@ -12,6 +13,7 @@ impl Command {
             name,
             args: Vec::new(),
             options: HashMap::new(),
+            repeated_options: HashMap::new(),
         }
     }
 }
@@ -106,6 +108,7 @@ fn get_valid_options(command_name: &str) -> HashSet<&'static str> {
             let mut opts = HashSet::new();
             opts.insert("output");
             opts.insert("o");
+            opts.insert("var");
             opts
         }
         _ => HashSet::new(), // unknown command, no validation
@@ -189,13 +192,21 @@ pub fn parse_commands(args: &[String]) -> Vec<Command> {
                         | "batch_size"
                         | "chunk-size"
                         | "chunk_size"
+                        | "var"
                 );
                 if needs_value && i + 1 < args.len() && !args[i + 1].starts_with('-') {
                     // --option value format
                     let value = args[i + 1].clone();
-                    current_command
-                        .options
-                        .insert(option_str.replace('-', "_"), Some(value));
+                    let normalized_key = option_str.replace('-', "_");
+                    if normalized_key == "var" {
+                        current_command
+                            .repeated_options
+                            .entry(normalized_key)
+                            .or_default()
+                            .push(value);
+                    } else {
+                        current_command.options.insert(normalized_key, Some(value));
+                    }
                     i += 2; // Consumed option and its value
                 } else {
                     // It's a flag option
@@ -280,7 +291,14 @@ fn parse_option(cmd: &mut Command, option_str: &str) {
             "o" => "output".to_string(),
             _ => key.replace('-', "_"),
         };
-        cmd.options.insert(final_key, Some(value.to_string()));
+        if final_key == "var" {
+            cmd.repeated_options
+                .entry(final_key)
+                .or_default()
+                .push(value.to_string());
+        } else {
+            cmd.options.insert(final_key, Some(value.to_string()));
+        }
     } else {
         // This is a flag option (e.g., -i, --ignore_case) or a short option passed without '=' that wasn't -s or -n
         // Or it's a key that parse_commands decided should be treated as a flag (e.g. -s at end of args)
@@ -707,16 +725,22 @@ fn print_dumpcache_help() {
 
 fn print_quilt_help() {
     println!("quilt: Execute a quilt (data processing pipeline from YAML)\n");
-    println!("Usage: quilt <config_path> [csv_file_paths...] [-o <output_file>]\n");
+    println!(
+        "Usage: quilt <config_path> [csv_file_paths...] [-o <output_file>] [--var key=value ...]\n"
+    );
     println!("Arguments:");
     println!("  <config_path>    Path to the Quilt YAML configuration file. (Required)");
     println!("  [csv_file_paths...] Optional paths to CSV files to be processed if not specified in YAML's load steps.");
     println!("Options:");
     println!("  -o, --output <output_file>  Optional path to save the result as CSV.");
     println!("                              If not provided, output is printed to console.");
+    println!(
+        "  --var <key=value>           Replace ${{key}} placeholders in the YAML before parsing."
+    );
     println!("Examples:");
     println!("  qsv quilt my_pipeline.yaml");
     println!("  qsv quilt my_pipeline.yaml -o result.csv");
+    println!("  qsv quilt my_pipeline.yaml --var start=2024-01-01 --var end=2024-01-02");
 }
 
 /// Parse batch size string like "512MB", "2GB" into bytes

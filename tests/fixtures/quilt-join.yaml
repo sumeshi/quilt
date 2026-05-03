@@ -1,13 +1,13 @@
-title: 'Join Test Quilt'
-description: 'Test quilt with join operation'
-version: '1.0.0'
-author: 'Test Suite'
+title: "Quilt Join Pipeline"
+description: "Fixture for joining projected event fields"
+version: "1.0.0"
+author: "qsv test suite"
 stages:
   load_stage:
     type: process
     steps:
       load:
-        path: "simple.csv"
+        path: "sample-min.csv"
 
   stage_1:
     type: process
@@ -15,8 +15,8 @@ stages:
     steps:
       select:
         colnames: 
-          - datetime
-          - col1
+          - TimeCreated
+          - EventId
 
   stage_2:
     type: process
@@ -24,8 +24,8 @@ stages:
     steps:
       select:
         colnames: 
-          - datetime
-          - str
+          - TimeCreated
+          - Level
 
   merge_stage:
     type: join
@@ -34,7 +34,7 @@ stages:
       - stage_2
     params:
       how: inner
-      key: datetime
+      key: TimeCreated
       coalesce: true
   
   final_stage:

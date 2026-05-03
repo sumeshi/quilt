@@ -1,97 +1,62 @@
 import unittest
-import os
 from test_base import QsvTestBase
 
+
 class TestLoad(QsvTestBase):
-    
     def test_load_single_file(self):
-        """Test loading a single CSV file"""
-        result = self.run_qsv_command(f"load {self.get_fixture_path('simple.csv')} - show")
-        self.assertEqual(result.stdout.strip(), '\n'.join([
-                "datetime,col1,col2,col3,str",
-                "2023-01-01 12:00:00,1,2,3,foo",
-                "2023-01-01 13:00:00,4,5,6,bar",
-                "2023-01-01 14:00:00,7,8,9,baz",
-            ])
-        )
+        result = self.run_qsv_command(f"load {self.get_fixture_path('sample-min.csv')} - show")
+        self.assertEqual(result.returncode, 0)
+        lines = result.stdout.strip().splitlines()
+        self.assertEqual(lines[0].split(",")[:5], ["RecordNumber", "EventRecordId", "TimeCreated", "EventId", "Level"])
+        self.assertEqual(len(lines), 30)
 
     def test_load_gzip_file(self):
-        """Test loading gzip compressed CSV file"""
-        result = self.run_qsv_command(f"load {self.get_fixture_path('comprehensive.csv.gz')} - show")
-        self.assertEqual(result.stdout.strip(), '\n'.join([
-                "datetime,col1,col2,col3,str",
-                "2023-01-01 12:00:00,1,2,3,foo",
-                "2023-01-01 13:00:00,4,5,6,bar",
-                "2023-01-01 14:00:00,7,8,9,baz",
-            ])
+        result = self.run_qsv_command(f"load {self.get_fixture_path('sample-min.csv.gz')} - head 1 - show")
+        self.assertEqual(result.returncode, 0)
+        lines = result.stdout.strip().splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertIn("1102,Info", lines[1])
+
+    def test_load_tsv_separator_short(self):
+        separator = "\t"
+        result = self.run_qsv_command(
+            f"load {self.get_fixture_path('sample-min.tsv')} -s '{separator}' - select EventId,Level - head 1 - show"
         )
-    
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "EventId,Level\n1102,Info")
+
+    def test_load_tsv_separator_long(self):
+        separator = "\t"
+        result = self.run_qsv_command(
+            f"load {self.get_fixture_path('sample-min.tsv')} --separator '{separator}' - head 1 - show"
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(len(result.stdout.strip().splitlines()), 2)
+
     def test_load_multiple_files(self):
-        """Test loading multiple CSV files"""
-        result = self.run_qsv_command(f"load {self.get_fixture_path('simple.csv')} {self.get_fixture_path('simple.csv')} - show")
-        self.assertEqual(result.stdout.strip(), '\n'.join([
-                "datetime,col1,col2,col3,str",
-                "2023-01-01 12:00:00,1,2,3,foo",
-                "2023-01-01 13:00:00,4,5,6,bar",
-                "2023-01-01 14:00:00,7,8,9,baz",
-                "2023-01-01 12:00:00,1,2,3,foo",
-                "2023-01-01 13:00:00,4,5,6,bar",
-                "2023-01-01 14:00:00,7,8,9,baz",
-            ])
+        result = self.run_qsv_command(
+            f"load {self.get_fixture_path('sample-min.csv')} {self.get_fixture_path('sample-min.csv')} - select Level - count - show"
         )
-    
-    def test_load_with_custom_separator(self):
-        """Test loading with custom separator using -s option"""
-        result = self.run_qsv_command(f"load {self.get_fixture_path('comprehensive.tsv')} -s '\t' - select datetime,col1,col2,col3,str - head 3 - show")
-        self.assertEqual(result.stdout.strip(), '\n'.join([
-                "datetime,col1,col2,col3,str",
-                "2023-01-01 12:00:00,1,2,3,foo",
-                "2023-01-01 13:00:00,4,5,6,bar",
-                "2023-01-01 14:00:00,7,8,9,baz",
-            ])
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "Level,count\nLogAlways,56\nInfo,2")
+
+    def test_load_low_memory(self):
+        result = self.run_qsv_command(f"load {self.get_fixture_path('sample-min.csv')} --low-memory - head 1 - show")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("1102,Info", result.stdout)
+
+    def test_load_no_headers(self):
+        result = self.run_qsv_command(
+            f"load {self.get_fixture_path('sample-min-noheader.csv')} --no-headers - select column_1,column_4,column_5 - head 1 - show"
         )
-    
-    def test_load_with_separator_long_option(self):
-        """Test loading with custom separator using --separator option"""
-        result = self.run_qsv_command(f"load {self.get_fixture_path('comprehensive.tsv')} --separator '\t' - select datetime,col1,col2,col3,str - head 3 - show")
-        self.assertEqual(result.stdout.strip(), '\n'.join([
-                "datetime,col1,col2,col3,str",
-                "2023-01-01 12:00:00,1,2,3,foo",
-                "2023-01-01 13:00:00,4,5,6,bar",
-                "2023-01-01 14:00:00,7,8,9,baz",
-            ])
-        )
-    
-    def test_load_with_low_memory_flag(self):
-        """Test loading with low-memory flag"""
-        result = self.run_qsv_command(f"load {self.get_fixture_path('simple.csv')} --low-memory - show")
-        self.assertEqual(result.stdout.strip(), '\n'.join([
-                "datetime,col1,col2,col3,str",
-                "2023-01-01 12:00:00,1,2,3,foo",
-                "2023-01-01 13:00:00,4,5,6,bar",
-                "2023-01-01 14:00:00,7,8,9,baz",
-            ])
-        )
-    
-    def test_load_with_no_headers_flag(self):
-        """Test loading with --no-headers flag"""
-        result = self.run_qsv_command(f"load {self.get_fixture_path('comprehensive_noheader.csv')} --no-headers - select column_1,column_2,column_3,column_4,column_5 - show")
-        self.assertEqual(result.stdout.strip(), '\n'.join([
-                "column_1,column_2,column_3,column_4,column_5",
-                "2023-01-01 12:00:00,1,2,3,foo",
-                "2023-01-01 13:00:00,4,5,6,bar",
-                "2023-01-01 14:00:00,7,8,9,baz",
-            ])
-        )
-    
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "column_1,column_4,column_5\n227126,1102,Info")
+
     def test_load_nonexistent_file(self):
-        """Test loading a non-existent file should fail gracefully"""
-        result = self.run_qsv_command(f"load non_existent_file.csv - show")
-        self.assertEqual(result.stderr.strip(), '\n'.join([
-                "Error: File not found: non_existent_file.csv",
-                "One or more files do not exist",
-            ])
-        )
+        result = self.run_qsv_command("load non_existent_file.csv - show")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Error: File not found", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

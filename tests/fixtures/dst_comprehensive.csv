@@ -1,7 +1,0 @@
-datetime,timezone,description
-2023-11-05 00:30:00,Los Angeles,Before DST transition
-2023-11-05 01:30:00,Los Angeles,Ambiguous time (1st occurrence)
-2023-11-05 01:45:00,Los Angeles,Ambiguous time (still in overlap)
-2023-11-05 02:30:00,Los Angeles,After DST transition
-2023-03-12 01:30:00,Los Angeles,Non-existent time (spring forward)
-2023-03-12 03:30:00,Los Angeles,After spring forward 

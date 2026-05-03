@@ -8,12 +8,20 @@ const MAX_DISPLAY_ROWS: usize = 8;
 pub fn showtable(df: &LazyFrame) {
     LogController::debug("Applying showtable (display DataFrame as a formatted table)");
 
+    match render_table(df) {
+        Ok(table_output) => println!("{table_output}"),
+        Err(e) => eprintln!("{e}"),
+    }
+}
+
+pub fn render_table(df: &LazyFrame) -> Result<String, String> {
     // Try to estimate the size using limit + head approach to avoid full collection
     let head_df = match df.clone().limit((MAX_DISPLAY_ROWS + 1) as u32).collect() {
         Ok(df) => df,
         Err(e) => {
-            eprintln!("Error: Failed to collect DataFrame for showtable: {e}");
-            return;
+            return Err(format!(
+                "Error: Failed to collect DataFrame for showtable: {e}"
+            ));
         }
     };
 
@@ -33,14 +41,16 @@ pub fn showtable(df: &LazyFrame) {
         .collect();
 
     // Display table size information
+    let mut output = String::new();
     if is_truncated {
-        println!(
+        output.push_str(&format!(
             "shape: ({}+, {}) [showing first {} rows]",
             shape.0, shape.1, MAX_DISPLAY_ROWS
-        );
+        ));
     } else {
-        println!("shape: ({}, {})", shape.0, shape.1);
+        output.push_str(&format!("shape: ({}, {})", shape.0, shape.1));
     }
+    output.push('\n');
 
     let mut table = Table::new();
     table.load_preset(UTF8_FULL);
@@ -72,7 +82,8 @@ pub fn showtable(df: &LazyFrame) {
         table.add_row(truncation_row);
     }
 
-    println!("{table}");
+    output.push_str(&table.to_string());
+    Ok(output)
 }
 
 fn format_anyvalue(val: &AnyValue) -> String {

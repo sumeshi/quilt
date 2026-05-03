@@ -1,4 +1,0 @@
-datetime	col1	col2	col3	str	id	timestamp	value	region	product	sales	category	quarter	json
-2023-01-01 12:00:00	1	2	3	foo	1	2023-01-01 12:34:56	100	North	Laptop	1000	Electronics	Q1	"{""name"":""Alice"",""age"":25,""city"":""Tokyo""}"
-2023-01-01 13:00:00	4	5	6	bar	2	2023-01-01 15:45:30	200	North	Phone	800	Electronics	Q1	"{""product"":""laptop"",""price"":89999,""in_stock"":true}"
-2023-01-01 14:00:00	7	8	9	baz	3	2023-01-01 18:20:15	300	South	Laptop	1200	Electronics	Q1	"{""user"":""Bob"",""score"":95,""active"":false}"

@@ -4,12 +4,18 @@ use comfy_table::{Cell, Table};
 use polars::prelude::*;
 
 pub fn headers(df: &LazyFrame, plain: bool) {
+    match render_headers(df, plain) {
+        Ok(output) => print!("{output}"),
+        Err(e) => eprintln!("{e}"),
+    }
+}
+
+pub fn render_headers(df: &LazyFrame, plain: bool) -> Result<String, String> {
     // Get schema from LazyFrame without collecting
     let schema = match df.clone().collect_schema() {
         Ok(schema) => schema,
         Err(e) => {
-            eprintln!("Error getting schema: {e}");
-            return;
+            return Err(format!("Error getting schema: {e}"));
         }
     };
 
@@ -17,9 +23,7 @@ pub fn headers(df: &LazyFrame, plain: bool) {
     LogController::debug(&format!("Showing headers: {} columns", column_names.len()));
 
     if plain {
-        for name in column_names.iter() {
-            println!("{name}");
-        }
+        Ok(column_names.join("\n") + "\n")
     } else {
         let mut table = Table::new();
         table.load_preset(UTF8_FULL);
@@ -27,6 +31,6 @@ pub fn headers(df: &LazyFrame, plain: bool) {
         for (i, name) in column_names.iter().enumerate() {
             table.add_row(vec![Cell::new(format!("{i:02}")), Cell::new(name)]);
         }
-        println!("{table}");
+        Ok(format!("{table}\n"))
     }
 }

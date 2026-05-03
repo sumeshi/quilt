@@ -640,6 +640,7 @@ fn process_command(controller: &mut DataFrameController, cmd: &Command) {
             };
 
             let output_path_str = cmd.options.get("output").and_then(|o| o.as_deref());
+            let quilt_vars = cmd.repeated_options.get("var").cloned().unwrap_or_default();
 
             // quilt operation is destructive / stateful for the controller for now
             operations::quilters::quilt::quilt(
@@ -647,6 +648,7 @@ fn process_command(controller: &mut DataFrameController, cmd: &Command) {
                 config_path_str,
                 cli_input_files,
                 output_path_str,
+                &quilt_vars,
             );
         }
 

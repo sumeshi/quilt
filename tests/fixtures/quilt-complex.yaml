@@ -1,33 +1,33 @@
-title: 'Complex Data Processing Pipeline'
-description: 'A comprehensive test of quilt functionality'
-version: '0.2.0'
-author: 'Test User <test@example.com>'
+title: "Quilt Complex Pipeline"
+description: "Fixture for a multi-stage quilt transformation pipeline"
+version: "1.0.0"
+author: "qsv test suite"
 stages:
   load_data:
     type: process
     steps:
       load:
-        path: "simple.csv"
+        path: "sample-min.csv"
 
   filter_data:
     type: process
     source: load_data
     steps:
       isin:
-        colname: "col1"
-        values: ["1", "4", "7"]
+        colname: "EventId"
+        values: ["1102", "4688", "4689"]
       
   transform_data:
     type: process
     source: filter_data
     steps:
       renamecol:
-        old_name: "str"
-        new_name: "string_column"
+        old_name: "Level"
+        new_name: "severity"
       sed:
-        colname: "string_column"
-        pattern: "foo"
-        replacement: "FOO"
+        colname: "severity"
+        pattern: "Info"
+        replacement: "Information"
         ignorecase: false
 
   sort_data:
@@ -35,7 +35,7 @@ stages:
     source: transform_data
     steps:
       sort:
-        colnames: ["col1"]
+        colnames: ["EventId"]
         desc: false
 
   final_output:

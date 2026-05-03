@@ -1,13 +1,13 @@
-title: 'Test Data Processing Pipeline - Simple'
-description: 'test pipeline'
-version: '0.1.0'
-author: 'John Doe <john@example.com>'
+title: "Quilt Test Pipeline"
+description: "Fixture for a full join and tail showtable pipeline"
+version: "1.0.0"
+author: "qsv test suite"
 stages:
   load_stage:
     type: process
     steps:
       load:
-        path: "simple.csv"
+        path: "sample-min.csv"
 
   stage_1:
     type: process
@@ -15,8 +15,8 @@ stages:
     steps:
       select:
         colnames: 
-          - datetime
-          - col1
+          - TimeCreated
+          - EventId
 
   stage_2:
     type: process
@@ -24,8 +24,8 @@ stages:
     steps:
       select:
         colnames: 
-          - datetime
-          - col3
+          - TimeCreated
+          - Provider
 
   merge_stage:
     type: join
@@ -34,7 +34,7 @@ stages:
       - stage_2
     params:
       how: full
-      key: datetime
+      key: TimeCreated
       coalesce: true
   
   stage_3:

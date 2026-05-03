@@ -8,6 +8,21 @@ pub fn show(df: &LazyFrame) {
     show_traditional(df);
 }
 
+pub fn render_csv(df: &LazyFrame) -> Result<String, String> {
+    let mut df_collected = df
+        .clone()
+        .collect()
+        .map_err(|e| format!("Failed to collect DataFrame: {e}"))?;
+    let estimated_size = df_collected.height() * 100;
+    let mut buf = Vec::with_capacity(estimated_size);
+    CsvWriter::new(&mut buf)
+        .include_header(true)
+        .with_separator(b',')
+        .finish(&mut df_collected)
+        .map_err(|e| format!("Error writing CSV to buffer: {e}"))?;
+    String::from_utf8(buf).map_err(|e| format!("Could not convert CSV buffer to UTF-8 string: {e}"))
+}
+
 pub fn show_with_batch_size(df: &LazyFrame, batch_size_bytes: usize) {
     LogController::debug(&format!(
         "Showing DataFrame with streaming support (batch size: {}MB)",
@@ -89,33 +104,13 @@ fn show_streaming_internal<W: Write>(
 fn show_traditional(df: &LazyFrame) {
     LogController::debug("Using traditional show method");
 
-    match df.clone().collect() {
-        Ok(mut df_collected) => {
-            // By default, Polars prints a table to stdout
-            // To emulate the previous CSV output, we use CsvWriter
-            // Estimate buffer size based on data size
-            let estimated_size = df_collected.height() * 100; // ~100 bytes per row estimate
-            let mut buf = Vec::with_capacity(estimated_size);
-            if CsvWriter::new(&mut buf)
-                .include_header(true)
-                .with_separator(b',')
-                .finish(&mut df_collected)
-                .is_ok()
-            {
-                // The `show` command in many tools prints to stdout.
-                // We will write the buffer to stdout.
-                if let Ok(s) = String::from_utf8(buf) {
-                    print!("{s}");
-                    LogController::debug("Successfully showed DataFrame as CSV to stdout");
-                } else {
-                    eprintln!("Error: Could not convert buffer to UTF-8 string");
-                }
-            } else {
-                eprintln!("Error writing to buffer");
-            }
+    match render_csv(df) {
+        Ok(csv_output) => {
+            print!("{csv_output}");
+            LogController::debug("Successfully showed DataFrame as CSV to stdout");
         }
         Err(e) => {
-            eprintln!("Error: Failed to collect DataFrame: {e}");
+            eprintln!("Error: {e}");
             eprintln!("Tip: For very large files, the streaming approach should have worked.");
             eprintln!("      Try using 'head <n>' to limit the number of rows.");
         }

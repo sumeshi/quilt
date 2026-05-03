@@ -1,25 +1,21 @@
 import unittest
 from test_base import QsvTestBase
 
+
 class TestShowtable(QsvTestBase):
-    
+    fixture = "sample-min.csv"
+
     def test_showtable_basic(self):
-        """Test basic showtable functionality"""
-        self.assertTrue(
-            self.run_qsv_command(f"load {self.get_fixture_path('simple.csv')} - showtable").stdout.strip(),
-            "\n".join([
-                "shape: (3, 5),"
-                "┌─────────────────────┬──────┬──────┬──────┬─────┐,"
-                "│ datetime            ┆ col1 ┆ col2 ┆ col3 ┆ str │,"
-                "╞═════════════════════╪══════╪══════╪══════╪═════╡,"
-                "│ 2023-01-01 12:00:00 ┆ 1    ┆ 2    ┆ 3    ┆ foo │,"
-                "├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌┼╌╌╌╌╌╌┼╌╌╌╌╌╌┼╌╌╌╌╌┤,"
-                "│ 2023-01-01 13:00:00 ┆ 4    ┆ 5    ┆ 6    ┆ bar │,"
-                "├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌┼╌╌╌╌╌╌┼╌╌╌╌╌╌┼╌╌╌╌╌┤,"
-                "│ 2023-01-01 14:00:00 ┆ 7    ┆ 8    ┆ 9    ┆ baz │,"
-                "└─────────────────────┴──────┴──────┴──────┴─────┘,"
-            ])
-        )
-    
+        result = self.run_qsv_command(f"load {self.get_fixture_path(self.fixture)} - showtable")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("shape: (8+, 27)", result.stdout)
+
+    def test_showtable_with_select(self):
+        result = self.run_qsv_command(f"load {self.get_fixture_path(self.fixture)} - select EventId,Level - showtable")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("EventId", result.stdout)
+        self.assertIn("Level", result.stdout)
+
+
 if __name__ == "__main__":
-    unittest.main() 
+    unittest.main()

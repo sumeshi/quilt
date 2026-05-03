@@ -1,38 +1,23 @@
 import unittest
 from test_base import QsvTestBase
 
+
 class TestStats(QsvTestBase):
-    
+    fixture = "sample-min.csv"
+
     def test_stats_basic(self):
-        """Test basic stats functionality"""
-        self.assertTrue(
-            self.run_qsv_command(f"load {self.get_fixture_path('simple.csv')} - stats").stdout.strip(),
-            "\n".join([
-                "┌──────────────┬─────────────────────┬────────┬────────┬────────┬─────┐",
-                "│ Statistic    ┆ datetime            ┆ col1   ┆ col2   ┆ col3   ┆ str │",
-                "╞══════════════╪═════════════════════╪════════╪════════╪════════╪═════╡",
-                "│ count        ┆ 3                   ┆ 3      ┆ 3      ┆ 3      ┆ 3   │",
-                "├╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌┤",
-                "│ null_count   ┆ 0                   ┆ 0      ┆ 0      ┆ 0      ┆ 0   │",
-                "├╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌┤",
-                "│ datatype     ┆ str                 ┆ i64    ┆ i64    ┆ i64    ┆ str │",
-                "├╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌┤",
-                "│ mean         ┆ -                   ┆ 4.0000 ┆ 5.0000 ┆ 6.0000 ┆ -   │",
-                "├╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌┤",
-                "│ std          ┆ -                   ┆ 3.0000 ┆ 3.0000 ┆ 3.0000 ┆ -   │",
-                "├╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌┤",
-                "│ min          ┆ 2023-01-01 12:00:00 ┆ 1      ┆ 2      ┆ 3      ┆ bar │",
-                "├╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌┤",
-                "│ 25%          ┆ -                   ┆ 2.5000 ┆ 3.5000 ┆ 4.5000 ┆ -   │",
-                "├╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌┤",
-                "│ 50% (median) ┆ -                   ┆ 4.0000 ┆ 5.0000 ┆ 6.0000 ┆ -   │",
-                "├╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌┤",
-                "│ 75%          ┆ -                   ┆ 5.5000 ┆ 6.5000 ┆ 7.5000 ┆ -   │",
-                "├╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌┤",
-                "│ max          ┆ 2023-01-01 14:00:00 ┆ 7      ┆ 8      ┆ 9      ┆ foo │",
-                "└──────────────┴─────────────────────┴────────┴────────┴────────┴─────┘",
-            ])
-        )
+        result = self.run_qsv_command(f"load {self.get_fixture_path(self.fixture)} - stats")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("RecordNumber", result.stdout)
+        self.assertIn("min", result.stdout)
+        self.assertIn("max", result.stdout)
+
+    def test_stats_selected_columns(self):
+        result = self.run_qsv_command(f"load {self.get_fixture_path(self.fixture)} - select EventId,Level - stats")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("EventId", result.stdout)
+        self.assertIn("Level", result.stdout)
+
 
 if __name__ == "__main__":
-    unittest.main() 
+    unittest.main()

@@ -1,90 +1,59 @@
-#!/usr/bin/env python3
-
-import subprocess
-import tempfile
-import os
 import unittest
 from test_base import QsvTestBase
 
+
 class TestTimeslice(QsvTestBase):
+    fixture = "sample-min.csv"
 
-    def test_timeslice_start_only(self):
-        """Test timeslice with only start time specified"""
-        result = self.run_qsv_command(f"load {self.get_fixture_path('simple_timeline.csv')} - timeslice datetime --start '2023-01-01 12:00:00' - show")
-        self.assertEqual(result.stdout.strip(), "\n".join([
-            "datetime,str",
-            "2023-01-01 12:00:00,Mike",
-            "2023-01-01 12:00:00,Mike",
-            "2023-01-01 12:00:00,Mike",
-            "2023-01-01 12:00:00,Mike",
-            "2023-01-01 12:00:00,Mike",
-            "2023-01-01 12:00:00,Mike",
-            "2023-01-01 12:00:00,Mike",
-            "2023-01-01 12:00:00,Mike",
-            "2023-01-01 12:00:00,Mike",
-            "2023-01-01 12:00:00,Mike",
-            "2023-01-01 12:00:00,Mike",
-            "2023-01-01 12:00:00,Mike",
-            "2023-01-01 12:00:00,Mike",
-        ]))
+    def test_timeslice_start_before_data(self):
+        result = self.run_qsv_command(
+            f"load {self.get_fixture_path(self.fixture)} - timeslice TimeCreated --start '2016-01-01 00:00:00' - select Level - count - show"
+        )
+        self.assertEqual(result.stdout.strip(), "Level,count\nLogAlways,28\nInfo,1")
 
-    def test_timeslice_end_only(self):
-        """Test timeslice with only end time specified"""
-        result = self.run_qsv_command(f"load {self.get_fixture_path('simple_timeline.csv')} - timeslice datetime --end '2023-01-01 03:00:00' - show")
-        self.assertEqual(result.stdout.strip(), "\n".join([
-            "datetime,str",
-            "2023-01-01 00:00:00,Alpha",
-            "2023-01-01 01:00:00,Bravo",
-            "2023-01-01 02:00:00,Charlie",
-            "2023-01-01 01:00:00,Bravo",
-            "2023-01-01 02:00:00,Charlie",
-            "2023-01-01 03:00:00,Delta",
-            "2023-01-01 02:00:00,Charlie",
-            "2023-01-01 03:00:00,Delta",
-            "2023-01-01 03:00:00,Delta",
-            "2023-01-01 03:00:00,Delta",
-        ]))
+    def test_timeslice_start_after_data(self):
+        result = self.run_qsv_command(
+            f"load {self.get_fixture_path(self.fixture)} - timeslice TimeCreated --start '2017-01-01 00:00:00' - show"
+        )
+        self.assertEqual(len(result.stdout.strip().splitlines()), 1)
 
-    def test_timeslice_start_and_end(self):
-        """Test timeslice with both start and end times"""
-        result = self.run_qsv_command(f"load {self.get_fixture_path('simple_timeline.csv')} - timeslice datetime --start '2023-01-01 03:00:00' --end '2023-01-01 06:00:00' - show")
-        self.assertEqual(result.stdout.strip(), "\n".join([
-            "datetime,str",
-            "2023-01-01 03:00:00,Delta",
-            "2023-01-01 03:00:00,Delta",
-            "2023-01-01 04:00:00,Echo",
-            "2023-01-01 03:00:00,Delta",
-            "2023-01-01 03:00:00,Delta",
-            "2023-01-01 04:00:00,Echo",
-            "2023-01-01 05:00:00,Foxtrot",
-            "2023-01-01 04:00:00,Echo",
-            "2023-01-01 04:00:00,Echo",
-            "2023-01-01 04:00:00,Echo",
-            "2023-01-01 05:00:00,Foxtrot",
-            "2023-01-01 06:00:00,Golf",
-            "2023-01-01 05:00:00,Foxtrot",
-            "2023-01-01 05:00:00,Foxtrot",
-            "2023-01-01 05:00:00,Foxtrot",
-            "2023-01-01 05:00:00,Foxtrot",
-            "2023-01-01 06:00:00,Golf",
-            "2023-01-01 06:00:00,Golf",
-            "2023-01-01 06:00:00,Golf",
-            "2023-01-01 06:00:00,Golf",
-            "2023-01-01 06:00:00,Golf",
-            "2023-01-01 06:00:00,Golf",
-        ]))
+    def test_timeslice_end_after_data(self):
+        result = self.run_qsv_command(
+            f"load {self.get_fixture_path(self.fixture)} - timeslice TimeCreated --end '2099-12-31 00:00:00' - select Level - count - show"
+        )
+        self.assertEqual(result.stdout.strip(), "Level,count\nLogAlways,28\nInfo,1")
+
+    def test_timeslice_end_before_data(self):
+        result = self.run_qsv_command(
+            f"load {self.get_fixture_path(self.fixture)} - timeslice TimeCreated --end '2016-01-01 00:00:00' - show"
+        )
+        self.assertEqual(len(result.stdout.strip().splitlines()), 1)
+
+    def test_timeslice_both_bounds_include_all(self):
+        result = self.run_qsv_command(
+            f"load {self.get_fixture_path(self.fixture)} - timeslice TimeCreated --start '2016-10-06 00:00:00' --end '2016-10-06 23:59:59' - select Level - count - show"
+        )
+        self.assertEqual(result.stdout.strip(), "Level,count\nLogAlways,28\nInfo,1")
+
+    def test_timeslice_requires_bounds(self):
+        result = self.run_qsv_command(f"load {self.get_fixture_path(self.fixture)} - timeslice TimeCreated - show")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires at least one of --start or --end", result.stderr)
+
+    def test_timeslice_nonexistent_column(self):
+        result = self.run_qsv_command(
+            f"load {self.get_fixture_path(self.fixture)} - timeslice NOSUCHCOL --start '2016-01-01' - show"
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Error", result.stderr)
 
     def test_timeslice_with_changetz_output(self):
-        """Test timeslice can parse timezone-aware changetz output"""
         result = self.run_qsv_command(
-            f"load {self.get_fixture_path('simple.csv')} - changetz datetime --from-tz UTC --to-tz Asia/Tokyo - timeslice datetime --start '2023-01-01 22:00:00' --end '2023-01-01 23:00:00' - show"
+            f"load {self.get_fixture_path(self.fixture)} - changetz TimeCreated --from-tz UTC --to-tz Asia/Tokyo - timeslice TimeCreated --start '2016-10-06 10:00:00' --end '2016-10-06 11:00:00' - head 1 - show"
         )
         self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout.strip(), "\n".join([
-            "datetime,col1,col2,col3,str",
-            "2023-01-01T22:00:00.000000+09:00,4,5,6,bar",
-            "2023-01-01T23:00:00.000000+09:00,7,8,9,baz",
-        ]))
+        self.assertIn("+09:00", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

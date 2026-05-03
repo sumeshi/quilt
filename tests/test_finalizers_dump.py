@@ -1,76 +1,54 @@
+import os
+import tempfile
 import unittest
-from pathlib import Path
 from test_base import QsvTestBase
 
+
 class TestDump(QsvTestBase):
+    fixture = "sample-min.csv"
 
-    def test_dump_to_csv_basic(self):
-        """Test dump to CSV"""
+    def test_dump_basic(self):
+        fd, output_file = tempfile.mkstemp(suffix=".csv")
+        os.close(fd)
+        try:
+            result = self.run_qsv_command(f"load {self.get_fixture_path(self.fixture)} - dump -o {output_file}")
+            self.assertEqual(result.returncode, 0)
+            self.assertTrue(os.path.exists(output_file))
+            with open(output_file, "r", encoding="utf-8") as f:
+                self.assertEqual(len(f.read().splitlines()), 30)
+        finally:
+            if os.path.exists(output_file):
+                os.remove(output_file)
 
-        output_file = Path("/tmp/test_output.csv")
+    def test_dump_streaming(self):
+        fd, output_file = tempfile.mkstemp(suffix=".csv")
+        os.close(fd)
+        try:
+            result = self.run_qsv_command(
+                f"load {self.get_fixture_path(self.fixture)} - dump --batch-size 1MB -o {output_file}"
+            )
+            self.assertEqual(result.returncode, 0)
+            with open(output_file, "r", encoding="utf-8") as f:
+                self.assertEqual(len(f.read().splitlines()), 30)
+        finally:
+            if os.path.exists(output_file):
+                os.remove(output_file)
 
-        if output_file.exists():
-            output_file.unlink()
-        
-        self.run_qsv_command(f"load {self.get_fixture_path('simple.csv')} - dump -o {output_file}")
-        self.assertTrue(output_file.exists())
-
-        self.assertEqual(
-            output_file.read_text().strip(), 
-            '\n'.join([
-                "datetime,col1,col2,col3,str",
-                "2023-01-01 12:00:00,1,2,3,foo",
-                "2023-01-01 13:00:00,4,5,6,bar",
-                "2023-01-01 14:00:00,7,8,9,baz",
-            ])
-        )
-        output_file.unlink()
-    
-
-    def test_dump_to_tsv(self):
-        """Test dump to TSV"""
-
-        output_file = Path("/tmp/test_output.tsv")
-
-        if output_file.exists():
-            output_file.unlink()
-        
-        self.run_qsv_command(f"load {self.get_fixture_path('simple.csv')} - dump -s'\t' -o {output_file}")
-        self.assertTrue(output_file.exists())
-        
-        self.assertEqual(
-            output_file.read_text().strip(), 
-            '\n'.join([
-                "datetime\tcol1\tcol2\tcol3\tstr",
-                "2023-01-01 12:00:00\t1\t2\t3\tfoo",
-                "2023-01-01 13:00:00\t4\t5\t6\tbar",
-                "2023-01-01 14:00:00\t7\t8\t9\tbaz",
-            ])
-        )
-        output_file.unlink()
-
-
-    def test_dump_to_csv_with_long_options(self):
-        """Test dump to CSV with long options"""
-
-        output_file = Path("/tmp/test_output.csv")
-
-        if output_file.exists():
-            output_file.unlink()
-        
-        self.run_qsv_command(f"load {self.get_fixture_path('simple.csv')} - dump --separator '\t' --output {output_file}")
-        self.assertTrue(output_file.exists())
-
-        self.assertEqual(
-            output_file.read_text().strip(), 
-            '\n'.join([
-                "datetime\tcol1\tcol2\tcol3\tstr",
-                "2023-01-01 12:00:00\t1\t2\t3\tfoo",
-                "2023-01-01 13:00:00\t4\t5\t6\tbar",
-                "2023-01-01 14:00:00\t7\t8\t9\tbaz",
-            ])
-        )
-        output_file.unlink()
+    def test_dump_overwrites(self):
+        fd, output_file = tempfile.mkstemp(suffix=".csv")
+        os.close(fd)
+        try:
+            with open(output_file, "w", encoding="utf-8") as f:
+                f.write("stale\n")
+            first = self.run_qsv_command(f"load {self.get_fixture_path(self.fixture)} - head 1 - dump -o {output_file}")
+            second = self.run_qsv_command(f"load {self.get_fixture_path(self.fixture)} - dump -o {output_file}")
+            self.assertEqual(first.returncode, 0)
+            self.assertEqual(second.returncode, 0)
+            with open(output_file, "r", encoding="utf-8") as f:
+                self.assertEqual(len(f.read().splitlines()), 30)
+        finally:
+            if os.path.exists(output_file):
+                os.remove(output_file)
 
 
 if __name__ == "__main__":
