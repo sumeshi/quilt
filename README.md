@@ -1,4 +1,4 @@
-# qsv
+# Quilter-CSV
 [![MIT License](http://img.shields.io/badge/license-MIT-blue.svg?style=flat)](LICENSE)
 [![CI/CD Pipeline](https://github.com/sumeshi/qsv-rs/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/sumeshi/qsv-rs/actions/workflows/release.yml)
 
