@@ -9,6 +9,7 @@ mod operations;
 use controllers::command::{
     parse_batch_size, parse_commands, print_chainable_help, print_help, Command,
 };
+use controllers::csv::separator_byte;
 use controllers::dataframe::DataFrameController;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -705,7 +706,7 @@ fn process_command(controller: &mut DataFrameController, cmd: &Command) {
                 .get("separator")
                 .or_else(|| cmd.options.get("s"))
                 .and_then(|v| v.as_ref())
-                .and_then(|s| s.chars().next())
+                .map(|s| separator_byte(s) as char)
                 .unwrap_or(',');
 
             if let Some(batch_size_str) = cmd.options.get("batch_size").and_then(|v| v.as_ref()) {

@@ -19,8 +19,7 @@ target/
 python/
 *.pyc
 
-output.csv
-result.csv
-result.tsv
 .env
 .gitignore
+.claude
+TASKS.md

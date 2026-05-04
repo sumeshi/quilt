@@ -40,6 +40,15 @@ class TestLoad(QsvTestBase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout.strip(), "Level,count\nLogAlways,56\nInfo,2")
 
+    def test_load_glob_pattern(self):
+        result = self.run_qsv_command(
+            "load 'tests/fixtures/sample-min.c*sv' - head 1 - show"
+        )
+        self.assertEqual(result.returncode, 0)
+        lines = result.stdout.strip().splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(lines[0].split(",")[:3], ["RecordNumber", "EventRecordId", "TimeCreated"])
+
     def test_load_low_memory(self):
         result = self.run_qsv_command(f"load {self.get_fixture_path('sample-min.csv')} --low-memory - head 1 - show")
         self.assertEqual(result.returncode, 0)
@@ -56,6 +65,11 @@ class TestLoad(QsvTestBase):
         result = self.run_qsv_command("load non_existent_file.csv - show")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Error: File not found", result.stderr)
+
+    def test_load_unmatched_glob_pattern(self):
+        result = self.run_qsv_command("load 'tests/fixtures/does-not-exist-*.csv' - show")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("No files found matching pattern", result.stderr)
 
 
 if __name__ == "__main__":

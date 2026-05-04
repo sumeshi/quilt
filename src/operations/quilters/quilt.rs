@@ -620,11 +620,7 @@ fn execute_steps(
     stage_name: &str,
     steps: &Value,
     mut stage_output_df: Option<LazyFrame>,
-    config_path: &Path,
-    cli_input_files: Option<&Vec<PathBuf>>,
-    chainable_ops: &HashMap<&'static str, ChainableOperation>,
-    finalizer_ops: &HashMap<&'static str, FinalizerOperation>,
-    finalizer_only: bool,
+    step_context: &ExecuteStepContext<'_>,
 ) -> Result<Option<LazyFrame>, String> {
     let parsed_steps = parse_steps(steps)?;
 
@@ -641,7 +637,7 @@ fn execute_steps(
         }
 
         if command_name == "load" {
-            if finalizer_only {
+            if step_context.finalizer_only {
                 return Err(format!(
                     "Output stage '{stage_name}' cannot contain a 'load' step."
                 ));
@@ -649,8 +645,8 @@ fn execute_steps(
             let loaded_df = execute_load_step(
                 stage_name,
                 &command_args_val,
-                config_path,
-                cli_input_files,
+                step_context.config_path,
+                step_context.cli_input_files,
                 &stage_output_df,
             )?;
             if let Some(new_df) = loaded_df {
@@ -663,8 +659,8 @@ fn execute_steps(
             continue;
         }
 
-        if let Some(operation) = chainable_ops.get(command_name) {
-            if finalizer_only {
+        if let Some(operation) = step_context.chainable_ops.get(command_name) {
+            if step_context.finalizer_only {
                 return Err(format!(
                     "Output stage '{stage_name}' cannot contain chainable step '{command_name}'."
                 ));
@@ -676,7 +672,12 @@ fn execute_steps(
         }
 
         if let Some(ref df) = stage_output_df {
-            run_finalizer(command_name, df, &command_args_val, finalizer_ops)?;
+            run_finalizer(
+                command_name,
+                df,
+                &command_args_val,
+                step_context.finalizer_ops,
+            )?;
             continue;
         }
 
@@ -686,6 +687,14 @@ fn execute_steps(
     }
 
     Ok(stage_output_df)
+}
+
+struct ExecuteStepContext<'a> {
+    config_path: &'a Path,
+    cli_input_files: Option<&'a Vec<PathBuf>>,
+    chainable_ops: &'a HashMap<&'static str, ChainableOperation>,
+    finalizer_ops: &'a HashMap<&'static str, FinalizerOperation>,
+    finalizer_only: bool,
 }
 
 fn execute_concat_stage(
@@ -870,8 +879,8 @@ fn join_pair(
         JoinKeySpec::Cross => unreachable!("cross join handled earlier"),
     };
 
-    let left_on_exprs: Vec<_> = left_on.iter().map(|name| col(name)).collect();
-    let right_on_exprs: Vec<_> = right_on.iter().map(|name| col(name)).collect();
+    let left_on_exprs: Vec<_> = left_on.iter().map(col).collect();
+    let right_on_exprs: Vec<_> = right_on.iter().map(col).collect();
 
     LogController::debug(&format!(
         "Joining stage '{stage_name}' with keys left={left_on:?} right={right_on:?}"
@@ -1012,6 +1021,20 @@ pub fn quilt(
             .as_ref()
             .and_then(|source_name| stage_results.get(source_name))
             .cloned();
+        let process_step_context = ExecuteStepContext {
+            config_path,
+            cli_input_files: cli_input_files.as_ref(),
+            chainable_ops: &chainable_ops,
+            finalizer_ops: &finalizer_ops,
+            finalizer_only: false,
+        };
+        let output_step_context = ExecuteStepContext {
+            config_path,
+            cli_input_files: cli_input_files.as_ref(),
+            chainable_ops: &chainable_ops,
+            finalizer_ops: &finalizer_ops,
+            finalizer_only: true,
+        };
 
         let stage_output_df = match stage_config.stage_type.as_str() {
             "process" => {
@@ -1020,11 +1043,7 @@ pub fn quilt(
                         &stage_name,
                         steps,
                         current_stage_input_df.clone(),
-                        config_path,
-                        cli_input_files.as_ref(),
-                        &chainable_ops,
-                        &finalizer_ops,
-                        false,
+                        &process_step_context,
                     ) {
                         Ok(df) => df,
                         Err(e) => {
@@ -1051,11 +1070,7 @@ pub fn quilt(
                     &stage_name,
                     steps,
                     current_stage_input_df.clone(),
-                    config_path,
-                    cli_input_files.as_ref(),
-                    &chainable_ops,
-                    &finalizer_ops,
-                    true,
+                    &output_step_context,
                 ) {
                     Ok(df) => df,
                     Err(e) => {
@@ -1100,11 +1115,7 @@ pub fn quilt(
                         &stage_name,
                         steps,
                         Some(input_df.clone()),
-                        config_path,
-                        cli_input_files.as_ref(),
-                        &chainable_ops,
-                        &finalizer_ops,
-                        false,
+                        &process_step_context,
                     ) {
                         Ok(df) => df,
                         Err(e) => {

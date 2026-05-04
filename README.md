@@ -1,4 +1,4 @@
-# Quilter-CSV
+# qsv
 [![MIT License](http://img.shields.io/badge/license-MIT-blue.svg?style=flat)](LICENSE)
 [![CI/CD Pipeline](https://github.com/sumeshi/qsv-rs/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/sumeshi/qsv-rs/actions/workflows/release.yml)
 
@@ -42,7 +42,7 @@ This command:
 
 ### Command Structure
 
-Quilter-CSV commands are composed of three types of steps:
+qsv commands are composed of three types of steps:
 
 - **Initializer**: Loads data (e.g., `load`)
 - **Chainable**: Transforms or filters data (e.g., `select`, `grep`, `sort`, etc.)
@@ -76,10 +76,10 @@ Load one or more CSV or Parquet files.
 
 | Parameter     | Type        | Default | Description                                      |
 |---------------|-------------|---------|--------------------------------------------------|
-| path          | list[str] |         | One or more paths to CSV or Parquet files. Glob patterns are supported. Cannot mix CSV and Parquet files in the same command. |
+| path          | list[str] |         | One or more paths to CSV or Parquet files. Quoted glob patterns such as `"logs/*.tsv"` are supported. Cannot mix CSV and Parquet files in the same command. |
 | -s, --separator | str       | `,`     | Field separator character (CSV files only).     |
 | --low-memory  | flag    | `false` | Enable low-memory mode for very large files (CSV files only). |
-| --no-headers  | flag    | `false` | Treat the first row as data, not headers (CSV files only). When enabled, columns will be named automatically (column_0, column_1, etc.). |
+| --no-headers  | flag    | `false` | Treat the first row as data, not headers (CSV files only). When enabled, columns will be named automatically (`column_1`, `column_2`, etc.). |
 | --chunk-size  | int     | (auto)  | Number of rows to read per chunk (CSV files only). Controls memory usage during file processing. |
 
 **Environment Variables:**
@@ -91,8 +91,8 @@ Example:
 $ qsv load data.csv
 $ qsv load data.csv.gz
 $ qsv load data1.csv data2.csv data3.csv
-$ qsv load "logs/*.tsv" -s \t
-$ qsv load logs/*.tsv --separator=\t
+$ qsv load "logs/*.tsv" -s $'\t'
+$ qsv load "logs/*.tsv" --separator=$'\t'
 $ qsv load data.csv --low-memory
 $ qsv load data.csv --no-headers
 $ qsv load data.csv --chunk-size 50000
@@ -404,7 +404,7 @@ Creates grouped aggregations over row and column keys.
 | --rows | str |         | Comma-separated list of columns for row grouping. Optional. |
 | --cols | str |         | Comma-separated list of columns for column grouping. Optional. |
 | --values | str |         | Column to aggregate values from. Required. |
-| --agg | str |         | Aggregation function: `sum`, `mean`, `count`, `min`, `max`, `median`, `std`. Optional (default behavior depends on implementation). |
+| --agg | str |         | Aggregation function: `sum`, `mean`, `count`, `min`, `max`, `median`, `std`. Optional (default: `sum`). |
 
 At least one of `--rows` or `--cols` must be specified. This currently returns a long-form grouped aggregation over the requested row and column keys, not a wide Excel-style cross-tabulation table.
 

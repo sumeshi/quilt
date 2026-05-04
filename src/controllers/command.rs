@@ -194,7 +194,12 @@ pub fn parse_commands(args: &[String]) -> Vec<Command> {
                         | "chunk_size"
                         | "var"
                 );
-                if needs_value && i + 1 < args.len() && !args[i + 1].starts_with('-') {
+                let next_arg_is_value = if i + 1 < args.len() {
+                    !args[i + 1].starts_with('-') || (option_str == "output" && args[i + 1] == "-")
+                } else {
+                    false
+                };
+                if needs_value && next_arg_is_value {
                     // --option value format
                     let value = args[i + 1].clone();
                     let normalized_key = option_str.replace('-', "_");
@@ -250,10 +255,15 @@ pub fn parse_commands(args: &[String]) -> Vec<Command> {
             }
             // Standard short option handling (e.g. -s value, or -f flag)
             let opt_char_str = if arg.len() >= 2 { &arg[1..2] } else { "" }; // Get the char e.g. "s"
+            let next_arg_is_value = if i + 1 < args.len() {
+                !args[i + 1].starts_with('-') || (opt_char_str == "o" && args[i + 1] == "-")
+            } else {
+                false
+            };
             if (opt_char_str == "s" || opt_char_str == "n" || opt_char_str == "o") && // It's -s, -n, or -o
                i + 1 < args.len() && // Next argument exists
-               !args[i+1].starts_with('-')
-            // Next argument is not another option
+               next_arg_is_value
+            // Next argument should be treated as the value
             {
                 let value = args[i + 1].clone();
                 let full_key = match opt_char_str {

@@ -14,7 +14,7 @@ pub fn dump(df: &LazyFrame, output_path_opt: Option<&str>, separator: char) {
 
     if output_path_str == "-" {
         eprintln!("Error: The 'dump' command requires a file path. To print to stdout, use the 'show' command instead.");
-        return;
+        std::process::exit(1);
     }
     LogController::debug(&format!("Dumping DataFrame to CSV: {output_path_str}"));
     dump_traditional(df, &output_path_str, separator);
@@ -33,7 +33,7 @@ pub fn dump_with_batch_size(
 
     if output_path_str == "-" {
         eprintln!("Error: The 'dump' command requires a file path. To print to stdout, use the 'show' command instead.");
-        return;
+        std::process::exit(1);
     }
 
     LogController::debug(&format!(
@@ -66,6 +66,7 @@ pub fn dump_with_batch_size(
                 output_path.display(),
                 e
             );
+            std::process::exit(1);
         }
     }
 }
@@ -143,7 +144,7 @@ fn dump_traditional(df: &LazyFrame, output_path_str: &str, separator: char) {
             eprintln!("Error: Failed to collect DataFrame for dumping: {e}");
             eprintln!("Tip: For very large files, the streaming approach should have worked.");
             eprintln!("      Try reducing data size with 'head', 'select', or other filters.");
-            return;
+            std::process::exit(1);
         }
     };
 
@@ -159,12 +160,13 @@ fn dump_traditional(df: &LazyFrame, output_path_str: &str, separator: char) {
                 output_path.display(),
                 e
             );
-            return;
+            std::process::exit(1);
         }
     };
 
     if let Err(e) = result {
         eprintln!("Error writing CSV to '{output_path_str}': {e}");
+        std::process::exit(1);
     } else {
         LogController::info(&format!("Successfully dumped to: {output_path_str}"));
     }

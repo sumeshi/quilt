@@ -1,5 +1,4 @@
 use crate::controllers::log::LogController;
-use glob::glob;
 use polars::prelude::*;
 use rayon::prelude::*; // Re-enabled for parallel processing
 use std::path::{Path, PathBuf};
@@ -9,7 +8,7 @@ const PARALLEL_THRESHOLD: usize = 2; // Minimum files to use parallel processing
 const LARGE_FILE_THRESHOLD: u64 = 100 * 1024 * 1024; // 100MB threshold for large files
 const GZIP_BUFFER_SIZE: usize = 16 * 1024 * 1024; // 16MB buffer for gzip (increased from 8MB)
 
-fn separator_byte(separator: &str) -> u8 {
+pub fn separator_byte(separator: &str) -> u8 {
     let mut chars = separator.chars();
     match (chars.next(), chars.next()) {
         (Some(ch), None) if ch.is_ascii() => ch as u8,
@@ -108,12 +107,7 @@ impl CsvController {
         let _ = separator_byte(separator);
         if self.paths.len() == 1 {
             let path = &self.paths[0];
-            let path_str = path.to_string_lossy();
-            if path_str.contains('*') || path_str.contains('?') || path_str.contains('[') {
-                self.handle_glob_pattern(path, separator, low_memory, no_headers, chunk_size)
-            } else {
-                self.read_csv_file(path, separator, low_memory, no_headers, chunk_size)
-            }
+            self.read_csv_file(path, separator, low_memory, no_headers, chunk_size)
         } else {
             self.concat_csv_files(separator, low_memory, no_headers, chunk_size)
         }
@@ -317,41 +311,5 @@ impl CsvController {
             eprintln!("Error concatenating CSV files: {e}");
             std::process::exit(1);
         })
-    }
-    fn handle_glob_pattern(
-        &self,
-        pattern: &Path,
-        separator: &str,
-        low_memory: bool,
-        no_headers: bool,
-        chunk_size: Option<usize>,
-    ) -> LazyFrame {
-        let pattern_str = pattern.to_string_lossy();
-        let mut paths = Vec::with_capacity(16); // Start with reasonable capacity for glob results
-        match glob(&pattern_str) {
-            Ok(entries) => {
-                for entry in entries {
-                    match entry {
-                        Ok(path) => paths.push(path),
-                        Err(e) => LogController::warn(&format!("Error with glob pattern: {e}")),
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("Invalid glob pattern '{pattern_str}': {e}");
-                std::process::exit(1);
-            }
-        }
-        if paths.is_empty() {
-            eprintln!("No files found matching pattern: {pattern_str}");
-            std::process::exit(1);
-        }
-        LogController::debug(&format!(
-            "Found {} files matching pattern: {}",
-            paths.len(),
-            pattern_str
-        ));
-        let controller = CsvController::new(&paths);
-        controller.get_dataframe(separator, low_memory, no_headers, chunk_size)
     }
 }

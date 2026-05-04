@@ -146,7 +146,9 @@ pub fn parse_colon_range(range_str: &str, available_columns: &[String]) -> Vec<S
                 ));
             }
             (None, _) => {
-                eprintln!("Error: Column '{start_col}' not found in DataFrame for select operation");
+                eprintln!(
+                    "Error: Column '{start_col}' not found in DataFrame for select operation"
+                );
                 std::process::exit(1);
             }
             (_, None) => {
