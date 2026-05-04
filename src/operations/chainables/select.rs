@@ -104,9 +104,13 @@ fn parse_numeric_range(range_str: &str, available_columns: &[String]) -> Vec<Str
         let end_str = end_str.trim();
         if let (Ok(start_idx), Ok(end_idx)) = (start_str.parse::<usize>(), end_str.parse::<usize>())
         {
+            if start_idx < 1 || end_idx < 1 {
+                eprintln!("Error: Column indices are 1-based. Got index 0 in range '{range_str}'.");
+                std::process::exit(1);
+            }
             // Convert 1-based indices to 0-based
-            let start_zero_based = if start_idx > 0 { start_idx - 1 } else { 0 };
-            let end_zero_based = if end_idx > 0 { end_idx - 1 } else { 0 };
+            let start_zero_based = start_idx - 1;
+            let end_zero_based = end_idx - 1;
             if start_zero_based < available_columns.len()
                 && end_zero_based < available_columns.len()
                 && start_zero_based <= end_zero_based
@@ -129,26 +133,31 @@ pub fn parse_colon_range(range_str: &str, available_columns: &[String]) -> Vec<S
     if let Some((start_col, end_col)) = range_str.split_once(':') {
         let start_col = start_col.trim();
         let end_col = end_col.trim();
-        // Find indices of start and end columns
-        if let (Some(start_idx), Some(end_idx)) = (
-            available_columns.iter().position(|c| c == start_col),
-            available_columns.iter().position(|c| c == end_col),
-        ) {
-            if start_idx <= end_idx {
-                return available_columns[start_idx..=end_idx].to_vec();
-            } else {
+        let start_idx = available_columns.iter().position(|c| c == start_col);
+        let end_idx = available_columns.iter().position(|c| c == end_col);
+
+        match (start_idx, end_idx) {
+            (Some(start_idx), Some(end_idx)) => {
+                if start_idx <= end_idx {
+                    return available_columns[start_idx..=end_idx].to_vec();
+                }
                 LogController::warn(&format!(
                     "Invalid range: '{start_col}' comes after '{end_col}' in column order"
                 ));
             }
-        } else {
-            LogController::warn(&format!(
-                "Column range '{range_str}' contains invalid column names"
-            ));
+            (None, _) => {
+                eprintln!("Error: Column '{start_col}' not found in DataFrame for select operation");
+                std::process::exit(1);
+            }
+            (_, None) => {
+                eprintln!("Error: Column '{end_col}' not found in DataFrame for select operation");
+                std::process::exit(1);
+            }
         }
     }
-    // If parsing fails, return the original string as a single column
-    vec![range_str.to_string()]
+    // If parsing fails, return an empty vector so the caller can surface the
+    // missing column that caused the invalid range.
+    vec![]
 }
 // Helper function to parse quoted colon-separated ranges ("col1":"col3")
 pub fn parse_quoted_colon_range(

@@ -609,15 +609,8 @@ fn execute_load_step(
         }
     } else {
         LogController::warn(&format!(
-            "No data source specified for load in stage '{stage_name}'. Trying default test data."
+            "No data source specified for load in stage '{stage_name}'."
         ));
-        let default_data_path = config_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("../sample/simple.csv");
-        if default_data_path.exists() {
-            loaded_df = Some(load_op::load(&[default_data_path], ",", false, false, None));
-        }
     }
 
     Ok(loaded_df)

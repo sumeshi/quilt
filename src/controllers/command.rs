@@ -321,7 +321,7 @@ fn parse_option(cmd: &mut Command, option_str: &str) {
 }
 // Help functions for CLI
 pub fn print_help() {
-    println!("Quilter-CSV: A fast, flexible, and memory-efficient command-line tool written in Rust for processing large CSV files.\n");
+    println!("qsv: A fast, flexible, and memory-efficient command-line tool written in Rust for processing large CSV files.\n");
     println!("Usage: qsv load <file.csv> - <chainable> <args> - <finalizer> <args>\n");
     println!("Initializers:");
     println!("  load         Load CSV file(s)");

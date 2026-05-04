@@ -9,6 +9,21 @@ const PARALLEL_THRESHOLD: usize = 2; // Minimum files to use parallel processing
 const LARGE_FILE_THRESHOLD: u64 = 100 * 1024 * 1024; // 100MB threshold for large files
 const GZIP_BUFFER_SIZE: usize = 16 * 1024 * 1024; // 16MB buffer for gzip (increased from 8MB)
 
+fn separator_byte(separator: &str) -> u8 {
+    let mut chars = separator.chars();
+    match (chars.next(), chars.next()) {
+        (Some(ch), None) if ch.is_ascii() => ch as u8,
+        (None, _) => {
+            eprintln!("Error: Separator must be a single ASCII character, got empty string");
+            std::process::exit(1);
+        }
+        _ => {
+            eprintln!("Error: Separator must be a single ASCII character, got '{separator}'");
+            std::process::exit(1);
+        }
+    }
+}
+
 // Environment variable helpers for unified configuration
 fn get_env_chunk_size() -> Option<usize> {
     std::env::var("QSV_CHUNK_SIZE")
@@ -43,7 +58,7 @@ fn get_optimized_csv_options(
     chunk_size: Option<usize>,
     file_size: Option<u64>,
 ) -> CsvReadOptions {
-    let sep_byte = separator.as_bytes()[0];
+    let sep_byte = separator_byte(separator);
 
     // Prioritize environment variable, then provided chunk_size, then defaults
     let optimized_chunk_size = get_env_chunk_size().or(chunk_size).unwrap_or({
@@ -90,6 +105,7 @@ impl CsvController {
         no_headers: bool,
         chunk_size: Option<usize>,
     ) -> LazyFrame {
+        let _ = separator_byte(separator);
         if self.paths.len() == 1 {
             let path = &self.paths[0];
             let path_str = path.to_string_lossy();
@@ -151,7 +167,7 @@ impl CsvController {
                 let mut csv_options = polars::prelude::CsvReadOptions::default()
                     .with_has_header(has_header)
                     .with_low_memory(low_memory)
-                    .map_parse_options(|opts| opts.with_separator(separator.as_bytes()[0]));
+                    .map_parse_options(|opts| opts.with_separator(separator_byte(separator)));
                 if let Some(chunk_size) = chunk_size {
                     csv_options = csv_options.with_chunk_size(chunk_size);
                 }
@@ -193,11 +209,11 @@ impl CsvController {
 
                             // Check if we're approaching memory limit
                             if total_read + n > max_memory_usage {
-                                LogController::warn(&format!(
-                                    "Large gzip file exceeds {}GB memory limit. Consider using --low-memory flag.",
+                                eprintln!(
+                                    "Error: Gzip file exceeds memory limit ({}GB). Use --low-memory flag or set QSV_MEMORY_LIMIT_MB.",
                                     max_memory_usage / (1024 * 1024 * 1024)
-                                ));
-                                break;
+                                );
+                                std::process::exit(1);
                             }
 
                             decompressed_data.extend_from_slice(&chunk);
@@ -222,7 +238,7 @@ impl CsvController {
                     .with_has_header(has_header)
                     .with_low_memory(true) // Force low memory for large files
                     .with_chunk_size(chunk_size.unwrap_or(8192))
-                    .map_parse_options(|opts| opts.with_separator(separator.as_bytes()[0]));
+                    .map_parse_options(|opts| opts.with_separator(separator_byte(separator)));
 
                 let reader = csv_options.into_reader_with_file_handle(cursor);
                 match reader.finish() {

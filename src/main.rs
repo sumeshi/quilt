@@ -529,24 +529,6 @@ fn process_command(controller: &mut DataFrameController, cmd: &Command) {
             controller.timeslice(time_column, start_time, end_time);
         }
 
-        "partition" => {
-            check_data_loaded(controller, "partition");
-
-            if cmd.args.is_empty() {
-                eprintln!("Error: 'partition' command requires a column name");
-                process::exit(1);
-            }
-
-            let colname = &cmd.args[0];
-            let output_dir = if cmd.args.len() > 1 {
-                &cmd.args[1]
-            } else {
-                "./partitions"
-            };
-
-            controller.partition(colname, output_dir);
-        }
-
         "pivot" => {
             check_data_loaded(controller, "pivot");
 
@@ -653,6 +635,24 @@ fn process_command(controller: &mut DataFrameController, cmd: &Command) {
         }
 
         // Finalizers
+        "partition" => {
+            check_data_loaded(controller, "partition");
+
+            if cmd.args.is_empty() {
+                eprintln!("Error: 'partition' command requires a column name");
+                process::exit(1);
+            }
+
+            let colname = &cmd.args[0];
+            let output_dir = if cmd.args.len() > 1 {
+                &cmd.args[1]
+            } else {
+                "./partitions"
+            };
+
+            controller.partition(colname, output_dir);
+        }
+
         "showtable" => {
             check_data_loaded(controller, "showtable");
             controller.showtable();

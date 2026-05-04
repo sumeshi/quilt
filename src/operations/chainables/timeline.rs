@@ -31,6 +31,10 @@ pub fn timeline(
         std::process::exit(1);
     }
     let interval_duration = interval_duration.unwrap();
+    if interval_duration.num_seconds() <= 0 {
+        eprintln!("Error: Interval '{interval}' is sub-second; timeline bucketing requires at least 1 second (e.g. '1s', '5m', '1h')");
+        std::process::exit(1);
+    }
 
     LogController::debug(&format!(
         "Creating timeline: column={time_column}, interval={interval}, aggregation={agg_type}"

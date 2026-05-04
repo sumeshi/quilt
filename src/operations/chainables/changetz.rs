@@ -200,7 +200,14 @@ pub fn changetz(
     ambiguous_time: &str,
 ) -> LazyFrame {
     // Validate column exists by checking the schema
-    if df.clone().collect_schema().unwrap().get(colname).is_none() {
+    let schema = match df.clone().collect_schema() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error getting schema for changetz operation: {e}");
+            std::process::exit(1);
+        }
+    };
+    if schema.get(colname).is_none() {
         eprintln!("Error: Column '{colname}' not found for changetz operation");
         std::process::exit(1);
     }
