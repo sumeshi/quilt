@@ -80,6 +80,26 @@ $ cargo build --release
 $ python3 tests/run_tests.py
 ```
 
+## Performance and Size Baselines
+
+Use the benchmark script before and after optimization work so runtime and release binary size are captured with the same workflow:
+
+```bash
+$ ./scripts/benchmark_baseline.sh
+```
+
+The script builds `target/release/qsv`, prints the binary size in bytes, and measures representative `load`, `select`, `grep`, `timeline`, `dump`, and `quilt` commands against the test fixtures.
+
+To compare a smaller build without the table renderer:
+
+```bash
+$ ./scripts/benchmark_baseline.sh --no-default-features
+```
+
+The optional `table` cargo feature controls `showtable` and the `comfy-table` dependency. Default builds keep `showtable`; non-`table` builds fall back to `show` when no finalizer is specified, and `showtable` prints a clear rebuild hint.
+
+The current Polars `0.48.1` IO feature set still pulls `object_store`, `reqwest`, `rustls`, and `ring` through `polars-io` when CSV/Parquet support is enabled. The audit for smaller local-only builds did not find a narrower feature combination that preserves the current CLI surface while removing those remote IO dependencies.
+
 ## Submitting Changes
 
 1. Create a feature branch: `git checkout -b feature/your-feature`

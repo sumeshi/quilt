@@ -1,0 +1,15 @@
+title: "Quilt benchmark fixture"
+description: "Feature-agnostic quilt pipeline for benchmark_baseline.sh"
+version: "1.0"
+author: "Codex"
+stages:
+  bench:
+    type: process
+    steps:
+      load:
+        path: sample.csv
+      select:
+        colnames: "EventId,Level"
+      head:
+        number: 10
+      show:

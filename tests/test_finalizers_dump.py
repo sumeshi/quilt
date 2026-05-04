@@ -35,6 +35,29 @@ class TestDump(QsvTestBase):
             if os.path.exists(output_file):
                 os.remove(output_file)
 
+    def test_dump_streaming_matches_dump(self):
+        fd_plain, plain_output = tempfile.mkstemp(suffix=".csv")
+        fd_stream, stream_output = tempfile.mkstemp(suffix=".csv")
+        os.close(fd_plain)
+        os.close(fd_stream)
+        try:
+            plain = self.run_qsv_command(
+                f"load {self.get_fixture_path(self.fixture)} - dump -o {plain_output}"
+            )
+            streaming = self.run_qsv_command(
+                f"load {self.get_fixture_path(self.fixture)} - dump --batch-size 1MB -o {stream_output}"
+            )
+            self.assertEqual(plain.returncode, 0)
+            self.assertEqual(streaming.returncode, 0)
+            with open(plain_output, "r", encoding="utf-8") as plain_file:
+                with open(stream_output, "r", encoding="utf-8") as streaming_file:
+                    self.assertEqual(streaming_file.read(), plain_file.read())
+        finally:
+            if os.path.exists(plain_output):
+                os.remove(plain_output)
+            if os.path.exists(stream_output):
+                os.remove(stream_output)
+
     def test_dump_overwrites(self):
         fd, output_file = tempfile.mkstemp(suffix=".csv")
         os.close(fd)

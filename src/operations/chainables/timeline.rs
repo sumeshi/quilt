@@ -1,6 +1,9 @@
 use crate::controllers::log::LogController;
 use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use polars::prelude::*;
+use regex::Regex;
+
+const TIMELINE_OUTPUT_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 
 pub fn timeline(
     df: &LazyFrame,
@@ -40,32 +43,14 @@ pub fn timeline(
         "Creating timeline: column={time_column}, interval={interval}, aggregation={agg_type}"
     ));
 
-    // Convert to LazyFrame and perform timeline aggregation
     let bucket_column_name = format!("timeline_{interval}");
-    let timeline_expr = col(time_column)
-        .cast(DataType::String)
-        .map(
-            move |s_col: Column| {
-                let ca = s_col.str()?;
-                let mut timeline_buckets: Vec<Option<String>> = Vec::with_capacity(ca.len());
-                for opt_time_str in ca.into_iter() {
-                    if let Some(time_str) = opt_time_str {
-                        if let Some(bucket) = time_to_bucket(time_str, interval_duration) {
-                            timeline_buckets.push(Some(bucket));
-                        } else {
-                            timeline_buckets.push(None);
-                        }
-                    } else {
-                        timeline_buckets.push(None);
-                    }
-                }
-                Ok(Some(
-                    Series::new("timeline_bucket".into(), timeline_buckets).into(),
-                ))
-            },
-            GetOutput::from_type(DataType::String),
-        )
-        .alias(&bucket_column_name);
+    let timeline_expr = if can_use_polars_timeline_fast_path(df, time_column) {
+        LogController::debug("Using Polars-native timeline fast path");
+        fast_timeline_bucket_expr(time_column, interval, &bucket_column_name)
+    } else {
+        LogController::debug("Using Rust timeline fallback path");
+        rust_timeline_bucket_expr(time_column, interval_duration, &bucket_column_name)
+    };
 
     let mut agg_exprs = Vec::with_capacity(if agg_column.is_some() { 2 } else { 1 });
     agg_exprs.push(len().alias("count"));
@@ -112,6 +97,92 @@ pub fn timeline(
         .group_by([col(&bucket_column_name)])
         .agg(agg_exprs)
         .sort([&bucket_column_name], SortMultipleOptions::default())
+}
+
+fn can_use_polars_timeline_fast_path(df: &LazyFrame, time_column: &str) -> bool {
+    let sample = match df.clone().select([col(time_column)]).limit(100).collect() {
+        Ok(df) => df,
+        Err(_) => return false,
+    };
+
+    let series = match sample.column(time_column) {
+        Ok(series) => series,
+        Err(_) => return false,
+    };
+
+    let Ok(string_values) = series.str() else {
+        return false;
+    };
+
+    let iso_like = Regex::new(
+        r"^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})?)?$",
+    )
+    .expect("valid ISO-like regex");
+
+    let mut saw_value = false;
+    for value in string_values.into_iter().flatten() {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        saw_value = true;
+        if !iso_like.is_match(trimmed) {
+            return false;
+        }
+    }
+
+    saw_value
+}
+
+fn fast_timeline_bucket_expr(time_column: &str, interval: &str, bucket_column_name: &str) -> Expr {
+    col(time_column)
+        .cast(DataType::String)
+        .str()
+        .to_datetime(
+            Some(TimeUnit::Microseconds),
+            None,
+            StrptimeOptions {
+                format: None,
+                ..Default::default()
+            },
+            lit("raise"),
+        )
+        .dt()
+        .truncate(lit(interval))
+        .dt()
+        .to_string(TIMELINE_OUTPUT_FORMAT)
+        .alias(bucket_column_name)
+}
+
+fn rust_timeline_bucket_expr(
+    time_column: &str,
+    interval_duration: Duration,
+    bucket_column_name: &str,
+) -> Expr {
+    col(time_column)
+        .cast(DataType::String)
+        .map(
+            move |s_col: Column| {
+                let ca = s_col.str()?;
+                let mut timeline_buckets: Vec<Option<String>> = Vec::with_capacity(ca.len());
+                for opt_time_str in ca.into_iter() {
+                    if let Some(time_str) = opt_time_str {
+                        if let Some(bucket) = time_to_bucket(time_str, interval_duration) {
+                            timeline_buckets.push(Some(bucket));
+                        } else {
+                            timeline_buckets.push(None);
+                        }
+                    } else {
+                        timeline_buckets.push(None);
+                    }
+                }
+                Ok(Some(
+                    Series::new("timeline_bucket".into(), timeline_buckets).into(),
+                ))
+            },
+            GetOutput::from_type(DataType::String),
+        )
+        .alias(bucket_column_name)
 }
 fn parse_interval(interval: &str) -> Option<Duration> {
     if interval.is_empty() {
@@ -180,5 +251,5 @@ fn time_to_bucket(time_str: &str, interval: Duration) -> Option<String> {
     let timestamp = dt_utc.timestamp();
     let bucket_timestamp = (timestamp / interval_seconds) * interval_seconds;
     let bucket_dt = DateTime::from_timestamp(bucket_timestamp, 0)?;
-    Some(bucket_dt.format("%Y-%m-%d %H:%M:%S").to_string())
+    Some(bucket_dt.format(TIMELINE_OUTPUT_FORMAT).to_string())
 }

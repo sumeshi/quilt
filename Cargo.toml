@@ -6,17 +6,28 @@ description = "A fast, flexible, and memory-efficient command-line tool written 
 authors = ["sumeshi <sum3sh1@protonmail.com>"]
 license = "MIT"
 
+[features]
+default = ["table"]
+table = ["dep:comfy-table"]
+
 [dependencies]
-comfy-table = "7.1"
+comfy-table = { version = "7.1", optional = true }
 # Used for serde support for chrono
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yml = "0.0.12"
 serde-xml-rs = "0.6"
+# Keep these Polars features aligned with current CLI surface:
+# - lazy: core query pipeline
+# - csv: load/show/dump CSV support
+# - temporal: changetz/timeline/timeslice/timeround
+# - strings + regex: select/contains/sed/grep string operations
+# - describe: showquery plan rendering
+# - parquet: parquet load + dumpcache
 polars = { version = "0.48.1", features = ["lazy", "csv", "temporal", "strings", "regex", "describe", "parquet"], default-features = false }
 regex = "1.9"
 chrono = { version = "0.4", features = ["serde"] }
-chrono-tz = "0.8"
+chrono-tz = "0.10"
 log = "0.4"
 env_logger = "0.10"
 glob = "0.3"

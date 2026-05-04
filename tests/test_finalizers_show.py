@@ -22,6 +22,15 @@ class TestShow(QsvTestBase):
         self.assertEqual(result.returncode, 0)
         self.assertFalse(result.stdout.endswith("\n\n"))
 
+    def test_show_streaming_matches_show(self):
+        plain = self.run_qsv_command(f"load {self.get_fixture_path(self.fixture)} - show")
+        streaming = self.run_qsv_command(
+            f"load {self.get_fixture_path(self.fixture)} - show --batch-size 1MB"
+        )
+        self.assertEqual(plain.returncode, 0)
+        self.assertEqual(streaming.returncode, 0)
+        self.assertEqual(streaming.stdout, plain.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

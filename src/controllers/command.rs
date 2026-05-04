@@ -331,7 +331,7 @@ fn parse_option(cmd: &mut Command, option_str: &str) {
 }
 // Help functions for CLI
 pub fn print_help() {
-    println!("qsv: A fast, flexible, and memory-efficient command-line tool written in Rust for processing large CSV files.\n");
+    println!("Quilter-CSV: A fast, flexible, and memory-efficient command-line tool written in Rust for processing large CSV files.\n");
     println!("Usage: qsv load <file.csv> - <chainable> <args> - <finalizer> <args>\n");
     println!("Initializers:");
     println!("  load         Load CSV file(s)");
@@ -357,7 +357,12 @@ pub fn print_help() {
     println!();
     println!("Finalizers:");
     println!("  show         Print as CSV");
+    #[cfg(feature = "table")]
     println!("  showtable    Print as table");
+    #[cfg(not(feature = "table"))]
+    println!(
+        "  showtable    Print as table (disabled in this build; rebuild with --features table)"
+    );
     println!("  headers      Show column names");
     println!("  stats        Show statistics");
     println!("  showquery    Show query plan");
@@ -372,7 +377,10 @@ pub fn print_help() {
     println!("Examples:");
     println!("  qsv load data.csv - select col1,col2 - head 10 - show");
     println!("  qsv load data.csv - select 2:4 - show");
+    #[cfg(feature = "table")]
     println!("  qsv load data.csv - grep pattern - showtable");
+    #[cfg(not(feature = "table"))]
+    println!("  qsv load data.csv - grep pattern - show");
     println!("  qsv load data.csv - sort col1 -d - show");
     println!("  qsv load data.csv - isin col1 1,2,3 - uniq - show");
     println!("  qsv load data.csv - changetz datetime --from-tz UTC --to-tz Asia/Tokyo - show");
@@ -673,9 +681,21 @@ fn print_show_help() {
     println!("  qsv load data.csv - select col1,col2 - show --batch-size 256MB");
 }
 fn print_showtable_help() {
+    #[cfg(not(feature = "table"))]
+    {
+        println!("showtable: Print result as a table\n");
+        println!("This command is disabled in this build.");
+        println!("Rebuild with: cargo build --features table");
+        return;
+    }
+
+    #[cfg(feature = "table")]
     println!("showtable: Print result as a table\n");
+    #[cfg(feature = "table")]
     println!("Usage: showtable\n");
+    #[cfg(feature = "table")]
     println!("Examples:");
+    #[cfg(feature = "table")]
     println!("  qsv load data.csv - showtable");
 }
 fn print_headers_help() {

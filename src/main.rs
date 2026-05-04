@@ -103,9 +103,13 @@ fn process_commands(controller: &mut DataFrameController, commands: &[Command]) 
         ];
 
         if !finalizer_commands.contains(&last_cmd.name.as_str()) {
-            // Last command was not a finalizer, so call showtable as default
+            // Last command was not a finalizer, so use the default finalizer for this build.
             if !controller.is_empty() {
-                controller.showtable();
+                if cfg!(feature = "table") {
+                    controller.showtable();
+                } else {
+                    controller.show();
+                }
             }
         }
     }

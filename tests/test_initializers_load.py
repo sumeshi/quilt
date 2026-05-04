@@ -1,4 +1,6 @@
 import unittest
+import subprocess
+import os
 from test_base import QsvTestBase
 
 
@@ -16,6 +18,20 @@ class TestLoad(QsvTestBase):
         lines = result.stdout.strip().splitlines()
         self.assertEqual(len(lines), 2)
         self.assertIn("1102,Info", lines[1])
+
+    def test_load_gzip_file_with_memory_limit_env(self):
+        env = os.environ.copy()
+        env["QSV_MEMORY_LIMIT_MB"] = "512"
+        result = subprocess.run(
+            f"{self.qsv_path} load {self.get_fixture_path('sample-min.csv.gz')} - head 1 - show",
+            shell=True,
+            capture_output=True,
+            text=True,
+            cwd=self.root_dir,
+            env=env,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("1102,Info", result.stdout)
 
     def test_load_tsv_separator_short(self):
         separator = "\t"

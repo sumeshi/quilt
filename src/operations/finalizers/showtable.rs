@@ -1,9 +1,15 @@
 use crate::controllers::log::LogController;
+#[cfg(feature = "table")]
 use comfy_table::presets::UTF8_FULL;
+#[cfg(feature = "table")]
 use comfy_table::{Cell, ContentArrangement, Table};
 use polars::prelude::*;
 
+#[cfg(feature = "table")]
 const MAX_DISPLAY_ROWS: usize = 8;
+#[cfg(not(feature = "table"))]
+const SHOWTABLE_DISABLED_MESSAGE: &str =
+    "Error: 'showtable' is not available in this build. Rebuild with `--features table`.";
 
 pub fn showtable(df: &LazyFrame) {
     LogController::debug("Applying showtable (display DataFrame as a formatted table)");
@@ -14,6 +20,7 @@ pub fn showtable(df: &LazyFrame) {
     }
 }
 
+#[cfg(feature = "table")]
 pub fn render_table(df: &LazyFrame) -> Result<String, String> {
     // Try to estimate the size using limit + head approach to avoid full collection
     let head_df = match df.clone().limit((MAX_DISPLAY_ROWS + 1) as u32).collect() {
@@ -86,6 +93,12 @@ pub fn render_table(df: &LazyFrame) -> Result<String, String> {
     Ok(output)
 }
 
+#[cfg(not(feature = "table"))]
+pub fn render_table(_df: &LazyFrame) -> Result<String, String> {
+    Err(SHOWTABLE_DISABLED_MESSAGE.to_string())
+}
+
+#[cfg(feature = "table")]
 fn format_anyvalue(val: &AnyValue) -> String {
     match val {
         AnyValue::Null => "null".to_string(),

@@ -54,13 +54,15 @@ Each step is separated by a hyphen (`-`):
 $ qsv <INITIALIZER> <args> - <CHAINABLE> <args> - <FINALIZER> <args>
 ```
 
-**Note:** If no finalizer is explicitly specified, `showtable` is automatically used as the default finalizer, making it easy to quickly view results:
+**Note:** If no finalizer is explicitly specified, default builds automatically use `showtable`, making it easy to quickly view results:
 
 ```bash
 $ qsv load data.csv - select col1,col2 - head 5
 # Equivalent to:
 $ qsv load data.csv - select col1,col2 - head 5 - showtable
 ```
+
+Builds compiled without the optional `table` feature fall back to `show` instead, and the `showtable` command prints a rebuild hint.
 
 ## Command Reference
 
@@ -541,6 +543,7 @@ Displays the resulting data in a formatted table to standard output. Shows table
 - Automatically used as default finalizer when no explicit finalizer is specified
 
 This command does not take any arguments or options.
+This command is controlled by the optional cargo feature `table`, which is enabled in the default build.
 
 Example:
 ```bash
@@ -550,6 +553,14 @@ $ qsv load data.csv - select col1,col2 - head 3 - showtable
 $ qsv load large_data.csv - select col1,col2
 # Automatically calls showtable if no finalizer specified
 ```
+
+To build a smaller binary without table rendering support:
+
+```bash
+$ cargo build --release --no-default-features
+```
+
+In that build, `showtable` exits with a clear rebuild message and implicit finalization falls back to `show`.
 
 #### `dump`
 Outputs the processing results to a CSV file.

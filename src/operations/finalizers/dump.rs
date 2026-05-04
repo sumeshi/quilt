@@ -1,4 +1,6 @@
-use crate::controllers::batch::calculate_batch_size;
+use crate::controllers::batch::{
+    calculate_batch_size_from_frame, write_dataframe_csv, write_dataframe_csv_in_batches,
+};
 use crate::controllers::log::LogController;
 use chrono::Local;
 use polars::prelude::*;
@@ -78,58 +80,15 @@ fn dump_streaming_internal<W: Write>(
     separator: char,
     batch_size_bytes: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let batch_size_rows = calculate_batch_size(df, batch_size_bytes)?;
+    let collected = df.clone().collect()?;
+    let batch_size_rows = calculate_batch_size_from_frame(&collected, batch_size_bytes);
     LogController::debug(&format!(
         "Using batch size: {} rows (~{}MB)",
         batch_size_rows,
         batch_size_bytes / 1_048_576
     ));
-
-    let mut current_offset = 0;
-    let mut total_rows = 0;
-    let mut header_written = false;
-
-    loop {
-        let mut batch_df = df
-            .clone()
-            .slice(current_offset as i64, batch_size_rows as u32)
-            .collect()?;
-
-        if batch_df.height() == 0 {
-            break; // No more data
-        }
-
-        LogController::debug(&format!(
-            "Streaming batch: rows {}-{}",
-            current_offset,
-            current_offset + batch_df.height()
-        ));
-
-        // Use a temporary buffer to write each batch, then write buffer to the writer
-        // Estimate buffer size: ~100 bytes per row on average for CSV output
-        let estimated_buffer_size = batch_df.height() * 100;
-        let mut buf = Vec::with_capacity(estimated_buffer_size);
-        CsvWriter::new(&mut buf)
-            .include_header(!header_written) // Write header only for the first batch
-            .with_separator(separator as u8)
-            .finish(&mut batch_df)?;
-
-        writer.write_all(&buf)?;
-
-        if !header_written {
-            header_written = true;
-        }
-
-        let processed_rows = batch_df.height();
-        total_rows += processed_rows;
-        current_offset += processed_rows;
-
-        if processed_rows < batch_size_rows {
-            break; // Last batch
-        }
-    }
-
-    writer.flush()?;
+    let total_rows =
+        write_dataframe_csv_in_batches(&collected, &mut writer, separator as u8, batch_size_rows)?;
     LogController::info(&format!("Successfully streamed {total_rows} rows"));
     Ok(())
 }
@@ -150,10 +109,10 @@ fn dump_traditional(df: &LazyFrame, output_path_str: &str, separator: char) {
 
     let output_path = PathBuf::from(output_path_str);
     let result = match File::create(&output_path) {
-        Ok(file) => CsvWriter::new(file)
-            .include_header(true)
-            .with_separator(separator as u8)
-            .finish(&mut df_collected),
+        Ok(file) => {
+            let writer = BufWriter::new(file);
+            write_dataframe_csv(&mut df_collected, writer, separator as u8, true)
+        }
         Err(e) => {
             eprintln!(
                 "Error: Failed to create file '{}': {}",

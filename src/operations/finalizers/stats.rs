@@ -1,4 +1,5 @@
 use crate::controllers::log::LogController;
+#[cfg(feature = "table")]
 use comfy_table::{presets::UTF8_FULL, Cell, Color, Table};
 use polars::prelude::*;
 
@@ -14,34 +15,42 @@ pub fn stats(df: &LazyFrame) {
         }
     };
 
-    let mut table = Table::new();
-    table.load_preset(UTF8_FULL);
-
     let column_names: Vec<String> = schema.iter_names().map(|s| s.to_string()).collect();
-    let mut header_cells = vec![Cell::new("Statistic").fg(Color::Green)];
-    for name in &column_names {
-        header_cells.push(Cell::new(name).fg(Color::Green));
-    }
-    table.set_header(header_cells);
 
     // Calculate statistics using lazy evaluation
     let stats_result = calculate_stats_lazy(df, &column_names, &schema);
 
     match stats_result {
         Ok(stats_data) => {
-            // Build table rows from calculated statistics
-            table.add_row(build_stat_row("count", &stats_data.counts));
-            table.add_row(build_stat_row("null_count", &stats_data.null_counts));
-            table.add_row(build_stat_row("datatype", &stats_data.dtypes));
-            table.add_row(build_stat_row("mean", &stats_data.means));
-            table.add_row(build_stat_row("std", &stats_data.stds));
-            table.add_row(build_stat_row("min", &stats_data.mins));
-            table.add_row(build_stat_row("25%", &stats_data.p25s));
-            table.add_row(build_stat_row("50% (median)", &stats_data.p50s));
-            table.add_row(build_stat_row("75%", &stats_data.p75s));
-            table.add_row(build_stat_row("max", &stats_data.maxs));
+            #[cfg(feature = "table")]
+            {
+                let mut table = Table::new();
+                table.load_preset(UTF8_FULL);
 
-            println!("{table}");
+                let mut header_cells = vec![Cell::new("Statistic").fg(Color::Green)];
+                for name in &column_names {
+                    header_cells.push(Cell::new(name).fg(Color::Green));
+                }
+                table.set_header(header_cells);
+
+                table.add_row(build_stat_row("count", &stats_data.counts));
+                table.add_row(build_stat_row("null_count", &stats_data.null_counts));
+                table.add_row(build_stat_row("datatype", &stats_data.dtypes));
+                table.add_row(build_stat_row("mean", &stats_data.means));
+                table.add_row(build_stat_row("std", &stats_data.stds));
+                table.add_row(build_stat_row("min", &stats_data.mins));
+                table.add_row(build_stat_row("25%", &stats_data.p25s));
+                table.add_row(build_stat_row("50% (median)", &stats_data.p50s));
+                table.add_row(build_stat_row("75%", &stats_data.p75s));
+                table.add_row(build_stat_row("max", &stats_data.maxs));
+
+                println!("{table}");
+            }
+
+            #[cfg(not(feature = "table"))]
+            {
+                print!("{}", render_stats_plain(&column_names, &stats_data));
+            }
         }
         Err(e) => {
             eprintln!("Error calculating statistics: {e}");
@@ -247,12 +256,47 @@ fn format_string_stat(val: AnyValue) -> String {
     }
 }
 
+#[cfg(feature = "table")]
 fn build_stat_row(stat_name: &str, values: &[String]) -> Vec<Cell> {
     let mut row = vec![Cell::new(stat_name)];
     for value in values {
         row.push(Cell::new(value));
     }
     row
+}
+
+#[cfg(not(feature = "table"))]
+fn render_stats_plain(column_names: &[String], stats_data: &StatsData) -> String {
+    let rows = [
+        ("count", &stats_data.counts),
+        ("null_count", &stats_data.null_counts),
+        ("datatype", &stats_data.dtypes),
+        ("mean", &stats_data.means),
+        ("std", &stats_data.stds),
+        ("min", &stats_data.mins),
+        ("25%", &stats_data.p25s),
+        ("50% (median)", &stats_data.p50s),
+        ("75%", &stats_data.p75s),
+        ("max", &stats_data.maxs),
+    ];
+
+    let mut output = String::from("Statistic");
+    for name in column_names {
+        output.push('\t');
+        output.push_str(name);
+    }
+    output.push('\n');
+
+    for (label, values) in rows {
+        output.push_str(label);
+        for value in values {
+            output.push('\t');
+            output.push_str(value);
+        }
+        output.push('\n');
+    }
+
+    output
 }
 
 // Fallback to original implementation if lazy evaluation fails
