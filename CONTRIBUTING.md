@@ -72,7 +72,8 @@ $ python3 -m unittest tests.test_chainables_select
 ```bash
 # Format and lint
 $ cargo fmt --all
-$ cargo clippy --all-targets --all-features
+$ cargo fmt-check
+$ cargo lint
 
 # Check before submitting
 $ cargo build --release
