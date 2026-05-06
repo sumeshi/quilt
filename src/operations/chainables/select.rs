@@ -1,5 +1,11 @@
 use crate::controllers::log::LogController;
+use once_cell::sync::Lazy;
 use polars::prelude::*;
+use regex::Regex;
+
+static RE_COL_RANGE_HYPHEN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^(?P<p1>[a-zA-Z_][a-zA-Z_0-9]*)(?P<n1>\d+)-(?:(?P<p2>[a-zA-Z_][a-zA-Z_0-9]*)(?P<n2>\d+)|(?P<n3>\d+))$").unwrap()
+});
 
 pub fn select(df: &LazyFrame, colnames: &[String]) -> LazyFrame {
     let schema = match df.clone().collect_schema() {
@@ -34,6 +40,11 @@ pub fn select(df: &LazyFrame, colnames: &[String]) -> LazyFrame {
             } else {
                 expanded_colnames.push(colname.clone());
             }
+        } else if available_columns.contains(colname) {
+            expanded_colnames.push(colname.clone());
+        } else if RE_COL_RANGE_HYPHEN.is_match(colname) {
+            let range_cols = parse_hyphen_range(colname, &available_columns);
+            expanded_colnames.extend(range_cols);
         } else {
             // Check if it's a single numeric index
             if is_numeric_index(colname) {
@@ -72,6 +83,41 @@ pub fn select(df: &LazyFrame, colnames: &[String]) -> LazyFrame {
     }
 
     df.clone().select(&selected_cols)
+}
+
+pub fn parse_hyphen_range(range_str: &str, available_columns: &[String]) -> Vec<String> {
+    let captures = match RE_COL_RANGE_HYPHEN.captures(range_str) {
+        Some(captures) => captures,
+        None => return vec![range_str.to_string()],
+    };
+
+    let prefix1 = captures.name("p1").unwrap().as_str();
+    let num1: usize = captures.name("n1").unwrap().as_str().parse().unwrap();
+
+    let (prefix2, num2) = if let Some(p2) = captures.name("p2") {
+        let prefix2 = p2.as_str();
+        let num2: usize = captures.name("n2").unwrap().as_str().parse().unwrap();
+        (prefix2, num2)
+    } else {
+        let num2: usize = captures.name("n3").unwrap().as_str().parse().unwrap();
+        (prefix1, num2)
+    };
+
+    if prefix1 != prefix2 {
+        eprintln!(
+            "Error: Mismatched prefixes in range '{range_str}'. Both sides must have the same prefix."
+        );
+        std::process::exit(1);
+    }
+
+    if num1 > num2 {
+        eprintln!("Error: Invalid range '{range_str}'. Start number must be <= end number.");
+        std::process::exit(1);
+    }
+
+    let start_col = format!("{prefix1}{num1}");
+    let end_col = format!("{prefix1}{num2}");
+    parse_colon_range(&format!("{start_col}:{end_col}"), available_columns)
 }
 // Helper function to check if a string is a numeric index
 fn is_numeric_index(s: &str) -> bool {

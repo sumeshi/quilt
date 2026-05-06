@@ -46,6 +46,22 @@ class TestGrep(QsvTestBase):
         )
         self.assertEqual(result.stdout.strip(), "Level,count\nInfo,1")
 
+    def test_grep_column_single(self):
+        result = self.run_qsv_command(
+            f"load {self.get_fixture_path(self.fixture)} - grep 'Eventlog' --column Provider - show"
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(len(result.stdout.strip().splitlines()), 2)
+        self.assertIn("Microsoft-Windows-Eventlog", result.stdout)
+
+    def test_grep_column_multiple(self):
+        result = self.run_qsv_command(
+            f"load {self.get_fixture_path(self.fixture)} - grep 'Eventlog|Info' --column Provider,Level - show"
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(len(result.stdout.strip().splitlines()), 2)
+        self.assertIn("1102,Info", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

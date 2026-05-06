@@ -54,6 +54,15 @@ Each step is separated by a hyphen (`-`):
 $ qsv <INITIALIZER> <args> - <CHAINABLE> <args> - <FINALIZER> <args>
 ```
 
+### Command Separator `-`
+
+The `-` token (a single hyphen surrounded by spaces) is the command separator. A standalone `-` is never treated as data.
+
+- To separate commands: `qsv load file.csv - select col1 - head 5`
+- If you need `-` as an option value, use an attached form such as `--separator=-` or `-s-`.
+
+A standalone `-` positional value, including stdin-style usage, is not currently supported.
+
 **Note:** If no finalizer is explicitly specified, default builds automatically use `showtable`, making it easy to quickly view results:
 
 ```bash
@@ -120,6 +129,8 @@ Select columns by name, numeric index, or range notation.
 - **Quoted colon notation**: `"col:1":"col:3"` - For column names containing colons
 - **Mixed formats**: `1,col2,4:6` - Combine different selection methods
 
+**Disambiguation rule:** If an exact column name matching `col1-col3` exists, it is selected as-is. Range expansion only occurs when no exact match is found.
+
 ```bash
 $ qsv load data.csv - select datetime                       # Select single column by name
 $ qsv load data.csv - select col1,col3                      # Select specific columns by name
@@ -170,6 +181,8 @@ Replace values in column(s) using a Regex pattern.
 | --column    | str    | (all)   | Apply replacement to specific column only. If not specified, applies to all columns. |
 | -i, --ignorecase | flag | `false` | Perform case-insensitive matching.          |
 
+> **Warning:** When `--column` is omitted, `sed` replaces across **all columns**. In log/DFIR data this can silently modify timestamps, EventIDs, file paths, and usernames. Always specify `--column` unless you intend a full-dataset replacement.
+
 ```bash
 $ qsv load data.csv - sed foo foooooo                       # Replace 'foo' with 'foooooo' in all columns
 $ qsv load data.csv - sed foo foooooo --column str          # Replace 'foo' with 'foooooo' in 'str' column only
@@ -183,6 +196,7 @@ Filter rows where any column matches a regex pattern.
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | pattern | str |         | Regex pattern to search for in any column. Required. |
+| --column | str | (all columns) | Restrict search to specific column(s). Comma-separated for multiple. |
 | -i, --ignore-case | flag | `false` | Perform case-insensitive matching. |
 | -v, --invert-match | flag | `false` | Invert the sense of matching, to select non-matching lines. |
 
@@ -193,6 +207,8 @@ $ qsv load data.csv - grep "^FOO" -i                        # Case-insensitive s
 $ qsv load data.csv - grep "^FOO" --ignore-case              # Long form case-insensitive
 $ qsv load data.csv - grep "^FOO" -i -v                     # Case-insensitive inverted match
 $ qsv load data.csv - grep "^FOO" --ignore-case --invert-match  # Long form inverted match
+$ qsv load logs.csv - grep "FAILED" --column EventData
+$ qsv load logs.csv - grep "192\\.168\\." --column src_ip,dst_ip
 ```
 
 #### `head`
@@ -228,6 +244,8 @@ $ qsv load data.csv - tail --number 10
 #### `sort`
 Sorts the dataset based on the specified column(s).
 
+> ⚠️ **Memory:** This command materializes the full dataset into memory.
+
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | colnames  | str/list |         | Column name(s) to sort by. Comma-separated for multiple columns (e.g., `col1,col3`) or a single column name. Required. |
@@ -241,19 +259,25 @@ $ qsv load data.csv - sort col1,col2,col3 --desc
 ```
 
 #### `count`
-Count duplicate rows, grouping by all columns. Results are automatically sorted by count in descending order.
+Count duplicate rows, grouping by all columns by default. Results are automatically sorted by count in descending order.
+
+> ⚠️ **Memory:** This command materializes the full dataset into memory.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| (None)    |      |         | Takes no arguments. Automatically sorts output by count column in descending order. |
+| columns   | str | (all columns) | Optional positional column list. Use `col1` or `col1,col2` to group by specific columns only. |
 
 ```bash
-$ qsv load data.csv - count
-$ qsv load data.csv - count - sort col1  # Count and then sort by col1 instead
+$ qsv load Security.csv - count EventID          # Count by one column
+$ qsv load proxy.csv - count src_ip,dst_ip       # Count by multiple columns
+$ qsv load data.csv - count                       # Count all unique rows (original behavior)
+$ qsv load data.csv - count - sort col1          # Count and then sort by col1 instead
 ```
 
 #### `uniq`
 Filters unique rows, removing duplicates based on all columns.
+
+> ⚠️ **Memory:** This command materializes the full dataset into memory.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -364,6 +388,14 @@ Aggregates data by time intervals, creating time-based summaries.
 - If no aggregation column is specified, only row counts are provided for each time bucket
 - Supports various time interval formats: hours (`1h`), minutes (`30m`), seconds (`5s`), days (`1d`)
 
+**CLI and Quilt YAML mapping:**
+
+| CLI option | YAML key |
+|-----------|----------|
+| `--interval 1h` | `interval: 1h` |
+| `--avg cpu_usage` | `agg_type: avg` + `agg_column: cpu_usage` |
+| `--sum value` | `agg_type: sum` + `agg_column: value` |
+
 Example:
 ```bash
 $ qsv load access.log - timeline timestamp --interval 1h
@@ -388,7 +420,7 @@ Filters data based on time ranges, extracting records within specified time boun
 | --start | str | | Start time (inclusive). Optional. |
 | --end | str | | End time (inclusive). Optional. |
 
-At least one of `--start` or `--end` must be specified. Supports various datetime formats including ISO8601, timestamps, and common log formats.
+At least one of `--start` or `--end` must be specified. Both boundaries are inclusive (`[start, end]`). Supports various datetime formats including ISO8601, timestamps, and common log formats.
 
 Example:
 ```bash
@@ -401,6 +433,8 @@ $ qsv load access.log - timeslice timestamp --start "2023-01-01T10:00:00"
 #### `pivot`
 Creates grouped aggregations over row and column keys.
 
+> **Note:** `pivot` currently performs a **grouped aggregation** (long-form output), not an Excel-style wide cross-tabulation. If you need wide output, use `select` + `count` or wait for the planned `--wide` flag. Alternatives that better describe this operation: `groupby`, `aggregate`, `summarize`.
+
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | --rows | str |         | Comma-separated list of columns for row grouping. Optional. |
@@ -408,7 +442,7 @@ Creates grouped aggregations over row and column keys.
 | --values | str |         | Column to aggregate values from. Required. |
 | --agg | str |         | Aggregation function: `sum`, `mean`, `count`, `min`, `max`, `median`, `std`. Optional (default: `sum`). |
 
-At least one of `--rows` or `--cols` must be specified. This currently returns a long-form grouped aggregation over the requested row and column keys, not a wide Excel-style cross-tabulation table.
+At least one of `--rows` or `--cols` must be specified.
 
 Example:
 ```bash
@@ -425,7 +459,7 @@ Rounds datetime values to specified time units, creating a new rounded column wh
 |-----------|------|---------|-------------|
 | colname | str |         | Name of the datetime column to round. Required. |
 | --unit | str |         | Time unit for rounding: `y`/`year`, `M`/`month`, `d`/`day`, `h`/`hour`, `m`/`minute`, `s`/`second`. Required. |
-| --output | str | (replaces original) | Name for the output column. If not specified, replaces the original column. |
+| --output | str | `{column}_rounded` | Output column name. Defaults to `{column}_rounded`, preserving the original column. |
 
 **Features:**
 - Rounds datetime values down to the nearest specified time unit boundary
@@ -452,7 +486,7 @@ $ qsv load data.csv - timeround timestamp --unit h --output hour_rounded
 # Output: 2023-01-01 12
 
 $ qsv load logs.csv - timeround timestamp --unit m
-# Rounds to minute boundary, replaces original column
+# Rounds to minute boundary, writes to timestamp_rounded
 
 $ qsv load metrics.csv - timeround created_at --unit year --output created_year
 # Input:  2023-01-01 12:34:56
@@ -544,6 +578,8 @@ Displays the resulting data in a formatted table to standard output. Shows table
 
 This command does not take any arguments or options.
 This command is controlled by the optional cargo feature `table`, which is enabled in the default build.
+
+> **Tip for large files:** Pipe through `head N` before `showtable`, or use `show` instead. `showtable` with implicit finalization collects all rows by default.
 
 Example:
 ```bash
@@ -741,6 +777,18 @@ stages:
 ## Huge File Processing
 
 qsv-rs supports streaming processing for huge files without loading them entirely into memory.
+
+### Memory Behavior by Command
+
+Not all commands stream. Before running a pipeline on a large file, check the memory behavior of each operation:
+
+| Mode | Commands | Notes |
+|------|----------|-------|
+| **Streaming** (safe for huge files) | `show`, `dump`, `head`, `tail` | Row-by-row; constant memory |
+| **Lazy / Polars-optimized** | `select`, `isin`, `contains`, `grep`, `sed` | Pushdown; usually safe |
+| **Materializing** ⚠️ | `sort`, `uniq`, `count`, `stats`, `pivot`, `timeline` | Loads all rows into memory |
+
+> **Warning:** Running a materializing command on a multi-GB file may exhaust memory. Use `head`, `timeslice`, or `isin` to reduce the dataset first.
 
 ### Usage Examples
 

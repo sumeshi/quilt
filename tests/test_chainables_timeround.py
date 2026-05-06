@@ -33,6 +33,21 @@ class TestTimeround(QsvTestBase):
 
     def test_timeround_replace_original(self):
         result = self.run_qsv_command(f"load {self.get_fixture_path(self.fixture)} - timeround TimeCreated --unit d - select TimeCreated - head 1 - show")
+        self.assertEqual(result.stdout.strip(), "TimeCreated\n2016-10-06 01:47:07.5095046")
+
+    def test_timeround_default_output_preserves_original(self):
+        result = self.run_qsv_command(
+            f"load {self.get_fixture_path(self.fixture)} - timeround TimeCreated --unit d - select TimeCreated,TimeCreated_rounded - head 1 - show"
+        )
+        self.assertEqual(
+            result.stdout.strip(),
+            "TimeCreated,TimeCreated_rounded\n2016-10-06 01:47:07.5095046,2016-10-06",
+        )
+
+    def test_timeround_explicit_overwrite(self):
+        result = self.run_qsv_command(
+            f"load {self.get_fixture_path(self.fixture)} - timeround TimeCreated --unit d --output TimeCreated - select TimeCreated - head 1 - show"
+        )
         self.assertEqual(result.stdout.strip(), "TimeCreated\n2016-10-06")
 
     def test_timeround_invalid_unit(self):

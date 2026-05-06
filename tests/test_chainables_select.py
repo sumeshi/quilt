@@ -25,6 +25,18 @@ class TestSelect(QsvTestBase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Column 'EventId-Level' not found", result.stderr)
 
+    def test_select_hyphen_prefers_exact_column_name(self):
+        result = self.run_qsv_command(
+            f"load {self.get_fixture_path('select-hyphen-literal.csv')} - select col1-col3 - show"
+        )
+        self.assertEqual(result.stdout.strip(), "col1-col3\nexact_value")
+
+    def test_select_hyphen_expands_range_when_no_exact_match(self):
+        result = self.run_qsv_command(
+            f"load {self.get_fixture_path('select-hyphen-range.csv')} - select col1-col3 - show"
+        )
+        self.assertEqual(result.stdout.strip(), "col1,col2,col3\na,b,c")
+
     def test_select_numeric_index(self):
         result = self.run_qsv_command(f"load {self.get_fixture_path(self.fixture)} - select 4 - head 1 - show")
         self.assertEqual(result.stdout.strip(), "EventId\n1102")

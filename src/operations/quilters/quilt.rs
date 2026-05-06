@@ -118,7 +118,16 @@ fn create_chainable_dispatch_table(
             let pattern = get_string_from_value(args, "pattern").unwrap_or_default();
             let ignorecase = get_bool_from_value(args, "ignorecase");
             let is_inverted = get_bool_from_value(args, "invert_match");
-            grep::grep(df, &pattern, ignorecase, is_inverted)
+            let columns = get_string_from_value(args, "column")
+                .or_else(|| get_string_from_value(args, "col"))
+                .map(|value| {
+                    value
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<String>>()
+                });
+            grep::grep(df, &pattern, ignorecase, is_inverted, columns.as_deref())
         }),
     );
     table.insert(
@@ -156,7 +165,7 @@ fn create_chainable_dispatch_table(
             sort::sort(df, &colnames, desc)
         }),
     );
-    table.insert("count", Box::new(|df, _args| count::count(df)));
+    table.insert("count", Box::new(|df, _args| count::count(df, &[])));
     table.insert("uniq", Box::new(|df, _args| uniq::uniq(df)));
     table.insert(
         "changetz",
@@ -233,7 +242,12 @@ fn create_chainable_dispatch_table(
             );
             std::process::exit(1);
         }
-        timeslice::timeslice(df, &time_column, start_time.as_deref(), end_time.as_deref())
+        timeslice::timeslice(
+            df,
+            &time_column,
+            start_time.as_deref(),
+            end_time.as_deref(),
+        )
     }));
     table.insert(
         "timeround",

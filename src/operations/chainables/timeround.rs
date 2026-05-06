@@ -20,7 +20,9 @@ pub fn timeround(
             std::process::exit(1);
         }
     };
-    let output_col = output_colname.unwrap_or(colname);
+    let output_col = output_colname
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("{colname}_rounded"));
     df.clone().with_columns([col(colname)
         .cast(DataType::String)
         .map(
@@ -65,7 +67,7 @@ pub fn timeround(
         .truncate(lit(duration))
         .dt()
         .to_string(format)
-        .alias(output_col)])
+        .alias(&output_col)])
 }
 
 fn parse_datetime_string_canonical(time_str: &str) -> Option<String> {

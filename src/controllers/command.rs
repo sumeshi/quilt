@@ -40,10 +40,17 @@ fn get_valid_options(command_name: &str) -> HashSet<&'static str> {
             .iter()
             .cloned()
             .collect(),
-        "grep" => ["ignore_case", "ignore-case", "invert_match", "invert-match"]
-            .iter()
-            .cloned()
-            .collect(),
+        "grep" => [
+            "ignore_case",
+            "ignore-case",
+            "invert_match",
+            "invert-match",
+            "column",
+            "col",
+        ]
+        .iter()
+        .cloned()
+        .collect(),
         "head" => ["number"].iter().cloned().collect(),
         "tail" => ["number"].iter().cloned().collect(),
         "sort" => ["desc"].iter().cloned().collect(),
@@ -196,6 +203,7 @@ pub fn parse_commands(args: &[String]) -> Vec<Command> {
                         | "from"
                         | "to"
                         | "column"
+                        | "col"
                         | "unit"
                         | "batch-size"
                         | "batch_size"
@@ -500,13 +508,17 @@ fn print_sed_help() {
 }
 fn print_grep_help() {
     println!("grep: Filter rows by regex pattern (any column)\n");
-    println!("Usage: grep <pattern> [-i|--ignore-case] [-v|--invert-match]\n");
+    println!(
+        "Usage: grep <pattern> [--column <col1,col2>] [-i|--ignore-case] [-v|--invert-match]\n"
+    );
     println!("Options:");
+    println!("  --column, --col      Restrict search to specific column(s)");
     println!("  -i, --ignore-case     Case-insensitive matching");
     println!("  -v, --invert-match   Invert match (select non-matching lines)\n");
     println!("Examples:");
     println!("  qsv load data.csv - grep foo - show");
     println!("  qsv load data.csv - grep bar -i - show");
+    println!("  qsv load logs.csv - grep FAILED --column EventData - show");
     println!("  qsv load data.csv - grep pattern --ignore-case --invert-match - show");
 }
 fn print_head_help() {
@@ -541,10 +553,12 @@ fn print_sort_help() {
     println!("  qsv load data.csv - sort col1,col2 --desc - show");
 }
 fn print_count_help() {
-    println!("count: Count duplicate rows, grouping by all columns\n");
-    println!("Usage: count\n");
+    println!("count: Count duplicate rows, grouping by all columns by default\n");
+    println!("Usage: count [col1[,col2...]]\n");
     println!("Examples:");
     println!("  qsv load data.csv - count - show");
+    println!("  qsv load data.csv - count EventId - show");
+    println!("  qsv load data.csv - count EventId,Level - show");
 }
 fn print_uniq_help() {
     println!("uniq: Remove duplicate rows based on all columns\n");

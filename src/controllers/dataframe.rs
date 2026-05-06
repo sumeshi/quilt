@@ -69,9 +69,15 @@ impl DataFrameController {
         }
         self
     }
-    pub fn grep(&mut self, pattern: &str, ignorecase: bool, is_inverted: bool) -> &mut Self {
+    pub fn grep(
+        &mut self,
+        pattern: &str,
+        ignorecase: bool,
+        is_inverted: bool,
+        columns: Option<&[String]>,
+    ) -> &mut Self {
         if let Some(df) = &self.df {
-            self.df = Some(grep::grep(df, pattern, ignorecase, is_inverted));
+            self.df = Some(grep::grep(df, pattern, ignorecase, is_inverted, columns));
         }
         self
     }
@@ -93,9 +99,9 @@ impl DataFrameController {
         }
         self
     }
-    pub fn count(&mut self) -> &mut Self {
+    pub fn count(&mut self, columns: &[String]) -> &mut Self {
         if let Some(df) = &self.df {
-            self.df = Some(count::count(df));
+            self.df = Some(count::count(df, columns));
         }
         self
     }

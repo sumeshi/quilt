@@ -1,4 +1,5 @@
 use std::env;
+use std::io::IsTerminal;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process;
@@ -105,9 +106,10 @@ fn process_commands(controller: &mut DataFrameController, commands: &[Command]) 
         ];
 
         if !finalizer_commands.contains(&last_cmd.name.as_str()) {
-            // Last command was not a finalizer, so use the default finalizer for this build.
+            // Last command was not a finalizer, so choose the implicit finalizer
+            // based on whether stdout is connected to a terminal.
             if !controller.is_empty() {
-                if cfg!(feature = "table") {
+                if cfg!(feature = "table") && std::io::stdout().is_terminal() {
                     controller.showtable();
                 } else {
                     controller.show();
@@ -139,10 +141,15 @@ fn parse_column_names(input: &str) -> Vec<String> {
             continue;
         }
 
-        // Try colon notation first (col1:col3), then hyphen notation (col1-col3)
-        let captures_opt = RE_COL_RANGE_COLON
-            .captures(part)
-            .or_else(|| RE_COL_RANGE_HYPHEN.captures(part));
+        // Hyphen ranges are passed through so select.rs can prefer an exact
+        // column-name match before attempting range expansion.
+        if RE_COL_RANGE_HYPHEN.is_match(part) {
+            result.push(part.to_string());
+            continue;
+        }
+
+        // Colon ranges can still be expanded here.
+        let captures_opt = RE_COL_RANGE_COLON.captures(part);
 
         if let Some(captures) = captures_opt {
             let prefix1 = captures.name("p1").unwrap().as_str();
@@ -313,8 +320,20 @@ fn process_command(controller: &mut DataFrameController, cmd: &Command) {
 
             let ignorecase = cmd.options.contains_key("ignore_case");
             let is_inverted = cmd.options.contains_key("invert_match");
+            let columns = cmd
+                .options
+                .get("column")
+                .or_else(|| cmd.options.get("col"))
+                .and_then(|opt| opt.as_ref())
+                .map(|value| {
+                    value
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<String>>()
+                });
 
-            controller.grep(pattern, ignorecase, is_inverted);
+            controller.grep(pattern, ignorecase, is_inverted, columns.as_deref());
         }
 
         "head" => {
@@ -382,7 +401,14 @@ fn process_command(controller: &mut DataFrameController, cmd: &Command) {
 
         "count" => {
             check_data_loaded(controller, "count");
-            controller.count();
+            let columns: Vec<String> = cmd
+                .args
+                .iter()
+                .flat_map(|arg| arg.split(','))
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            controller.count(&columns);
         }
 
         "uniq" => {

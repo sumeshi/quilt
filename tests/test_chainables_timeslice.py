@@ -54,6 +54,5 @@ class TestTimeslice(QsvTestBase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("+09:00", result.stdout)
 
-
 if __name__ == "__main__":
     unittest.main()

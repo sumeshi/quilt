@@ -1,7 +1,7 @@
 use crate::controllers::log::LogController;
 use polars::prelude::{col, len, Expr, LazyFrame, SortMultipleOptions};
 
-pub fn count(df: &LazyFrame) -> LazyFrame {
+pub fn count(df: &LazyFrame, columns: &[String]) -> LazyFrame {
     LogController::debug("Applying count");
 
     let schema = match df.clone().collect_schema() {
@@ -14,10 +14,20 @@ pub fn count(df: &LazyFrame) -> LazyFrame {
         }
     };
 
-    let all_colnames: Vec<String> = schema.iter_names().map(|s| s.to_string()).collect();
+    let group_colnames: Vec<String> = if columns.is_empty() {
+        schema.iter_names().map(|s| s.to_string()).collect()
+    } else {
+        for column in columns {
+            if !schema.iter_names().any(|name| name == column) {
+                eprintln!("Error: Column '{column}' not found in DataFrame for count operation");
+                std::process::exit(1);
+            }
+        }
+        columns.to_vec()
+    };
 
     df.clone()
-        .group_by(all_colnames.iter().map(col).collect::<Vec<Expr>>())
+        .group_by(group_colnames.iter().map(col).collect::<Vec<Expr>>())
         .agg([len().alias("count")])
         .sort(
             ["count"],
