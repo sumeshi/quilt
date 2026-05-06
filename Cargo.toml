@@ -1,6 +1,6 @@
 [package]
 name = "qsv"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2021"
 description = "A fast, flexible, and memory-efficient command-line tool written in Rust for processing large CSV files."
 authors = ["sumeshi <sum3sh1@protonmail.com>"]
@@ -22,9 +22,10 @@ serde-xml-rs = "0.6"
 # - csv: load/show/dump CSV support
 # - temporal: changetz/timeline/timeslice/timeround
 # - strings + regex: select/contains/sed/grep string operations
+# - is_in: sigma multi-value matching
 # - describe: showquery plan rendering
 # - parquet: parquet load + dumpcache
-polars = { version = "0.48.1", features = ["lazy", "csv", "temporal", "strings", "regex", "describe", "parquet"], default-features = false }
+polars = { version = "0.48.1", features = ["lazy", "csv", "temporal", "strings", "regex", "is_in", "describe", "parquet"], default-features = false }
 regex = "1.9"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
@@ -35,6 +36,7 @@ once_cell = "1"
 flate2 = "1.0"
 dtparse = "2.0"
 rayon = "1.10.0"
+sqlparser = "0.53"
 
 [profile.release]
 # Optimize for speed with some size reduction

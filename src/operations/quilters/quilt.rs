@@ -1,6 +1,7 @@
 use crate::controllers::command::parse_batch_size;
 use crate::controllers::dataframe::DataFrameController;
 use crate::controllers::log::LogController;
+use crate::operations::quilters::sigma_json;
 use polars::prelude::{col, lit, JoinType, LazyFrame};
 use serde::{Deserialize, Serialize};
 use serde_yml::Value;
@@ -18,130 +19,211 @@ use crate::operations::finalizers::{
 };
 use crate::operations::initializers::load as load_op;
 // Type alias for chainable operation functions
-type ChainableOperation = fn(&LazyFrame, &Value) -> LazyFrame;
+type ChainableOperation = Box<dyn Fn(&LazyFrame, &Value) -> LazyFrame + Send + Sync>;
 type FinalizerOperation = fn(&LazyFrame, &Value);
 // Create a dispatch table for chainable operations
-fn create_chainable_dispatch_table() -> HashMap<&'static str, ChainableOperation> {
+fn create_chainable_dispatch_table(
+    global_field_map: Option<HashMap<String, String>>,
+) -> HashMap<&'static str, ChainableOperation> {
     let mut table: HashMap<&'static str, ChainableOperation> = HashMap::new();
-    table.insert("select", |df, args| {
-        let colnames = if let Some(colnames_str) = get_string_from_value(args, "colnames") {
-            colnames_str
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .collect()
-        } else if let Some(colnames_vec) = get_string_vec_from_value(args, "colnames") {
-            colnames_vec
-        } else {
-            vec!["*".to_string()]
-        };
-        select::select(df, &colnames)
-    });
-    table.insert("isin", |df, args| {
-        let colname = get_string_from_value(args, "colname").unwrap_or_default();
-        let values = get_string_vec_from_value(args, "values").unwrap_or_default();
-        isin::isin(df, &colname, &values)
-    });
-    table.insert("contains", |df, args| {
-        let colname = get_string_from_value(args, "colname").unwrap_or_default();
-        let pattern = get_string_from_value(args, "pattern").unwrap_or_default();
-        let ignorecase = get_bool_from_value(args, "ignorecase");
-        contains::contains(df, &colname, &pattern, ignorecase)
-    });
-    table.insert("sed", |df, args| {
-        let colname = get_string_from_value(args, "colname");
-        let pattern = get_string_from_value(args, "pattern").unwrap_or_default();
-        let replacement = get_string_from_value(args, "replacement").unwrap_or_default();
-        let ignorecase = get_bool_from_value(args, "ignorecase");
-        sed::sed(df, colname.as_deref(), &pattern, &replacement, ignorecase)
-    });
-    table.insert("grep", |df, args| {
-        let pattern = get_string_from_value(args, "pattern").unwrap_or_default();
-        let ignorecase = get_bool_from_value(args, "ignorecase");
-        let is_inverted = get_bool_from_value(args, "invert_match");
-        grep::grep(df, &pattern, ignorecase, is_inverted)
-    });
-    table.insert("head", |df, args| {
-        let n = get_usize_from_value(args, "number")
-            .or_else(|| args.as_u64().and_then(|u| usize::try_from(u).ok()))
-            .unwrap_or(5);
-        head::head(df, n)
-    });
-    table.insert("tail", |df, args| {
-        let n = get_usize_from_value(args, "number")
-            .or_else(|| args.as_u64().and_then(|u| usize::try_from(u).ok()))
-            .unwrap_or(5);
-        tail::tail(df, n)
-    });
-    table.insert("sort", |df, args| {
-        let colnames = if let Some(colnames_str) = get_string_from_value(args, "colnames") {
-            colnames_str
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .collect()
-        } else if let Some(colnames_vec) = get_string_vec_from_value(args, "colnames") {
-            colnames_vec
-        } else {
-            vec!["*".to_string()]
-        };
-        let desc = get_bool_from_value(args, "desc");
-        sort::sort(df, &colnames, desc)
-    });
-    table.insert("count", |df, _args| count::count(df));
-    table.insert("uniq", |df, _args| uniq::uniq(df));
-    table.insert("changetz", |df, args| {
-        let colname = get_string_from_value(args, "colname").unwrap_or_default();
-        let from_tz = get_string_from_value(args, "from-tz").unwrap_or_default();
-        let to_tz = get_string_from_value(args, "to-tz").unwrap_or_default();
-        let input_format = get_string_from_value(args, "input_format")
-            .or_else(|| get_string_from_value(args, "input-format"))
-            .or_else(|| get_string_from_value(args, "format"));
-        let output_format = get_string_from_value(args, "output_format")
-            .or_else(|| get_string_from_value(args, "output-format"));
-        let ambiguous = get_string_from_value(args, "ambiguous");
-        changetz::changetz(
-            df,
-            &colname,
-            &from_tz,
-            &to_tz,
-            input_format.as_deref().unwrap_or("auto"),
-            output_format.as_deref().unwrap_or("auto"),
-            ambiguous.as_deref().unwrap_or("earliest"),
-        )
-    });
-    table.insert("convert", |df, args| {
-        let colname = get_string_from_value(args, "colname").unwrap_or_default();
-        let from_format = get_string_from_value(args, "from")
-            .or_else(|| get_string_from_value(args, "from_format"))
-            .unwrap_or_default();
-        let to_format = get_string_from_value(args, "to")
-            .or_else(|| get_string_from_value(args, "to_format"))
-            .unwrap_or_default();
-        convert::convert(df, &colname, &from_format, &to_format)
-    });
-    table.insert("renamecol", |df, args| {
-        let old_name = get_string_from_value(args, "old_name")
-            .or_else(|| get_string_from_value(args, "from"))
-            .unwrap_or_default();
-        let new_name = get_string_from_value(args, "new_name")
-            .or_else(|| get_string_from_value(args, "to"))
-            .unwrap_or_default();
-        renamecol::renamecol(df, &old_name, &new_name)
-    });
-    table.insert("timeline", |df, args| {
-        let time_column = get_string_from_value(args, "time_column").unwrap_or_default();
-        let interval = get_string_from_value(args, "interval").unwrap_or_default();
-        let agg_type =
-            get_string_from_value(args, "agg_type").unwrap_or_else(|| "count".to_string());
-        let agg_column = get_string_from_value(args, "agg_column");
-        timeline::timeline(
-            df,
-            &time_column,
-            &interval,
-            &agg_type,
-            agg_column.as_deref(),
-        )
-    });
-    table.insert("timeslice", |df, args| {
+    table.insert(
+        "select",
+        Box::new(|df, args| {
+            let colnames = if let Some(colnames_str) = get_string_from_value(args, "colnames") {
+                colnames_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect()
+            } else if let Some(colnames_vec) = get_string_vec_from_value(args, "colnames") {
+                colnames_vec
+            } else {
+                vec!["*".to_string()]
+            };
+            select::select(df, &colnames)
+        }),
+    );
+    table.insert(
+        "isin",
+        Box::new(|df, args| {
+            let colname = get_string_from_value(args, "colname").unwrap_or_default();
+            let values = get_string_vec_from_value(args, "values").unwrap_or_default();
+            isin::isin(df, &colname, &values)
+        }),
+    );
+    table.insert(
+        "contains",
+        Box::new(|df, args| {
+            let colname = get_string_from_value(args, "colname").unwrap_or_default();
+            let pattern = get_string_from_value(args, "pattern").unwrap_or_default();
+            let ignorecase = get_bool_from_value(args, "ignorecase");
+            contains::contains(df, &colname, &pattern, ignorecase)
+        }),
+    );
+    table.insert(
+        "where",
+        Box::new(move |df, args| {
+            let sql = get_string_from_value(args, "sql").unwrap_or_default();
+            let step_field_map = get_string_mapping_from_value(args, "field_map");
+            let field_map = merge_field_maps(global_field_map.as_ref(), step_field_map.as_ref());
+            let annotate = get_bool_from_value(args, "annotate");
+            let with_annotation_columns = |frame: LazyFrame| {
+                if annotate {
+                    frame.with_columns([
+                        lit(get_string_from_value(args, "sigma_title").unwrap_or_default())
+                            .alias("sigma_title"),
+                        lit(get_string_from_value(args, "sigma_id").unwrap_or_default())
+                            .alias("sigma_id"),
+                        lit(get_string_from_value(args, "sigma_level").unwrap_or_default())
+                            .alias("sigma_level"),
+                        lit(get_string_from_value(args, "sigma_tags").unwrap_or_default())
+                            .alias("sigma_tags"),
+                    ])
+                } else {
+                    frame
+                }
+            };
+            let schema = match df.clone().collect_schema() {
+                Ok(schema) => schema,
+                Err(e) => {
+                    eprintln!("Error: Failed to get schema for where step: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let available_cols: Vec<String> = schema.iter_names().map(|s| s.to_string()).collect();
+            let expr =
+                match sigma_json::sql_to_polars_expr(&sql, &available_cols, field_map.as_ref()) {
+                    Some(expr) => expr,
+                    None => {
+                        LogController::debug("where step produced no matching expression.");
+                        return with_annotation_columns(df.clone().filter(lit(false)));
+                    }
+                };
+
+            with_annotation_columns(df.clone().filter(expr))
+        }),
+    );
+    table.insert(
+        "sed",
+        Box::new(|df, args| {
+            let colname = get_string_from_value(args, "colname");
+            let pattern = get_string_from_value(args, "pattern").unwrap_or_default();
+            let replacement = get_string_from_value(args, "replacement").unwrap_or_default();
+            let ignorecase = get_bool_from_value(args, "ignorecase");
+            sed::sed(df, colname.as_deref(), &pattern, &replacement, ignorecase)
+        }),
+    );
+    table.insert(
+        "grep",
+        Box::new(|df, args| {
+            let pattern = get_string_from_value(args, "pattern").unwrap_or_default();
+            let ignorecase = get_bool_from_value(args, "ignorecase");
+            let is_inverted = get_bool_from_value(args, "invert_match");
+            grep::grep(df, &pattern, ignorecase, is_inverted)
+        }),
+    );
+    table.insert(
+        "head",
+        Box::new(|df, args| {
+            let n = get_usize_from_value(args, "number")
+                .or_else(|| args.as_u64().and_then(|u| usize::try_from(u).ok()))
+                .unwrap_or(5);
+            head::head(df, n)
+        }),
+    );
+    table.insert(
+        "tail",
+        Box::new(|df, args| {
+            let n = get_usize_from_value(args, "number")
+                .or_else(|| args.as_u64().and_then(|u| usize::try_from(u).ok()))
+                .unwrap_or(5);
+            tail::tail(df, n)
+        }),
+    );
+    table.insert(
+        "sort",
+        Box::new(|df, args| {
+            let colnames = if let Some(colnames_str) = get_string_from_value(args, "colnames") {
+                colnames_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect()
+            } else if let Some(colnames_vec) = get_string_vec_from_value(args, "colnames") {
+                colnames_vec
+            } else {
+                vec!["*".to_string()]
+            };
+            let desc = get_bool_from_value(args, "desc");
+            sort::sort(df, &colnames, desc)
+        }),
+    );
+    table.insert("count", Box::new(|df, _args| count::count(df)));
+    table.insert("uniq", Box::new(|df, _args| uniq::uniq(df)));
+    table.insert(
+        "changetz",
+        Box::new(|df, args| {
+            let colname = get_string_from_value(args, "colname").unwrap_or_default();
+            let from_tz = get_string_from_value(args, "from-tz").unwrap_or_default();
+            let to_tz = get_string_from_value(args, "to-tz").unwrap_or_default();
+            let input_format = get_string_from_value(args, "input_format")
+                .or_else(|| get_string_from_value(args, "input-format"))
+                .or_else(|| get_string_from_value(args, "format"));
+            let output_format = get_string_from_value(args, "output_format")
+                .or_else(|| get_string_from_value(args, "output-format"));
+            let ambiguous = get_string_from_value(args, "ambiguous");
+            changetz::changetz(
+                df,
+                &colname,
+                &from_tz,
+                &to_tz,
+                input_format.as_deref().unwrap_or("auto"),
+                output_format.as_deref().unwrap_or("auto"),
+                ambiguous.as_deref().unwrap_or("earliest"),
+            )
+        }),
+    );
+    table.insert(
+        "convert",
+        Box::new(|df, args| {
+            let colname = get_string_from_value(args, "colname").unwrap_or_default();
+            let from_format = get_string_from_value(args, "from")
+                .or_else(|| get_string_from_value(args, "from_format"))
+                .unwrap_or_default();
+            let to_format = get_string_from_value(args, "to")
+                .or_else(|| get_string_from_value(args, "to_format"))
+                .unwrap_or_default();
+            convert::convert(df, &colname, &from_format, &to_format)
+        }),
+    );
+    table.insert(
+        "renamecol",
+        Box::new(|df, args| {
+            let old_name = get_string_from_value(args, "old_name")
+                .or_else(|| get_string_from_value(args, "from"))
+                .unwrap_or_default();
+            let new_name = get_string_from_value(args, "new_name")
+                .or_else(|| get_string_from_value(args, "to"))
+                .unwrap_or_default();
+            renamecol::renamecol(df, &old_name, &new_name)
+        }),
+    );
+    table.insert(
+        "timeline",
+        Box::new(|df, args| {
+            let time_column = get_string_from_value(args, "time_column").unwrap_or_default();
+            let interval = get_string_from_value(args, "interval").unwrap_or_default();
+            let agg_type =
+                get_string_from_value(args, "agg_type").unwrap_or_else(|| "count".to_string());
+            let agg_column = get_string_from_value(args, "agg_column");
+            timeline::timeline(
+                df,
+                &time_column,
+                &interval,
+                &agg_type,
+                agg_column.as_deref(),
+            )
+        }),
+    );
+    table.insert("timeslice", Box::new(|df, args| {
         let time_column = get_string_from_value(args, "time_column").unwrap_or_default();
         let start_time = get_string_from_value(args, "start");
         let end_time = get_string_from_value(args, "end");
@@ -152,36 +234,42 @@ fn create_chainable_dispatch_table() -> HashMap<&'static str, ChainableOperation
             std::process::exit(1);
         }
         timeslice::timeslice(df, &time_column, start_time.as_deref(), end_time.as_deref())
-    });
-    table.insert("timeround", |df, args| {
-        let colname = get_string_from_value(args, "colname").unwrap_or_default();
-        let unit = get_string_from_value(args, "unit").unwrap_or_default();
-        let output_colname = get_string_from_value(args, "output");
-        timeround::timeround(df, &colname, &unit, output_colname.as_deref())
-    });
-    table.insert("pivot", |df, args| {
-        let rows_str = get_string_from_value(args, "rows").unwrap_or_default();
-        let cols_str = get_string_from_value(args, "cols")
-            .or_else(|| get_string_from_value(args, "columns"))
-            .unwrap_or_default();
-        let values = get_string_from_value(args, "values")
-            .or_else(|| get_string_from_value(args, "value"))
-            .unwrap_or_default();
-        let agg_func = get_string_from_value(args, "agg")
-            .or_else(|| get_string_from_value(args, "aggregation"))
-            .unwrap_or_else(|| "sum".to_string());
-        let rows: Vec<String> = if rows_str.is_empty() {
-            Vec::new()
-        } else {
-            rows_str.split(',').map(|s| s.trim().to_string()).collect()
-        };
-        let columns: Vec<String> = if cols_str.is_empty() {
-            Vec::new()
-        } else {
-            cols_str.split(',').map(|s| s.trim().to_string()).collect()
-        };
-        pivot::pivot(df, &rows, &columns, &values, &agg_func)
-    });
+    }));
+    table.insert(
+        "timeround",
+        Box::new(|df, args| {
+            let colname = get_string_from_value(args, "colname").unwrap_or_default();
+            let unit = get_string_from_value(args, "unit").unwrap_or_default();
+            let output_colname = get_string_from_value(args, "output");
+            timeround::timeround(df, &colname, &unit, output_colname.as_deref())
+        }),
+    );
+    table.insert(
+        "pivot",
+        Box::new(|df, args| {
+            let rows_str = get_string_from_value(args, "rows").unwrap_or_default();
+            let cols_str = get_string_from_value(args, "cols")
+                .or_else(|| get_string_from_value(args, "columns"))
+                .unwrap_or_default();
+            let values = get_string_from_value(args, "values")
+                .or_else(|| get_string_from_value(args, "value"))
+                .unwrap_or_default();
+            let agg_func = get_string_from_value(args, "agg")
+                .or_else(|| get_string_from_value(args, "aggregation"))
+                .unwrap_or_else(|| "sum".to_string());
+            let rows: Vec<String> = if rows_str.is_empty() {
+                Vec::new()
+            } else {
+                rows_str.split(',').map(|s| s.trim().to_string()).collect()
+            };
+            let columns: Vec<String> = if cols_str.is_empty() {
+                Vec::new()
+            } else {
+                cols_str.split(',').map(|s| s.trim().to_string()).collect()
+            };
+            pivot::pivot(df, &rows, &columns, &values, &agg_func)
+        }),
+    );
     table
 }
 // Create a dispatch table for finalizer operations
@@ -344,6 +432,69 @@ fn get_bool_from_value(val: &Value, key: &str) -> bool {
 fn get_usize_from_value(val: &Value, key: &str) -> Option<usize> {
     val.get(key)
         .and_then(|v| v.as_u64().and_then(|u| usize::try_from(u).ok()))
+}
+
+fn get_string_mapping_from_value(val: &Value, key: &str) -> Option<HashMap<String, String>> {
+    val.get(key).and_then(|v| v.as_mapping()).map(|mapping| {
+        mapping
+            .iter()
+            .filter_map(|(map_key, map_value)| {
+                Some((
+                    map_key.as_str()?.to_string(),
+                    map_value.as_str()?.to_string(),
+                ))
+            })
+            .collect()
+    })
+}
+
+fn merge_field_maps(
+    global_field_map: Option<&HashMap<String, String>>,
+    step_field_map: Option<&HashMap<String, String>>,
+) -> Option<HashMap<String, String>> {
+    let mut merged = HashMap::new();
+
+    if let Some(mapping) = global_field_map {
+        for (key, value) in mapping {
+            if !value.trim().is_empty() {
+                merged.insert(key.clone(), value.clone());
+            }
+        }
+    }
+
+    if let Some(mapping) = step_field_map {
+        for (key, value) in mapping {
+            if !value.trim().is_empty() {
+                merged.insert(key.clone(), value.clone());
+            }
+        }
+    }
+
+    if merged.is_empty() {
+        None
+    } else {
+        Some(merged)
+    }
+}
+
+fn load_mapping_file(mapping_path: &Path) -> Result<HashMap<String, String>, String> {
+    let content = fs::read_to_string(mapping_path).map_err(|e| {
+        format!(
+            "Failed to read mapping file {}: {e}",
+            mapping_path.display()
+        )
+    })?;
+    let raw_mapping: HashMap<String, String> = serde_json::from_str(&content).map_err(|e| {
+        format!(
+            "Failed to parse mapping file {}: {e}",
+            mapping_path.display()
+        )
+    })?;
+
+    Ok(raw_mapping
+        .into_iter()
+        .filter(|(_, value)| !value.trim().is_empty())
+        .collect())
 }
 
 fn parse_quilt_vars(quilt_vars: &[String]) -> Result<HashMap<String, String>, String> {
@@ -570,10 +721,17 @@ fn execute_load_step(
         let path_to_load = if source_path.is_absolute() {
             source_path.to_path_buf()
         } else {
-            config_path
+            let config_relative = config_path
                 .parent()
                 .unwrap_or_else(|| Path::new("."))
-                .join(source_path)
+                .join(source_path);
+            if config_relative.exists() {
+                config_relative
+            } else {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(source_path)
+            }
         };
         LogController::debug(&format!(
             "Loading data from: {} (specified in quilt YAML for stage '{}')",
@@ -950,6 +1108,7 @@ pub fn quilt(
     config_path_str: &str,
     cli_input_files: Option<Vec<PathBuf>>,
     output_path_str: Option<&str>,
+    mapping_path_str: Option<&str>,
     quilt_vars: &[String],
 ) {
     let config_path = Path::new(config_path_str);
@@ -967,6 +1126,19 @@ pub fn quilt(
             eprintln!("Error parsing quilt vars: {e}");
             std::process::exit(1);
         }
+    };
+    let global_field_map = match mapping_path_str {
+        Some(path) => {
+            let mapping_path = Path::new(path);
+            match load_mapping_file(mapping_path) {
+                Ok(mapping) => Some(mapping),
+                Err(e) => {
+                    eprintln!("Error loading mapping file: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        None => None,
     };
     let config_content = apply_quilt_vars(&raw_config_content, &parsed_vars);
 
@@ -997,7 +1169,7 @@ pub fn quilt(
         quilt_config.title,
         quilt_config.stages.len()
     ));
-    let chainable_ops = create_chainable_dispatch_table();
+    let chainable_ops = create_chainable_dispatch_table(global_field_map);
     let finalizer_ops = create_finalizer_dispatch_table();
     let mut stage_results: HashMap<String, LazyFrame> = HashMap::new();
     let mut last_processed_df: Option<LazyFrame> = None;

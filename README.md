@@ -638,6 +638,88 @@ Within a Quilt YAML file, stages can be of different types to orchestrate the fl
 | `process`      | Executes a series of qsv operations on a dataset.          | `steps`: Dictionary of operations (e.g., `load`, `select`, `head`, `showtable`). Each key is a qsv command, and its value contains arguments/options. <br> `source` (optional): Specifies the output of a previous stage as input. |
 | `concat`       | Concatenates multiple datasets (stages).                   | `sources`: List of stage names whose outputs to concatenate. <br>`params.how` (optional): Method for concatenation, `vertical` (default). Note: `horizontal` concatenation is not yet implemented. |
 | `join`         | Joins datasets from multiple stages based on keys.         | `sources`: List of two stage names whose outputs to join. <br>`params.left_on`/`params.right_on` or `params.on`: Column(s) for joining. <br>`params.how` (optional): Join type (`inner`, `left`, `outer`, `cross`). |
+| `where` step   | Filters rows using a SQL `WHERE` clause embedded in a process step. | `sql`: Full SQL statement such as `SELECT * FROM logs WHERE ...`. <br>`field_map` (optional): Inline mapping of SQL field names to CSV column names. <br>`annotate` (optional): Add `sigma_title`, `sigma_id`, `sigma_level`, `sigma_tags` columns. |
+
+#### `sigma2quilt`
+
+`sigma2quilt` converts Zircolite JSON rules into a regular quilt YAML file. The generated quilt uses normal `process`, `concat`, and `output` stages, and each rule becomes a `where` step over `${input}`.
+
+- A single-rule JSON file defaults to `quilt-<rule-title>.yaml`
+- Rule titles are converted to lowercase hyphen-joined filenames
+- `--separate` writes one quilt file per rule
+- Each conversion also writes one `_mapping.json` template for the whole input ruleset
+- `--annotate` is mainly useful when multiple rules are kept in one generated quilt and you want the matched rows to retain per-rule metadata
+- For `rules_dir/` input, `-o <dir>` is required
+
+Supported SQL in the generated `where` step:
+1. `=`
+2. `LIKE ... ESCAPE '\'`
+3. `NOT (...)`
+4. `AND`
+5. `OR`
+
+Field resolution is:
+1. Explicit mapping via `qsv quilt --mapping <file>` or `params.field_map`
+2. Exact CSV column match
+3. Case-insensitive CSV column match
+4. Otherwise warn and skip that condition
+
+```yaml
+title: Sigma JSON Conversion: rules_windows_generic
+
+stages:
+  load_stage:
+    type: process
+    steps:
+      load:
+        path: ${input}
+
+  detect_1_suspicious_high_integritylevel_conhost_legacy_option:
+    type: process
+    source: load_stage
+    steps:
+      where:
+        sql: "SELECT * FROM logs WHERE Channel='Security' AND EventID=4688"
+        annotate: true
+        sigma_title: "Suspicious High IntegrityLevel Conhost Legacy Option"
+        sigma_id: "3037d961-21e9-4732-b27a-637bcc7bf539"
+        sigma_level: "informational"
+        sigma_tags: "attack.defense-evasion,attack.t1202"
+
+  output_stage:
+    type: output
+    source: detect_1_suspicious_high_integritylevel_conhost_legacy_option
+    steps:
+      dump:
+        output: ${output}
+```
+
+Generated mapping template example:
+
+```json
+{
+  "Channel": "",
+  "CommandLine": "",
+  "EventID": ""
+}
+```
+
+Recommended flow:
+
+1. Run `sigma2quilt` to generate both the quilt YAML and `_mapping.json`
+2. Fill in the CSV column names inside `_mapping.json`
+3. Run `quilt --mapping <generated_mapping.json>`
+
+Examples:
+
+```bash
+$ qsv sigma2quilt rules_windows_generic.json
+$ qsv sigma2quilt rules_windows_generic.json -o custom.yaml
+$ qsv sigma2quilt rules_dir/ -o generated_quilts/
+$ qsv sigma2quilt rules_windows_generic.json --annotate
+$ qsv sigma2quilt rules_windows_generic.json --separate -o generated_quilts/
+$ qsv quilt quilt-rules_windows_generic.yaml --mapping quilt-rules_windows_generic_mapping.json --var input=events.csv --var output=alerts.csv
+```
 
 Timeline steps in Quilt use explicit aggregation keys:
 

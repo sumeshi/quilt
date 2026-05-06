@@ -11,6 +11,7 @@ use controllers::command::{
 };
 use controllers::csv::separator_byte;
 use controllers::dataframe::DataFrameController;
+use controllers::sigma_convert::sigma_to_quilt;
 use once_cell::sync::Lazy;
 use regex::Regex;
 
@@ -37,7 +38,7 @@ static RE_COL_RANGE_HYPHEN: Lazy<Regex> = Lazy::new(|| {
 
 fn main() {
     // Initialize logger without timestamp (LogController provides high-precision timestamps)
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("error"))
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
         .format(|buf, record| writeln!(buf, "{}", record.args()))
         .init();
 
@@ -100,6 +101,7 @@ fn process_commands(controller: &mut DataFrameController, commands: &[Command]) 
             "dumpcache",
             "partition",
             "quilt",
+            "sigma2quilt",
         ];
 
         if !finalizer_commands.contains(&last_cmd.name.as_str()) {
@@ -627,6 +629,7 @@ fn process_command(controller: &mut DataFrameController, cmd: &Command) {
             };
 
             let output_path_str = cmd.options.get("output").and_then(|o| o.as_deref());
+            let mapping_path_str = cmd.options.get("mapping").and_then(|o| o.as_deref());
             let quilt_vars = cmd.repeated_options.get("var").cloned().unwrap_or_default();
 
             // quilt operation is destructive / stateful for the controller for now
@@ -635,10 +638,62 @@ fn process_command(controller: &mut DataFrameController, cmd: &Command) {
                 config_path_str,
                 cli_input_files,
                 output_path_str,
+                mapping_path_str,
                 &quilt_vars,
             );
         }
+        "sigma2quilt" => {
+            if cmd.args.is_empty() {
+                eprintln!(
+                    "Error: 'sigma2quilt' command requires a Zircolite JSON file or directory."
+                );
+                process::exit(1);
+            }
 
+            let input_path = PathBuf::from(&cmd.args[0]);
+            let output_path = cmd
+                .options
+                .get("output")
+                .and_then(|o| o.as_ref())
+                .map(PathBuf::from);
+            let annotate = cmd.options.contains_key("annotate");
+            let separate = cmd.options.contains_key("separate");
+
+            match sigma_to_quilt(&input_path, output_path.as_deref(), annotate, separate) {
+                Ok(paths) => {
+                    let mut quilt_paths = Vec::new();
+                    let mut mapping_paths = Vec::new();
+                    for path in paths {
+                        let is_mapping = path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .map(|name| name.ends_with("_mapping.json"))
+                            .unwrap_or(false);
+                        if is_mapping {
+                            mapping_paths.push(path);
+                        } else {
+                            quilt_paths.push(path);
+                        }
+                    }
+
+                    if quilt_paths.len() <= 2 {
+                        for path in &quilt_paths {
+                            println!("{}", path.display());
+                        }
+                    } else {
+                        println!("generated {} quilt files", quilt_paths.len());
+                    }
+
+                    for path in &mapping_paths {
+                        println!("mapping: {}", path.display());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
         // Finalizers
         "partition" => {
             check_data_loaded(controller, "partition");

@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import tempfile
@@ -53,6 +54,12 @@ class TestQuilt(QsvTestBase):
         path = os.path.join(self.temp_dir, filename)
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
+        return path
+
+    def write_json_file(self, name, data):
+        path = os.path.join(self.temp_dir, name)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
         return path
 
     def test_quilt_simple_pipeline(self):
@@ -240,6 +247,59 @@ class TestQuilt(QsvTestBase):
         self.assertIn("Error:", result.stderr)
         self.assertNotIn("panicked at", result.stderr)
 
+    def test_quilt_where_annotate_concat_schema_matches_on_sql_parse_failure(self):
+        quilt = self.write_quilt(
+            "where_annotate_concat.yaml",
+            f"""
+            title: 'Where Annotate Concat'
+            stages:
+              load_stage:
+                type: process
+                steps:
+                  load:
+                    path: "{self.get_fixture_path('sample-min.csv')}"
+              invalid_rule:
+                type: process
+                source: load_stage
+                steps:
+                  where:
+                    sql: "SELECT * FROM events WHERE MissingField = 'x'"
+                    annotate: true
+                    sigma_title: "invalid-rule"
+                    sigma_id: "invalid-id"
+                    sigma_level: "low"
+                    sigma_tags: "test.invalid"
+              valid_rule:
+                type: process
+                source: load_stage
+                steps:
+                  where:
+                    sql: "SELECT * FROM events WHERE Level = 'Info'"
+                    annotate: true
+                    sigma_title: "valid-rule"
+                    sigma_id: "valid-id"
+                    sigma_level: "medium"
+                    sigma_tags: "test.valid"
+              merged:
+                type: concat
+                sources: [invalid_rule, valid_rule]
+              final_stage:
+                type: process
+                source: merged
+                steps:
+                  show:
+            """,
+        )
+        result = self.run_qsv_command(f"quilt {quilt}")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("sigma_title", result.stdout)
+        self.assertIn("sigma_id", result.stdout)
+        self.assertIn("sigma_level", result.stdout)
+        self.assertIn("sigma_tags", result.stdout)
+        self.assertIn("valid-rule,valid-id,medium,test.valid", result.stdout)
+        self.assertNotIn("invalid-rule", result.stdout)
+        self.assertNotIn("schema lengths differ", result.stderr)
+
     def test_quilt_timeround_step(self):
         quilt = self.write_quilt(
             "timeround.yaml",
@@ -409,6 +469,37 @@ class TestQuilt(QsvTestBase):
         )
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout.strip(), "EventId,count\n4688,11")
+
+    def test_quilt_cli_var_relative_input_falls_back_to_cwd(self):
+        nested_dir = os.path.join(self.temp_dir, "rules")
+        os.makedirs(nested_dir, exist_ok=True)
+        quilt = os.path.join(nested_dir, "vars-input.yaml")
+        with open(quilt, "w", encoding="utf-8") as f:
+            f.write(
+                textwrap.dedent(
+                    """
+                    title: "Vars Input"
+                    description: "relative input path"
+                    version: "1.0.0"
+                    author: "qsv test suite"
+                    stages:
+                      process_data:
+                        type: process
+                        steps:
+                          load:
+                            path: "${input}"
+                          head:
+                            number: 1
+                          show:
+                    """
+                ).strip()
+                + "\n"
+            )
+        result = self.run_qsv_command(
+            f"quilt {quilt} --var input=tests/fixtures/sample-min.csv"
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(result.stdout.startswith("RecordNumber,EventRecordId"))
 
     def test_quilt_forward_reference_is_resolved(self):
         quilt = self.write_quilt(
@@ -838,6 +929,288 @@ class TestQuilt(QsvTestBase):
         self.assertTrue(os.path.exists(output_file))
         with open(output_file, "r", encoding="utf-8") as f:
             self.assertEqual(len(f.read().splitlines()), 3)
+
+    def test_sigma2quilt_json_default_output(self):
+        rules_path = self.write_json_file(
+            "rules_windows_generic.json",
+            [
+                {
+                    "title": "Suspicious High IntegrityLevel Conhost Legacy Option",
+                    "id": "3037d961-21e9-4732-b27a-637bcc7bf539",
+                    "level": "informational",
+                    "tags": ["attack.defense-evasion", "attack.t1202"],
+                    "rule": [
+                        "SELECT * FROM logs WHERE Channel='Security' AND EventID=4688"
+                    ],
+                }
+            ],
+        )
+        expected_output = os.path.join(
+            self.temp_dir, "quilt-suspicious-high-integritylevel-conhost-legacy-option.yaml"
+        )
+        expected_mapping = os.path.join(
+            self.temp_dir,
+            "quilt-suspicious-high-integritylevel-conhost-legacy-option_mapping.json",
+        )
+        result = self.run_qsv_command(f"sigma2quilt {rules_path}")
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(os.path.exists(expected_output))
+        self.assertTrue(os.path.exists(expected_mapping))
+        self.assertIn(expected_output, result.stdout.strip())
+        self.assertIn(f"mapping: {expected_mapping}", result.stdout.strip())
+
+    def test_sigma2quilt_json_separate_outputs_rule_named_files(self):
+        rules_path = self.write_json_file(
+            "rules_windows_generic.json",
+            [
+                {
+                    "title": "Rule One",
+                    "id": "rule-one",
+                    "level": "informational",
+                    "tags": [],
+                    "rule": ["SELECT * FROM logs WHERE EventID=4688"],
+                },
+                {
+                    "title": "Rule Two",
+                    "id": "rule-two",
+                    "level": "informational",
+                    "tags": [],
+                    "rule": ["SELECT * FROM logs WHERE EventID=4103"],
+                },
+            ],
+        )
+        output_dir = os.path.join(self.temp_dir, "separate")
+        result = self.run_qsv_command(
+            f"sigma2quilt {rules_path} -o {output_dir} --separate"
+        )
+        self.assertEqual(result.returncode, 0)
+        first_output = os.path.join(output_dir, "quilt-rule-one.yaml")
+        second_output = os.path.join(output_dir, "quilt-rule-two.yaml")
+        combined_mapping = os.path.join(
+            output_dir, "quilt-rules_windows_generic_mapping.json"
+        )
+        self.assertTrue(os.path.exists(first_output))
+        self.assertTrue(os.path.exists(second_output))
+        self.assertTrue(os.path.exists(combined_mapping))
+        self.assertIn(first_output, result.stdout)
+        self.assertIn(second_output, result.stdout)
+        self.assertIn(f"mapping: {combined_mapping}", result.stdout)
+
+    def test_sigma2quilt_json_directory_requires_output_dir(self):
+        rules_dir = os.path.join(self.temp_dir, "rules")
+        os.makedirs(rules_dir, exist_ok=True)
+        self.write_json_file(
+            os.path.join("rules", "rules_one.json"),
+            [
+                {
+                    "title": "Rule One",
+                    "id": "rule-one",
+                    "level": "informational",
+                    "tags": [],
+                    "rule": ["SELECT * FROM logs WHERE EventID=4688"],
+                }
+            ],
+        )
+        result = self.run_qsv_command(f"sigma2quilt {rules_dir}")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires -o/--output <dir>", result.stderr)
+
+    def test_sigma2quilt_json_output_file(self):
+        rules_path = self.write_json_file(
+            "rules_windows_generic.json",
+            [
+                {
+                    "title": "PowerShell Decompress Commands",
+                    "id": "1ddc1472-8e52-4f7d-9f11-eab14fc171f5",
+                    "level": "informational",
+                    "tags": ["attack.defense-evasion", "attack.t1140"],
+                    "rule": [
+                        "SELECT * FROM logs WHERE EventID=4103 AND Payload LIKE '%Expand-Archive%' ESCAPE '\\'"
+                    ],
+                }
+            ],
+        )
+        output_path = os.path.join(self.temp_dir, "custom.yaml")
+        result = self.run_qsv_command(f"sigma2quilt {rules_path} -o {output_path}")
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(os.path.exists(output_path))
+        self.assertTrue(os.path.exists(os.path.join(self.temp_dir, "custom_mapping.json")))
+        with open(output_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("where:", content)
+        self.assertNotIn("type: sigma", content)
+
+    def test_sigma2quilt_json_generates_mapping_template(self):
+        rules_path = self.write_json_file(
+            "rules_windows_generic.json",
+            [
+                {
+                    "title": "Suspicious Command Line",
+                    "id": "rule-one",
+                    "level": "informational",
+                    "tags": [],
+                    "rule": [
+                        "SELECT * FROM logs WHERE EventID=4688 AND CommandLine LIKE '%ForceV1%' ESCAPE '\\'"
+                    ],
+                }
+            ],
+        )
+        generated_quilt = os.path.join(self.temp_dir, "generated.yaml")
+        generated_mapping = os.path.join(self.temp_dir, "generated_mapping.json")
+        convert_result = self.run_qsv_command(
+            f"sigma2quilt {rules_path} -o {generated_quilt}"
+        )
+        self.assertEqual(convert_result.returncode, 0)
+        self.assertTrue(os.path.exists(generated_mapping))
+        with open(generated_mapping, "r", encoding="utf-8") as f:
+            mapping = json.load(f)
+        self.assertEqual(mapping["CommandLine"], "")
+        self.assertEqual(mapping["EventID"], "")
+
+    def test_sigma2quilt_json_generated_quilt_runs(self):
+        rules_path = self.write_json_file(
+            "rules_windows_generic.json",
+            [
+                {
+                    "title": "Suspicious High IntegrityLevel Conhost Legacy Option",
+                    "id": "3037d961-21e9-4732-b27a-637bcc7bf539",
+                    "level": "informational",
+                    "tags": ["attack.defense-evasion", "attack.t1202"],
+                    "rule": [
+                        "SELECT * FROM logs WHERE Channel='Security' AND EventID=4688 AND CommandLine LIKE '%ForceV1%' ESCAPE '\\'"
+                    ],
+                }
+            ],
+        )
+        csv_path = os.path.join(self.temp_dir, "logs.csv")
+        with open(csv_path, "w", encoding="utf-8") as f:
+            f.write(
+                "\n".join(
+                    [
+                        "Channel,EventID,CommandLine",
+                        r"Security,4688,C:\Windows\System32\conhost.exe 0xffffffff -ForceV1",
+                        r"Security,4657,noop",
+                    ]
+                )
+                + "\n"
+            )
+
+        generated_quilt = os.path.join(self.temp_dir, "generated.yaml")
+        convert_result = self.run_qsv_command(
+            f"sigma2quilt {rules_path} -o {generated_quilt}"
+        )
+        self.assertEqual(convert_result.returncode, 0)
+        self.assertTrue(os.path.exists(generated_quilt))
+
+        output_csv = os.path.join(self.temp_dir, "result.csv")
+        run_result = self.run_qsv_command(
+            f"quilt {generated_quilt} --var input={csv_path} --var output={output_csv}"
+        )
+        self.assertEqual(run_result.returncode, 0)
+        self.assertTrue(os.path.exists(output_csv))
+        with open(output_csv, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("Security,4688", content)
+
+    def test_sigma2quilt_json_generated_quilt_runs_with_mapping_file(self):
+        rules_path = self.write_json_file(
+            "rules_windows_generic.json",
+            [
+                {
+                    "title": "Mapped Command Line",
+                    "id": "3037d961-21e9-4732-b27a-637bcc7bf539",
+                    "level": "informational",
+                    "tags": ["attack.defense-evasion", "attack.t1202"],
+                    "rule": [
+                        "SELECT * FROM logs WHERE Channel='Security' AND EventID=4688 AND CommandLine LIKE '%ForceV1%' ESCAPE '\\'"
+                    ],
+                }
+            ],
+        )
+        csv_path = os.path.join(self.temp_dir, "logs.csv")
+        with open(csv_path, "w", encoding="utf-8") as f:
+            f.write(
+                "\n".join(
+                    [
+                        "LogChannel,Eid,CmdLine",
+                        r"Security,4688,C:\Windows\System32\conhost.exe 0xffffffff -ForceV1",
+                        r"Security,4657,noop",
+                    ]
+                )
+                + "\n"
+            )
+
+        generated_quilt = os.path.join(self.temp_dir, "generated.yaml")
+        generated_mapping = os.path.join(self.temp_dir, "generated_mapping.json")
+        convert_result = self.run_qsv_command(
+            f"sigma2quilt {rules_path} -o {generated_quilt}"
+        )
+        self.assertEqual(convert_result.returncode, 0)
+        with open(generated_mapping, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "Channel": "LogChannel",
+                    "EventID": "Eid",
+                    "CommandLine": "CmdLine",
+                },
+                f,
+            )
+
+        output_csv = os.path.join(self.temp_dir, "result.csv")
+        run_result = self.run_qsv_command(
+            f"quilt {generated_quilt} --mapping {generated_mapping} --var input={csv_path} --var output={output_csv}"
+        )
+        self.assertEqual(run_result.returncode, 0)
+        self.assertTrue(os.path.exists(output_csv))
+        with open(output_csv, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("Security,4688", content)
+
+    def test_sigma2quilt_json_annotate(self):
+        rules_path = self.write_json_file(
+            "rules_windows_generic.json",
+            [
+                {
+                    "title": "Suspicious High IntegrityLevel Conhost Legacy Option",
+                    "id": "3037d961-21e9-4732-b27a-637bcc7bf539",
+                    "level": "informational",
+                    "tags": ["attack.defense-evasion", "attack.t1202"],
+                    "rule": [
+                        "SELECT * FROM logs WHERE Channel='Security' AND EventID=4688"
+                    ],
+                }
+            ],
+        )
+        generated_quilt = os.path.join(self.temp_dir, "annotated.yaml")
+        convert_result = self.run_qsv_command(
+            f"sigma2quilt {rules_path} -o {generated_quilt} --annotate"
+        )
+        self.assertEqual(convert_result.returncode, 0)
+        with open(generated_quilt, "r", encoding="utf-8") as f:
+            quilt_content = f.read()
+        self.assertIn("sigma_title:", quilt_content)
+        self.assertNotIn("type: sigma", quilt_content)
+
+        csv_path = os.path.join(self.temp_dir, "logs.csv")
+        with open(csv_path, "w", encoding="utf-8") as f:
+            f.write(
+                "\n".join(
+                    [
+                        "Channel,EventID",
+                        "Security,4688",
+                        "Security,4657",
+                    ]
+                )
+                + "\n"
+            )
+        output_csv = os.path.join(self.temp_dir, "annotated.csv")
+        run_result = self.run_qsv_command(
+            f"quilt {generated_quilt} --var input={csv_path} --var output={output_csv}"
+        )
+        self.assertEqual(run_result.returncode, 0)
+        with open(output_csv, "r", encoding="utf-8") as f:
+            output_content = f.read()
+        self.assertIn("sigma_title", output_content)
 
 
 if __name__ == "__main__":

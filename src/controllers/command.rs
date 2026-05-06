@@ -108,7 +108,16 @@ fn get_valid_options(command_name: &str) -> HashSet<&'static str> {
             let mut opts = HashSet::new();
             opts.insert("output");
             opts.insert("o");
+            opts.insert("mapping");
             opts.insert("var");
+            opts
+        }
+        "sigma2quilt" => {
+            let mut opts = HashSet::new();
+            opts.insert("output");
+            opts.insert("o");
+            opts.insert("annotate");
+            opts.insert("separate");
             opts
         }
         _ => HashSet::new(), // unknown command, no validation
@@ -192,6 +201,7 @@ pub fn parse_commands(args: &[String]) -> Vec<Command> {
                         | "batch_size"
                         | "chunk-size"
                         | "chunk_size"
+                        | "mapping"
                         | "var"
                 );
                 let next_arg_is_value = if i + 1 < args.len() {
@@ -373,6 +383,7 @@ pub fn print_help() {
     println!();
     println!("Quilters:");
     println!("  quilt        Execute a quilt (data processing pipeline from YAML)");
+    println!("  sigma2quilt  Convert Zircolite JSON rules into quilt YAML");
     println!();
     println!("Examples:");
     println!("  qsv load data.csv - select col1,col2 - head 10 - show");
@@ -418,6 +429,7 @@ pub fn print_chainable_help(cmd: &str) {
         "dump" => print_dump_help(),
         "dumpcache" => print_dumpcache_help(),
         "quilt" => print_quilt_help(),
+        "sigma2quilt" => print_sigma2quilt_help(),
         _ => println!("No detailed help available for this command."),
     }
 }
@@ -756,7 +768,7 @@ fn print_dumpcache_help() {
 fn print_quilt_help() {
     println!("quilt: Execute a quilt (data processing pipeline from YAML)\n");
     println!(
-        "Usage: quilt <config_path> [csv_file_paths...] [-o <output_file>] [--var key=value ...]\n"
+        "Usage: quilt <config_path> [csv_file_paths...] [-o <output_file>] [--mapping <file>] [--var key=value ...]\n"
     );
     println!("Arguments:");
     println!("  <config_path>    Path to the Quilt YAML configuration file. (Required)");
@@ -765,12 +777,38 @@ fn print_quilt_help() {
     println!("  -o, --output <output_file>  Optional path to save the result as CSV.");
     println!("                              If not provided, output is printed to console.");
     println!(
+        "  --mapping <file>            JSON mapping from Sigma field names to CSV column names."
+    );
+    println!(
         "  --var <key=value>           Replace ${{key}} placeholders in the YAML before parsing."
     );
     println!("Examples:");
     println!("  qsv quilt my_pipeline.yaml");
     println!("  qsv quilt my_pipeline.yaml -o result.csv");
+    println!("  qsv quilt quilt-rule.yaml --mapping quilt-rule_mapping.json");
     println!("  qsv quilt my_pipeline.yaml --var start=2024-01-01 --var end=2024-01-02");
+}
+
+fn print_sigma2quilt_help() {
+    println!("sigma2quilt: Convert Zircolite JSON Sigma rules into quilt YAML\n");
+    println!("Usage: sigma2quilt <rules.json|rules_dir> [-o|--output <path>] [--annotate] [--separate]\n");
+    println!("Arguments:");
+    println!("  <rules.json|rules_dir>  A Zircolite JSON rules file or directory. (Required)");
+    println!("Options:");
+    println!(
+        "  -o, --output <path>     Output file path, or output directory for directory conversion."
+    );
+    println!("  --annotate              Add sigma_title/sigma_id/sigma_level/sigma_tags columns in generated rule stages.");
+    println!("                          Mainly useful when multiple rules remain in one generated quilt.");
+    println!("  --separate              Write one quilt file per rule using a lowercase hyphenated rule title as the filename.");
+    println!("                          For directory input, -o/--output <dir> is required.");
+    println!("                          Each converted input also gets one sibling *_mapping.json template.");
+    println!("Examples:");
+    println!("  qsv sigma2quilt rules_windows_generic.json");
+    println!("  qsv sigma2quilt rules_windows_generic.json -o custom.yaml");
+    println!("  qsv sigma2quilt rules_dir/ -o generated_quilts/");
+    println!("  qsv sigma2quilt rules_windows_generic.json --annotate");
+    println!("  qsv sigma2quilt rules_windows_generic.json --separate");
 }
 
 /// Parse batch size string like "512MB", "2GB" into bytes
