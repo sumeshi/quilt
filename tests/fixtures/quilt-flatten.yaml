@@ -1,0 +1,14 @@
+title: Flatten
+description: Flatten test fixture
+version: '1.0.0'
+author: qsv test suite
+stages:
+  process_data:
+    type: process
+    steps:
+      load:
+        path: tests/fixtures/flatten.jsonl
+      flatten: {}
+      select:
+        colnames: [id, user.name]
+      show: {}

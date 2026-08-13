@@ -4,7 +4,7 @@
 
 ![qsv-rs](https://gist.githubusercontent.com/sumeshi/c2f430d352ae763273faadf9616a29e5/raw/8484142e88948ecc0c8887db8f3bbb5be0dbe51e/qsv-rs.svg)
 
-A fast, flexible, and memory-efficient command-line tool written in Rust for processing large CSV files. Inspired by [xsv](https://github.com/BurntSushi/xsv) and built on [Polars](https://www.pola.rs/), it's designed for handling tens or hundreds of gigabytes of CSV data efficiently in workflows like log analysis and digital forensics.
+A fast, flexible, and memory-efficient command-line tool written in Rust for processing large CSV and JSON Lines files. Inspired by [xsv](https://github.com/BurntSushi/xsv) and built on [Polars](https://www.pola.rs/), it's designed for handling tens or hundreds of gigabytes of data efficiently in workflows like log analysis and digital forensics.
 
 > [!NOTE]
 > The original version of this project was implemented in Python and can be found at [sumeshi/quilter-csv](https://github.com/sumeshi/quilter-csv). This Rust version is a complete rewrite.
@@ -75,19 +75,30 @@ Builds compiled without the optional `table` feature fall back to `show` instead
 
 ## Command Reference
 
+### Migration from removed commands
+
+The command surface now favors small composable operations:
+
+- `timeround` → `bucket`
+- Timeline bucketing → `bucket`
+- Timeline aggregation → `bucket` + `count` or `calc`
+- `pivot` → external analytical tools
+- `convert` → `jq`, `yq`, or dedicated format tools
+
 ### Initializers
 
 #### `load`
-Load one or more CSV or Parquet files.
+Load one or more CSV, JSONL/NDJSON, or Parquet files.
 
 **Supported formats:**
 - CSV files (.csv, .tsv, .txt)
 - Gzipped CSV files (.csv.gz)
+- JSON Lines files (.jsonl, .ndjson), including nested objects
 - Parquet files (.parquet) - high performance, preserves data types
 
 | Parameter     | Type        | Default | Description                                      |
 |---------------|-------------|---------|--------------------------------------------------|
-| path          | list[str] |         | One or more paths to CSV or Parquet files. Quoted glob patterns such as `"logs/*.tsv"` are supported. Cannot mix CSV and Parquet files in the same command. |
+| path          | list[str] |         | One or more paths to CSV, JSONL/NDJSON, or Parquet files. Quoted glob patterns such as `"logs/*.tsv"` are supported. Input families cannot be mixed in one command. |
 | -s, --separator | str       | `,`     | Field separator character (CSV files only).     |
 | --low-memory  | flag    | `false` | Enable low-memory mode for very large files (CSV files only). |
 | --no-headers  | flag    | `false` | Treat the first row as data, not headers (CSV files only). When enabled, columns will be named automatically (`column_1`, `column_2`, etc.). |
@@ -102,6 +113,7 @@ Example:
 $ qsv load data.csv
 $ qsv load data.csv.gz
 $ qsv load data1.csv data2.csv data3.csv
+$ qsv load events.jsonl - flatten - select user.name,process.command_line - show
 $ qsv load "logs/*.tsv" -s $'\t'
 $ qsv load "logs/*.tsv" --separator=$'\t'
 $ qsv load data.csv --low-memory
@@ -141,6 +153,104 @@ $ qsv load data.csv - select 2:4                            # Select 2nd-4th col
 $ qsv load data.csv - select 2,4                            # Select 2nd and 4th columns (col1, col3)
 $ qsv load data.csv - select "col:1":"col:3"                # For columns with colons in names
 $ qsv load data.csv - select 1,datetime,3:5                 # Mixed selection methods
+```
+
+#### `cast`
+Strictly converts one column in place while preserving its position and name.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| column | str | Source column name. Required. |
+| type | str | `int` (`Int64`), `uint` (`UInt64`), `float` (`Float64`), `string`, `bool`, or `datetime`. Required. |
+
+Nulls remain null and invalid non-null values fail the command. Datetimes use the
+automatic parser shared by datetime operations and are stored as Polars
+`Datetime[μs]` values.
+
+```bash
+$ qsv load data.csv - cast EventId int - show
+$ qsv load data.csv - cast timestamp datetime - show
+```
+
+#### `parse-size`
+Converts human-readable size values to integer byte counts in place.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| column | str | Source column name. Required. |
+
+Supported case-sensitive units are `B`, `KB`, `MB`, `GB`, `TB`, `KiB`, `MiB`,
+`GiB`, and `TiB`. SI units use powers of 1000; IEC units use powers of 1024.
+Surrounding whitespace is ignored. Decimal magnitudes are accepted only when
+the exact byte result is integral. The output type is `UInt64`; nulls remain
+null, while negative, malformed, unknown-unit, fractional-byte, and overflow
+values fail the command.
+
+```bash
+$ qsv load data.csv - parse-size size - show
+```
+
+#### `flatten`
+Recursively expands nested JSON object (Struct) fields into dot-notated columns.
+Scalar fields such as `user.name` and `process.command_line` can then be selected
+normally. Lists and arrays, including lists of objects, remain list-valued and are
+not exploded. Missing or null nested fields remain null. Name collisions between
+existing columns and generated paths fail before the frame is changed.
+
+```bash
+$ qsv load events.jsonl - flatten - select user.name,process.command_line - show
+```
+
+#### bucket
+Floors a datetime column to a fixed positive interval and adds a new column.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| column | str | Datetime source column. Required. |
+| interval | str | Positive interval matching ^[1-9][0-9]*(s|m|h|d)$. |
+| --output | str | Output name; defaults to <column>_bucket. |
+
+The source must be a typed datetime column. Use cast column datetime after CSV
+loading. Output values use Polars Datetime[μs] precision, source and nulls are
+preserved, and existing output names are rejected.
+
+Examples:
+$ qsv load data.csv - cast timestamp datetime - bucket timestamp 5m - show
+$ qsv load data.csv - cast timestamp datetime - bucket timestamp 1h --output hour - show
+
+#### delta
+Calculates the current value minus the previous row without reordering or
+replacing the source column.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| column | str | Numeric or datetime source column. Required. |
+| --output | str | Output name; defaults to <column>_delta. |
+
+Numeric deltas use Float64 to represent signed and unsigned differences
+without integer wraparound. Datetime deltas use Duration[μs]. The first row
+and any pair involving a null produce null. Existing output names are rejected.
+
+Examples:
+$ qsv load data.csv - delta count - show
+$ qsv load data.csv - cast timestamp datetime - delta timestamp --output elapsed - show
+
+#### extract
+Extracts named Rust regex capture groups into new nullable String columns while
+preserving the source column.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| column | str | String source column. Required. |
+| regex | str | Rust regex with one or more named groups. Required. |
+
+Unmatched rows and absent optional groups become null. Existing output names,
+invalid regexes, and regexes without named groups are rejected. Quote the regex
+for your shell; this command does not add an expression language.
+
+Examples:
+$ qsv load data.csv - extract message '(?P<user>[^@]+)@(?P<domain>.+)' - show
+$ qsv load data.csv - extract path '^(?P<dir>.*)/(?P<file>[^/]+)$' - show
 ```
 
 #### `isin`
@@ -343,74 +453,6 @@ Renames a specific column.
 $ qsv load data.csv - renamecol current_name new_name
 ```
 
-#### `convert`
-Converts data formats between JSON, YAML, and XML. Also supports formatting/prettifying data in the same format.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| colname | str |         | Column name containing the data to convert. Required. |
-| --from | str |         | Source format: `json`, `yaml`, or `xml`. Required. |
-| --to | str |         | Target format: `json`, `yaml`, or `xml`. Required. |
-
-**Supported conversions:**
-- Cross-format: `json ↔ yaml`, `json ↔ xml`, `yaml ↔ xml`
-- Same-format (formatting): `json → json`, `yaml → yaml`, `xml → xml`
-
-**Features:**
-- Automatically handles malformed JSON with extra quotes
-- Prettifies and formats data for better readability
-- Preserves data structure during conversion
-
-Example:
-```bash
-$ qsv load data.csv - convert json_col --from json --to yaml
-$ qsv load data.csv - convert config --from yaml --to json
-$ qsv load data.csv - convert data --from json --to xml
-$ qsv load data.csv - convert messy_json --from json --to json  # Format/prettify JSON
-$ qsv load data.csv - convert compact_yaml --from yaml --to yaml  # Format YAML
-```
-
-#### `timeline`
-Aggregates data by time intervals, creating time-based summaries.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| time_column | str |         | Name of the datetime column to use for time bucketing. Required. |
-| --interval | str |         | Time interval for aggregation (e.g., `1h`, `30m`, `5s`, `1d`). Required. |
-| --sum | str | | Column name to sum within each time bucket. Optional. |
-| --avg | str | | Column name to average within each time bucket. Optional. |
-| --min | str | | Column name to find minimum within each time bucket. Optional. |
-| --max | str | | Column name to find maximum within each time bucket. Optional. |
-| --std | str | | Column name to calculate standard deviation within each time bucket. Optional. |
-
-**Features:**
-- Creates a time bucket column named `timeline_{interval}` (e.g., `timeline_1h`, `timeline_30m`)
-- If no aggregation column is specified, only row counts are provided for each time bucket
-- Supports various time interval formats: hours (`1h`), minutes (`30m`), seconds (`5s`), days (`1d`)
-
-**CLI and Quilt YAML mapping:**
-
-| CLI option | YAML key |
-|-----------|----------|
-| `--interval 1h` | `interval: 1h` |
-| `--avg cpu_usage` | `agg_type: avg` + `agg_column: cpu_usage` |
-| `--sum value` | `agg_type: sum` + `agg_column: value` |
-
-Example:
-```bash
-$ qsv load access.log - timeline timestamp --interval 1h
-# Creates column: timeline_1h
-
-$ qsv load metrics.csv - timeline time --interval 5m --avg cpu_usage
-# Creates columns: timeline_5m, count, avg_cpu_usage
-
-$ qsv load sales.csv - timeline date --interval 1d --sum amount
-# Creates columns: timeline_1d, count, sum_amount
-
-$ qsv load server.log - timeline timestamp --interval 30s --max response_time
-# Creates columns: timeline_30s, count, max_response_time
-```
-
 #### `timeslice`
 Filters data based on time ranges, extracting records within specified time boundaries.
 
@@ -430,68 +472,7 @@ $ qsv load data.csv - timeslice timestamp --start "2023-06-01" --end "2023-06-30
 $ qsv load access.log - timeslice timestamp --start "2023-01-01T10:00:00"
 ```
 
-#### `pivot`
-Creates grouped aggregations over row and column keys.
-
-> **Note:** `pivot` currently performs a **grouped aggregation** (long-form output), not an Excel-style wide cross-tabulation. If you need wide output, use `select` + `count` or wait for the planned `--wide` flag. Alternatives that better describe this operation: `groupby`, `aggregate`, `summarize`.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| --rows | str |         | Comma-separated list of columns for row grouping. Optional. |
-| --cols | str |         | Comma-separated list of columns for column grouping. Optional. |
-| --values | str |         | Column to aggregate values from. Required. |
-| --agg | str |         | Aggregation function: `sum`, `mean`, `count`, `min`, `max`, `median`, `std`. Optional (default: `sum`). |
-
-At least one of `--rows` or `--cols` must be specified.
-
-Example:
-```bash
-$ qsv load sales.csv - pivot --rows region --cols product --values sales_amount --agg sum
-$ qsv load data.csv - pivot --rows category --cols year --values revenue --agg mean
-$ qsv load logs.csv - pivot --rows date --cols error_type --values count --agg count
-$ qsv load metrics.csv - pivot --rows department --values performance --agg median
-```
-
-#### `timeround`
-Rounds datetime values to specified time units, creating a new rounded column while preserving the original.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| colname | str |         | Name of the datetime column to round. Required. |
-| --unit | str |         | Time unit for rounding: `y`/`year`, `M`/`month`, `d`/`day`, `h`/`hour`, `m`/`minute`, `s`/`second`. Required. |
-| --output | str | `{column}_rounded` | Output column name. Defaults to `{column}_rounded`, preserving the original column. |
-
-**Features:**
-- Rounds datetime values down to the nearest specified time unit boundary
-- Useful for time-based grouping and analysis
-- Supports both short (`h`, `d`) and long (`hour`, `day`) unit names
-- Output format automatically adjusts to the specified unit (clean, minimal format)
-
-**Output formats by unit:**
-- **year (y)**: `2023`
-- **month (M)**: `2023-01`
-- **day (d)**: `2023-01-01`
-- **hour (h)**: `2023-01-01 12`
-- **minute (m)**: `2023-01-01 12:34`
-- **second (s)**: `2023-01-01 12:34:56`
-
-Example:
-```bash
-$ qsv load data.csv - timeround timestamp --unit d --output date_only
-# Input:  2023-01-01 12:34:56
-# Output: 2023-01-01
-
-$ qsv load data.csv - timeround timestamp --unit h --output hour_rounded
-# Input:  2023-01-01 12:34:56
-# Output: 2023-01-01 12
-
-$ qsv load logs.csv - timeround timestamp --unit m
-# Rounds to minute boundary, writes to timestamp_rounded
-
-$ qsv load metrics.csv - timeround created_at --unit year --output created_year
-# Input:  2023-01-01 12:34:56
-# Output: 2023
-```
+Time bucketing and aggregation use the `bucket`, `count`, and `calc` commands. See the command reference in `GOAL.md`.
 
 ### Finalizers
 
@@ -514,6 +495,20 @@ $ qsv load data.csv - partition category ./partitions/      # Explicit directory
 $ qsv load sales.csv - partition region ./by_region/
 $ qsv load logs.csv - partition date ./daily_logs/
 $ qsv load data.csv - select col1,col2 - partition col1 ./numeric_partitions/
+```
+
+#### `calc`
+Calculates one aggregation over a numeric column and prints exactly one raw scalar
+value followed by a newline. Choose exactly one of `--sum`, `--avg`, `--min`,
+`--max`, `--median`, or `--std`; standard deviation uses sample `ddof=1`.
+Null-only and empty inputs print `null`. Non-numeric columns and missing columns
+fail. Non-finite floating-point results use conventional raw spellings such as
+`NaN` and `inf`.
+
+```bash
+$ qsv load data.csv - calc EventId --sum
+$ qsv load data.csv - calc score --avg
+$ qsv load data.csv - calc score --std
 ```
 
 #### `headers`
@@ -757,21 +752,18 @@ $ qsv sigma2quilt rules_windows_generic.json --separate -o generated_quilts/
 $ qsv quilt quilt-rules_windows_generic.yaml --mapping quilt-rules_windows_generic_mapping.json --var input=events.csv --var output=alerts.csv
 ```
 
-Timeline steps in Quilt use explicit aggregation keys:
+For time bucketing in Quilt, use the `bucket` step followed by `count` or a `calc` output step.
+
+For scalar aggregation in a Quilt output stage:
 
 ```yaml
-stages:
-  hourly_metrics:
-    type: process
-    steps:
-      load:
-        path: metrics.csv
-      timeline:
-        time_column: timestamp
-        interval: 1h
-        agg_type: avg
-        agg_column: cpu_usage
-      show:
+output_stage:
+  type: output
+  source: process_stage
+  steps:
+    calc:
+      column: EventId
+      avg: true
 ```
 
 ## Huge File Processing
@@ -786,7 +778,7 @@ Not all commands stream. Before running a pipeline on a large file, check the me
 |------|----------|-------|
 | **Streaming** (safe for huge files) | `show`, `dump`, `head`, `tail` | Row-by-row; constant memory |
 | **Lazy / Polars-optimized** | `select`, `isin`, `contains`, `grep`, `sed` | Pushdown; usually safe |
-| **Materializing** ⚠️ | `sort`, `uniq`, `count`, `stats`, `pivot`, `timeline` | Loads all rows into memory |
+| **Materializing** ⚠️ | `sort`, `uniq`, `count`, `stats` | Loads all rows into memory |
 
 > **Warning:** Running a materializing command on a multi-GB file may exhaust memory. Use `head`, `timeslice`, or `isin` to reduce the dataset first.
 

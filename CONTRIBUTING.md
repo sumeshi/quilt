@@ -88,7 +88,7 @@ Use the benchmark script before and after optimization work so runtime and relea
 $ ./scripts/benchmark_baseline.sh
 ```
 
-The script builds `target/release/qsv`, prints the binary size in bytes, and measures representative `load`, `select`, `grep`, `timeline`, `dump`, and `quilt` commands against the test fixtures.
+The script builds `target/release/qsv`, prints the binary size in bytes, and measures representative `load`, `select`, `grep`, `bucket`, `dump`, and `quilt` commands against the test fixtures.
 
 To compare a smaller build without the table renderer:
 

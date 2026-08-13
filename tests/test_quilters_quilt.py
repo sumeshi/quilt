@@ -300,53 +300,6 @@ class TestQuilt(QsvTestBase):
         self.assertNotIn("invalid-rule", result.stdout)
         self.assertNotIn("schema lengths differ", result.stderr)
 
-    def test_quilt_timeround_step(self):
-        quilt = self.write_quilt(
-            "timeround.yaml",
-            f"""
-            title: 'Timeround'
-            stages:
-              process_data:
-                type: process
-                steps:
-                  load:
-                    path: "{self.get_fixture_path('sample-min.csv')}"
-                  timeround:
-                    colname: TimeCreated
-                    unit: day
-                    output: rounded_day
-                  select:
-                    colnames: [rounded_day, EventId]
-                  head:
-                    number: 1
-                  show:
-            """,
-        )
-        result = self.run_qsv_command(f"quilt {quilt}")
-        self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout.strip(), "rounded_day,EventId\n2016-10-06,1102")
-
-    def test_quilt_timeline_step(self):
-        quilt = self.write_quilt(
-            "timeline.yaml",
-            f"""
-            title: 'Timeline'
-            stages:
-              process_data:
-                type: process
-                steps:
-                  load:
-                    path: "{self.get_fixture_path('sample-min.csv')}"
-                  timeline:
-                    time_column: TimeCreated
-                    interval: 1s
-                  show:
-            """,
-        )
-        result = self.run_qsv_command(f"quilt {quilt}")
-        self.assertEqual(result.returncode, 0)
-        self.assertIn("timeline_1s,count", result.stdout)
-
     def test_quilt_timeslice_step(self):
         quilt = self.write_quilt(
             "timeslice.yaml",
@@ -705,38 +658,6 @@ class TestQuilt(QsvTestBase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(lines[0], "EventId,count")
         self.assertEqual(set(lines[1:]), {"4688,14", "4689,14", "1102,1"})
-
-    def test_quilt_process_burst_detection(self):
-        quilt = self.write_quilt(
-            "process_burst_detection.yaml",
-            f"""
-            title: 'Process Burst Detection'
-            stages:
-              load_data:
-                type: process
-                steps:
-                  load:
-                    path: "{self.get_fixture_path('sample-min.csv')}"
-              filter_creates:
-                type: process
-                source: load_data
-                steps:
-                  isin:
-                    colname: EventId
-                    values: ["4688"]
-              burst_check:
-                type: process
-                source: filter_creates
-                steps:
-                  timeline:
-                    time_column: TimeCreated
-                    interval: 1s
-                  show:
-            """,
-        )
-        result = self.run_qsv_command(f"quilt {quilt}")
-        self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout.strip(), "timeline_1s,count\n2016-10-06 01:47:07,14")
 
     def test_quilt_lifecycle_balance(self):
         quilt = self.write_quilt(

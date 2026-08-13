@@ -25,6 +25,8 @@ large input size. Logical correctness should be proven with the small fixture wh
 | `fixtures/sample-min.tsv` | TSV separator tests |
 | `fixtures/sample-min-noheader.csv` | `--no-headers` tests |
 | `fixtures/sample.csv` | Larger real-world dataset with 62,031 rows, derived from the sample data in [`jpcertcc/logontracer`](https://github.com/jpcertcc/logontracer); avoid unless size is required |
+| `fixtures/flatten*.jsonl` / `.ndjson` | JSONL/NDJSON loading and nested-record flattening |
+| `fixtures/calc*.csv` | Numeric finalizer aggregation and null/empty behavior |
 | `fixtures/quilt-*.yaml` | Pipeline definitions used by `quilt` integration tests |
 
 ### `sample-min.csv` Structure
@@ -106,6 +108,8 @@ Coverage for `load`:
 - Loading gzip-compressed CSV data
 - Loading TSV via `-s '\t'` or `--separator '\t'`
 - Loading multiple files and verifying concatenated row counts
+- Loading JSONL/NDJSON records, including multiple files and nested fields
+- Loading Parquet cache files
 - `--low-memory`
 - `--no-headers`, with automatically generated column names such as `column_1`
 - Graceful failure for missing input files
@@ -120,6 +124,59 @@ Coverage for `select`:
 - Numeric indexes such as `4` and `4:5`
 - Mixed numeric and named references such as `4,Level`
 - Failure on unknown column names
+
+### `test_chainables_cast.py`
+
+Coverage for strict in-place `cast` conversions:
+
+- `int`, `uint`, `float`, `string`, `bool`, and `datetime` targets
+- Null preservation and schema-visible replacement
+- Chaining, invalid values, missing columns, unsupported types, and Quilt execution
+
+### `test_chainables_parse_size.py`
+
+Coverage for strict `parse-size` conversion:
+
+- All SI and IEC units, SI-vs-IEC distinction, exact decimals, whitespace, and nulls
+- Chaining, missing columns, negative/malformed/unknown-unit/fractional-byte/overflow failures
+- Quilt execution
+
+### test_chainables_bucket.py
+
+Coverage for datetime bucket flooring:
+
+- 1s, 5m, 1h, and 1d boundaries, including pre-epoch Euclidean flooring
+- Default/custom output names, source and null preservation, chaining, and Quilt execution
+- Invalid intervals, missing/non-datetime columns, output collisions, and invalid datetime casts
+
+### test_chainables_extract.py
+
+Coverage for named regex extraction:
+
+- Multiple and optional named groups, unmatched/null rows, Unicode, source preservation, and chaining
+- Invalid/no-name regexes, missing/non-string sources, output collisions, and Quilt execution
+
+### test_chainables_flatten.py
+
+Coverage for JSONL/NDJSON loading and recursive struct flattening:
+
+- Deep fields, sparse/null nested objects, list preservation, downstream selection, and Quilt execution
+- Multiple JSONL/NDJSON files, deterministic field order, collision failures, and mixed-family rejection
+
+### test_finalizers_calc.py
+
+Coverage for raw numeric aggregation output:
+
+- Sum, average, min, max, median, sample standard deviation, null/empty inputs, and singleton standard deviation
+- Strict one-flag validation, parser command boundaries, missing/non-numeric columns, and Quilt output steps
+
+### test_chainables_delta.py
+
+Coverage for delta differences:
+
+- Signed/unsigned/float increases and decreases, integer extremes, and overflow policy
+- Datetime positive/negative durations, null propagation, first-row null, order/source preservation
+- Default/custom names, chaining, unsupported/missing columns, collisions, and Quilt execution
 
 ### `test_chainables_grep.py`
 
@@ -206,7 +263,7 @@ Coverage for `changetz`:
 - Verification that output precision is microsecond-level (`%.6f`)
 - Failure on invalid timezone names
 
-The tests also verify that `changetz` output can be piped into `timeslice` and `timeround`.
+The tests also verify that `changetz` output can be piped into `timeslice`.
 
 ### `test_chainables_timeslice.py`
 
@@ -223,39 +280,12 @@ Coverage for `timeslice`:
 Because all rows in `sample-min.csv` fall within the same second, range testing is based on
 boundary values such as "before the dataset" and "after the dataset".
 
-### `test_chainables_timeround.py`
+### `test_command_surface.py`
 
-Coverage for `timeround`:
-
-- Units `y`, `M`, `d`, `h`, `m`, and `s`
-- `--output` adding a new column
-- In-place overwrite when `--output` is omitted
-- Failure on invalid units
-- Passing timezone-aware strings from `changetz`
-- Directly handling offset strings such as `+09:00`
-
-### `test_chainables_timeline.py`
-
-Coverage for `timeline`:
-
-- `--interval 1s`, which produces one bucket for `sample-min.csv`
-- `--interval 1m`, which also produces one bucket
-- Aggregate modes such as `--sum EventId`
-
-The output time column is named `timeline_{interval}`, for example `timeline_1s`.
-
-### `test_chainables_pivot.py`
-
-Coverage for `pivot`, which converts grouped results into a pivoted layout.
-This follows the current implementation, which behaves as grouped aggregation rather than a
-spreadsheet-style crosstab.
-
-### `test_chainables_convert.py`
-
-Coverage for `convert`:
-
-- Converting the JSON `Payload` column to YAML
-- Unsupported conversions, which emit a comment rather than hard-failing
+Verifies that removed top-level commands (`pivot`, `timeline`, `timeround`, and
+`convert`) fail with a non-zero exit status and an `Unknown command` error. It
+also audits global/per-command help, the public command registry, unknown
+options, and command arity.
 
 ### `test_finalizers_show.py`
 

@@ -1,0 +1,4 @@
+{"id":1,"user":{"name":"Alice","profile":{"city":"Tokyo","active":true}},"tags":["a","b"],"items":[{"sku":"x","qty":2}]}
+{"id":2,"user":{"name":"Bob","profile":{"active":false}},"tags":[],"items":null}
+{"id":3,"user":null,"tags":null,"items":[{"sku":"z","qty":1}]}
+{"id":4,"user":{"name":"Carol","profile":{"city":"Paris","active":true}},"tags":["c"]}

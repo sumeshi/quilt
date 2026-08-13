@@ -3,11 +3,19 @@ import unittest
 import sys
 import os
 
+from test_command_surface import TestCommandSurface
+
 # Initializers
 from test_initializers_load import TestLoad
 
 # Chainables
 from test_chainables_select import TestSelect
+from test_chainables_cast import TestCast
+from test_chainables_bucket import TestBucket
+from test_chainables_delta import TestDelta
+from test_chainables_extract import TestExtract
+from test_chainables_flatten import TestFlatten
+from test_chainables_parse_size import TestParseSize
 from test_chainables_head import TestHead
 from test_chainables_tail import TestTail
 from test_chainables_contains import TestContains
@@ -19,14 +27,11 @@ from test_chainables_sort import TestSort
 from test_chainables_count import TestCount
 from test_chainables_uniq import TestUniq
 from test_chainables_renamecol import TestRenamecol
-from test_chainables_convert import TestConvert
-from test_chainables_pivot import TestPivot
-from test_chainables_timeline import TestTimeline
 from test_chainables_timeslice import TestTimeslice
-from test_chainables_timeround import TestTimeround
 
 # Finalizers
 from test_finalizers_headers import TestHeaders
+from test_finalizers_calc import TestCalc
 from test_finalizers_dump import TestDump
 from test_finalizers_stats import TestStats
 from test_finalizers_partition import TestPartition
@@ -51,6 +56,12 @@ def run_test_suite():
     # Chainables
     chainables = [
         TestSelect,
+        TestCast,
+        TestBucket,
+        TestDelta,
+        TestExtract,
+        TestFlatten,
+        TestParseSize,
         TestHead,
         TestTail,
         TestContains,
@@ -62,17 +73,16 @@ def run_test_suite():
         TestCount,
         TestUniq,
         TestRenamecol,
-        TestConvert,
-        TestPivot,
-        TestTimeline,
         TestTimeslice,
-        TestTimeround,
     ]
     for chainable in chainables:
         suite.addTest(loader.loadTestsFromTestCase(chainable))
+
+    suite.addTest(loader.loadTestsFromTestCase(TestCommandSurface))
     
     # Finalizers
     finalizers = [
+        TestCalc,
         TestHeaders,
         TestDump,
         TestStats,

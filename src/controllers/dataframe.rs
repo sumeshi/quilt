@@ -1,9 +1,9 @@
 use crate::operations::chainables::{
-    changetz, contains, convert, count, grep, head, isin, pivot, renamecol, sed, select, sort,
-    tail, timeline, timeround, timeslice, uniq,
+    bucket, cast, changetz, contains, count, delta, extract, flatten, grep, head, isin, parse_size,
+    renamecol, sed, select, sort, tail, timeslice, uniq,
 };
 use crate::operations::finalizers::{
-    dump, dumpcache, headers, partition, show, showquery, showtable, stats,
+    calc, dump, dumpcache, headers, partition, show, showquery, showtable, stats,
 };
 use crate::operations::initializers::load;
 use chrono::Local;
@@ -39,6 +39,48 @@ impl DataFrameController {
         self
     }
     // -- chainables --
+    pub fn cast(&mut self, colname: &str, target: &str) -> &mut Self {
+        if let Some(df) = &self.df {
+            self.df = Some(cast::cast(df, colname, target));
+        }
+        self
+    }
+
+    pub fn parse_size(&mut self, colname: &str) -> &mut Self {
+        if let Some(df) = &self.df {
+            self.df = Some(parse_size::parse_size_column(df, colname));
+        }
+        self
+    }
+
+    pub fn bucket(&mut self, colname: &str, interval: &str, output: Option<&str>) -> &mut Self {
+        if let Some(df) = &self.df {
+            self.df = Some(bucket::bucket(df, colname, interval, output));
+        }
+        self
+    }
+
+    pub fn delta(&mut self, colname: &str, output: Option<&str>) -> &mut Self {
+        if let Some(df) = &self.df {
+            self.df = Some(delta::delta(df, colname, output));
+        }
+        self
+    }
+
+    pub fn extract(&mut self, colname: &str, pattern: &str) -> &mut Self {
+        if let Some(df) = &self.df {
+            self.df = Some(extract::extract(df, colname, pattern));
+        }
+        self
+    }
+
+    pub fn flatten(&mut self) -> &mut Self {
+        if let Some(df) = &self.df {
+            self.df = Some(flatten::flatten(df));
+        }
+        self
+    }
+
     pub fn select(&mut self, colnames: &[String]) -> &mut Self {
         if let Some(df) = &self.df {
             self.df = Some(select::select(df, colnames));
@@ -142,30 +184,6 @@ impl DataFrameController {
         }
         self
     }
-    pub fn convert(&mut self, colname: &str, from_format: &str, to_format: &str) -> &mut Self {
-        if let Some(df) = &self.df {
-            self.df = Some(convert::convert(df, colname, from_format, to_format));
-        }
-        self
-    }
-    pub fn timeline(
-        &mut self,
-        time_column: &str,
-        interval: &str,
-        agg_type: &str,
-        agg_column: Option<&str>,
-    ) -> &mut Self {
-        if let Some(df) = &self.df {
-            self.df = Some(timeline::timeline(
-                df,
-                time_column,
-                interval,
-                agg_type,
-                agg_column,
-            ));
-        }
-        self
-    }
     pub fn timeslice(
         &mut self,
         time_column: &str,
@@ -174,29 +192,6 @@ impl DataFrameController {
     ) -> &mut Self {
         if let Some(df) = &self.df {
             self.df = Some(timeslice::timeslice(df, time_column, start_time, end_time));
-        }
-        self
-    }
-    pub fn pivot(
-        &mut self,
-        rows: &[String],
-        columns: &[String],
-        values: &str,
-        agg_func: &str,
-    ) -> &mut Self {
-        if let Some(df) = &self.df {
-            self.df = Some(pivot::pivot(df, rows, columns, values, agg_func));
-        }
-        self
-    }
-    pub fn timeround(
-        &mut self,
-        colname: &str,
-        unit: &str,
-        output_colname: Option<&str>,
-    ) -> &mut Self {
-        if let Some(df) = &self.df {
-            self.df = Some(timeround::timeround(df, colname, unit, output_colname));
         }
         self
     }
@@ -258,6 +253,12 @@ impl DataFrameController {
     pub fn dumpcache(&self, output_path: Option<&str>) {
         if let Some(df) = &self.df {
             dumpcache::dumpcache(df, output_path);
+        }
+    }
+
+    pub fn calc(&self, column: &str, mode: &str) {
+        if let Some(df) = &self.df {
+            calc::calc(df, column, mode);
         }
     }
 }

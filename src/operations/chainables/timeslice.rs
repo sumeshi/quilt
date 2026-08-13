@@ -1,5 +1,5 @@
+use super::datetime::parse_datetime_auto;
 use crate::controllers::log::LogController;
-use chrono::{DateTime, NaiveDateTime};
 use polars::prelude::*;
 
 pub fn timeslice(
@@ -95,39 +95,6 @@ pub fn timeslice(
 }
 
 fn parse_datetime_string_canonical(time_str: &str) -> Option<String> {
-    let time_str = time_str.trim();
-    if time_str.is_empty() {
-        return None;
-    }
-
-    // Try multiple datetime formats
-    let formats = [
-        "%Y-%m-%d %H:%M:%S%.f",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S%.f",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y/%m/%d %H:%M:%S",
-        "%d/%b/%Y:%H:%M:%S", // Apache log format
-        "%Y-%m-%d",
-        "%H:%M:%S",
-    ];
-
-    for format in &formats {
-        if let Ok(dt) = NaiveDateTime::parse_from_str(time_str, format) {
-            return Some(dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string());
-        }
-    }
-
-    if let Ok(dt) = DateTime::parse_from_rfc3339(time_str) {
-        return Some(dt.naive_local().format("%Y-%m-%d %H:%M:%S%.6f").to_string());
-    }
-
-    // Try parsing as timestamp
-    if let Ok(timestamp) = time_str.parse::<i64>() {
-        if let Some(dt) = DateTime::from_timestamp(timestamp, 0) {
-            return Some(dt.naive_utc().format("%Y-%m-%d %H:%M:%S%.6f").to_string());
-        }
-    }
-
-    None
+    parse_datetime_auto(time_str)
+        .map(|datetime| datetime.format("%Y-%m-%d %H:%M:%S%.6f").to_string())
 }

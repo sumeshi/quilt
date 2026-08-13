@@ -53,6 +53,6 @@ echo "| --- | ---: |"
 measure_cmd "load_show" load tests/fixtures/sample.csv - show
 measure_cmd "select_show" load tests/fixtures/sample.csv - select EventId,Level - show
 measure_cmd "grep_show" load tests/fixtures/sample.csv - grep Information - show
-measure_cmd "timeline_show" load tests/fixtures/sample.csv - timeline TimeCreated --interval 1h - show
+measure_cmd "bucket_show" load tests/fixtures/sample.csv - cast TimeCreated datetime - bucket TimeCreated 1h - show
 measure_cmd "dump" load tests/fixtures/sample.csv - dump -o /tmp/qsv-bench-dump.csv
 measure_cmd "quilt" quilt tests/fixtures/quilt-bench.yaml

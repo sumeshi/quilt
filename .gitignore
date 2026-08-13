@@ -22,5 +22,8 @@ python/
 .env
 .gitignore
 .claude
+.serena
+.tokensave
 TASKS.md
+GOAL.md
 rules

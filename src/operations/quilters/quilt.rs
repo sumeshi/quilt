@@ -10,12 +10,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 // Re-import operations to call them directly with LazyFrame
 use crate::operations::chainables::{
-    changetz, contains, convert, count, grep, head, isin, pivot, renamecol, sed, select, sort,
-    tail, timeline, timeround, timeslice, uniq,
+    bucket, cast, changetz, contains, count, delta, extract, flatten, grep, head, isin, parse_size,
+    renamecol, sed, select, sort, tail, timeslice, uniq,
 };
 use crate::operations::finalizers::{
-    dump as dump_op, dumpcache as dumpcache_op, headers as headers_op, partition as partition_op,
-    show as show_op, showquery as showquery_op, showtable as showtable_op, stats as stats_op,
+    calc as calc_op, dump as dump_op, dumpcache as dumpcache_op, headers as headers_op,
+    partition as partition_op, show as show_op, showquery as showquery_op,
+    showtable as showtable_op, stats as stats_op,
 };
 use crate::operations::initializers::load as load_op;
 // Type alias for chainable operation functions
@@ -191,18 +192,56 @@ fn create_chainable_dispatch_table(
         }),
     );
     table.insert(
-        "convert",
+        "cast",
         Box::new(|df, args| {
-            let colname = get_string_from_value(args, "colname").unwrap_or_default();
-            let from_format = get_string_from_value(args, "from")
-                .or_else(|| get_string_from_value(args, "from_format"))
+            let colname = get_string_from_value(args, "colname")
+                .or_else(|| get_string_from_value(args, "column"))
                 .unwrap_or_default();
-            let to_format = get_string_from_value(args, "to")
-                .or_else(|| get_string_from_value(args, "to_format"))
-                .unwrap_or_default();
-            convert::convert(df, &colname, &from_format, &to_format)
+            let target = get_string_from_value(args, "type").unwrap_or_default();
+            cast::cast(df, &colname, &target)
         }),
     );
+    table.insert(
+        "parse-size",
+        Box::new(|df, args| {
+            let colname = get_string_from_value(args, "colname")
+                .or_else(|| get_string_from_value(args, "column"))
+                .unwrap_or_default();
+            parse_size::parse_size_column(df, &colname)
+        }),
+    );
+    table.insert(
+        "bucket",
+        Box::new(|df, args| {
+            let colname = get_string_from_value(args, "colname")
+                .or_else(|| get_string_from_value(args, "column"))
+                .unwrap_or_default();
+            let interval = get_string_from_value(args, "interval").unwrap_or_default();
+            let output = get_string_from_value(args, "output");
+            bucket::bucket(df, &colname, &interval, output.as_deref())
+        }),
+    );
+    table.insert(
+        "delta",
+        Box::new(|df, args| {
+            let colname = get_string_from_value(args, "colname")
+                .or_else(|| get_string_from_value(args, "column"))
+                .unwrap_or_default();
+            let output = get_string_from_value(args, "output");
+            delta::delta(df, &colname, output.as_deref())
+        }),
+    );
+    table.insert(
+        "extract",
+        Box::new(|df, args| {
+            let colname = get_string_from_value(args, "colname")
+                .or_else(|| get_string_from_value(args, "column"))
+                .unwrap_or_default();
+            let pattern = get_string_from_value(args, "regex").unwrap_or_default();
+            extract::extract(df, &colname, &pattern)
+        }),
+    );
+    table.insert("flatten", Box::new(|df, _args| flatten::flatten(df)));
     table.insert(
         "renamecol",
         Box::new(|df, args| {
@@ -213,23 +252,6 @@ fn create_chainable_dispatch_table(
                 .or_else(|| get_string_from_value(args, "to"))
                 .unwrap_or_default();
             renamecol::renamecol(df, &old_name, &new_name)
-        }),
-    );
-    table.insert(
-        "timeline",
-        Box::new(|df, args| {
-            let time_column = get_string_from_value(args, "time_column").unwrap_or_default();
-            let interval = get_string_from_value(args, "interval").unwrap_or_default();
-            let agg_type =
-                get_string_from_value(args, "agg_type").unwrap_or_else(|| "count".to_string());
-            let agg_column = get_string_from_value(args, "agg_column");
-            timeline::timeline(
-                df,
-                &time_column,
-                &interval,
-                &agg_type,
-                agg_column.as_deref(),
-            )
         }),
     );
     table.insert("timeslice", Box::new(|df, args| {
@@ -249,41 +271,6 @@ fn create_chainable_dispatch_table(
             end_time.as_deref(),
         )
     }));
-    table.insert(
-        "timeround",
-        Box::new(|df, args| {
-            let colname = get_string_from_value(args, "colname").unwrap_or_default();
-            let unit = get_string_from_value(args, "unit").unwrap_or_default();
-            let output_colname = get_string_from_value(args, "output");
-            timeround::timeround(df, &colname, &unit, output_colname.as_deref())
-        }),
-    );
-    table.insert(
-        "pivot",
-        Box::new(|df, args| {
-            let rows_str = get_string_from_value(args, "rows").unwrap_or_default();
-            let cols_str = get_string_from_value(args, "cols")
-                .or_else(|| get_string_from_value(args, "columns"))
-                .unwrap_or_default();
-            let values = get_string_from_value(args, "values")
-                .or_else(|| get_string_from_value(args, "value"))
-                .unwrap_or_default();
-            let agg_func = get_string_from_value(args, "agg")
-                .or_else(|| get_string_from_value(args, "aggregation"))
-                .unwrap_or_else(|| "sum".to_string());
-            let rows: Vec<String> = if rows_str.is_empty() {
-                Vec::new()
-            } else {
-                rows_str.split(',').map(|s| s.trim().to_string()).collect()
-            };
-            let columns: Vec<String> = if cols_str.is_empty() {
-                Vec::new()
-            } else {
-                cols_str.split(',').map(|s| s.trim().to_string()).collect()
-            };
-            pivot::pivot(df, &rows, &columns, &values, &agg_func)
-        }),
-    );
     table
 }
 // Create a dispatch table for finalizer operations
@@ -341,6 +328,33 @@ fn create_finalizer_dispatch_table() -> HashMap<&'static str, FinalizerOperation
             .or_else(|| get_string_from_value(args, "output_directory"))
             .unwrap_or_else(|| "./partitions".to_string());
         partition_op::partition(df, &colname, &output_dir);
+    });
+    table.insert("calc", |df, args| {
+        let column = get_string_from_value(args, "column").unwrap_or_else(|| {
+            eprintln!("Error: calc finalizer requires a column");
+            std::process::exit(1);
+        });
+        let modes = calc_op::MODES;
+        let selected = modes
+            .iter()
+            .filter(|mode| args.get(**mode).is_some())
+            .copied()
+            .collect::<Vec<_>>();
+        if selected.len() != 1 {
+            eprintln!(
+                "Error: calc finalizer requires exactly one of sum, avg, min, max, median, or std"
+            );
+            std::process::exit(1);
+        }
+        if !args
+            .get(selected[0])
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            eprintln!("Error: calc aggregation must be set to true");
+            std::process::exit(1);
+        }
+        calc_op::calc(df, &column, selected[0]);
     });
     table
 }

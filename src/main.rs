@@ -101,6 +101,7 @@ fn process_commands(controller: &mut DataFrameController, commands: &[Command]) 
             "dump",
             "dumpcache",
             "partition",
+            "calc",
             "quilt",
             "sigma2quilt",
         ];
@@ -250,6 +251,66 @@ fn process_command(controller: &mut DataFrameController, cmd: &Command) {
                 cmd.args.clone()
             };
             controller.select(&colnames);
+        }
+
+        "cast" => {
+            check_data_loaded(controller, "cast");
+            if cmd.args.len() < 2 {
+                eprintln!("Error: 'cast' command requires a column name and type");
+                process::exit(1);
+            }
+            if cmd.args.len() > 2 {
+                eprintln!("Error: 'cast' command accepts exactly one column name and type");
+                process::exit(1);
+            }
+            controller.cast(&cmd.args[0], &cmd.args[1]);
+        }
+
+        "parse-size" => {
+            check_data_loaded(controller, "parse-size");
+            if cmd.args.len() != 1 {
+                eprintln!("Error: 'parse-size' command requires exactly one column name");
+                process::exit(1);
+            }
+            controller.parse_size(&cmd.args[0]);
+        }
+
+        "bucket" => {
+            check_data_loaded(controller, "bucket");
+            if cmd.args.len() != 2 {
+                eprintln!("Error: 'bucket' command requires a column name and interval");
+                process::exit(1);
+            }
+            let output = cmd.options.get("output").and_then(|value| value.as_deref());
+            controller.bucket(&cmd.args[0], &cmd.args[1], output);
+        }
+
+        "delta" => {
+            check_data_loaded(controller, "delta");
+            if cmd.args.len() != 1 {
+                eprintln!("Error: 'delta' command requires exactly one column name");
+                process::exit(1);
+            }
+            let output = cmd.options.get("output").and_then(|value| value.as_deref());
+            controller.delta(&cmd.args[0], output);
+        }
+
+        "extract" => {
+            check_data_loaded(controller, "extract");
+            if cmd.args.len() != 2 {
+                eprintln!("Error: 'extract' command requires a column name and regex");
+                process::exit(1);
+            }
+            controller.extract(&cmd.args[0], &cmd.args[1]);
+        }
+
+        "flatten" => {
+            check_data_loaded(controller, "flatten");
+            if !cmd.args.is_empty() {
+                eprintln!("Error: 'flatten' command accepts no arguments");
+                process::exit(1);
+            }
+            controller.flatten();
         }
 
         "isin" => {
@@ -476,69 +537,6 @@ fn process_command(controller: &mut DataFrameController, cmd: &Command) {
             controller.renamecol(colname, new_colname);
         }
 
-        "convert" => {
-            check_data_loaded(controller, "convert");
-            if cmd.args.is_empty() {
-                eprintln!("Error: 'convert' command requires a column name");
-                process::exit(1);
-            }
-            let colname = &cmd.args[0];
-
-            let from_format = match cmd.options.get("from") {
-                Some(Some(format)) => format,
-                _ => {
-                    eprintln!("Error: 'convert' command requires --from option");
-                    process::exit(1);
-                }
-            };
-
-            let to_format = match cmd.options.get("to") {
-                Some(Some(format)) => format,
-                _ => {
-                    eprintln!("Error: 'convert' command requires --to option");
-                    process::exit(1);
-                }
-            };
-
-            controller.convert(colname, from_format, to_format);
-        }
-
-        "timeline" => {
-            check_data_loaded(controller, "timeline");
-
-            if cmd.args.is_empty() {
-                eprintln!("Error: 'timeline' command requires a time column name");
-                process::exit(1);
-            }
-
-            let time_column = &cmd.args[0];
-
-            let interval = match cmd.options.get("interval") {
-                Some(Some(interval)) => interval,
-                _ => {
-                    eprintln!("Error: 'timeline' command requires --interval option (e.g., --interval 1h)");
-                    process::exit(1);
-                }
-            };
-
-            // Determine aggregation type and column
-            let (agg_type, agg_column) = if let Some(Some(col)) = cmd.options.get("sum") {
-                ("sum", Some(col.as_str()))
-            } else if let Some(Some(col)) = cmd.options.get("avg") {
-                ("avg", Some(col.as_str()))
-            } else if let Some(Some(col)) = cmd.options.get("min") {
-                ("min", Some(col.as_str()))
-            } else if let Some(Some(col)) = cmd.options.get("max") {
-                ("max", Some(col.as_str()))
-            } else if let Some(Some(col)) = cmd.options.get("std") {
-                ("std", Some(col.as_str()))
-            } else {
-                ("count", None) // Default to count
-            };
-
-            controller.timeline(time_column, interval, agg_type, agg_column);
-        }
-
         "timeslice" => {
             check_data_loaded(controller, "timeslice");
 
@@ -560,79 +558,6 @@ fn process_command(controller: &mut DataFrameController, cmd: &Command) {
             }
 
             controller.timeslice(time_column, start_time, end_time);
-        }
-
-        "pivot" => {
-            check_data_loaded(controller, "pivot");
-
-            let rows_str = cmd
-                .options
-                .get("rows")
-                .and_then(|opt| opt.as_deref())
-                .unwrap_or("");
-            let cols_str = cmd
-                .options
-                .get("cols")
-                .and_then(|opt| opt.as_deref())
-                .unwrap_or("");
-            let values = cmd
-                .options
-                .get("values")
-                .and_then(|opt| opt.as_deref())
-                .unwrap_or_else(|| {
-                    eprintln!("Error: 'pivot' command requires --values option");
-                    process::exit(1);
-                });
-            let agg_func = cmd
-                .options
-                .get("agg")
-                .and_then(|opt| opt.as_deref())
-                .unwrap_or("sum");
-
-            if rows_str.is_empty() && cols_str.is_empty() {
-                eprintln!(
-                    "Error: 'pivot' command requires at least one of --rows or --cols options"
-                );
-                process::exit(1);
-            }
-
-            let rows: Vec<String> = if rows_str.is_empty() {
-                Vec::new()
-            } else {
-                rows_str.split(',').map(|s| s.trim().to_string()).collect()
-            };
-
-            let columns: Vec<String> = if cols_str.is_empty() {
-                Vec::new()
-            } else {
-                cols_str.split(',').map(|s| s.trim().to_string()).collect()
-            };
-
-            controller.pivot(&rows, &columns, values, agg_func);
-        }
-
-        "timeround" => {
-            check_data_loaded(controller, "timeround");
-
-            if cmd.args.is_empty() {
-                eprintln!("Error: 'timeround' command requires a column name");
-                process::exit(1);
-            }
-
-            let colname = &cmd.args[0];
-
-            let unit = cmd
-                .options
-                .get("unit")
-                .and_then(|opt| opt.as_deref())
-                .unwrap_or_else(|| {
-                    eprintln!("Error: 'timeround' command requires --unit option (e.g., --unit d)");
-                    process::exit(1);
-                });
-
-            let output_colname = cmd.options.get("output").and_then(|opt| opt.as_deref());
-
-            controller.timeround(colname, unit, output_colname);
         }
 
         // Quilters
@@ -737,6 +662,34 @@ fn process_command(controller: &mut DataFrameController, cmd: &Command) {
             };
 
             controller.partition(colname, output_dir);
+        }
+
+        "calc" => {
+            check_data_loaded(controller, "calc");
+            if cmd.args.len() != 1 {
+                eprintln!("Error: 'calc' command requires exactly one column name");
+                process::exit(1);
+            }
+            let modes = ["sum", "avg", "min", "max", "median", "std"];
+            let selected = modes
+                .iter()
+                .filter(|mode| cmd.options.contains_key(**mode))
+                .copied()
+                .collect::<Vec<_>>();
+            if selected.len() != 1 {
+                eprintln!("Error: 'calc' requires exactly one of --sum, --avg, --min, --max, --median, or --std");
+                process::exit(1);
+            }
+            if cmd
+                .options
+                .get(selected[0])
+                .and_then(|value| value.as_ref())
+                .is_some()
+            {
+                eprintln!("Error: calc aggregation flags do not accept values");
+                process::exit(1);
+            }
+            controller.calc(&cmd.args[0], selected[0]);
         }
 
         "showtable" => {

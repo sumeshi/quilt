@@ -1,3 +1,4 @@
+pub mod calc;
 pub mod dump;
 pub mod dumpcache;
 pub mod headers;

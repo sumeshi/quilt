@@ -31,7 +31,17 @@ fn get_valid_options(command_name: &str) -> HashSet<&'static str> {
             opts
         }
         "select" => HashSet::new(), // select has no options
-        "isin" => HashSet::new(),   // isin has no options
+        "cast" => HashSet::new(),   // cast has no options
+        "bucket" => ["output"].iter().cloned().collect(),
+        "delta" => ["output"].iter().cloned().collect(),
+        "extract" => HashSet::new(),
+        "flatten" => HashSet::new(),
+        "calc" => ["sum", "avg", "min", "max", "median", "std"]
+            .iter()
+            .cloned()
+            .collect(),
+        "parse-size" => HashSet::new(), // parse-size has no options
+        "isin" => HashSet::new(),       // isin has no options
         "contains" => ["ignore_case", "ignore-case", "ignorecase"]
             .iter()
             .cloned()
@@ -71,14 +81,7 @@ fn get_valid_options(command_name: &str) -> HashSet<&'static str> {
         .cloned()
         .collect(),
         "renamecol" => HashSet::new(), // renamecol has no options
-        "convert" => ["from", "to"].iter().cloned().collect(),
-        "timeline" => ["interval", "sum", "avg", "min", "max", "std"]
-            .iter()
-            .cloned()
-            .collect(),
         "timeslice" => ["start", "end"].iter().cloned().collect(),
-        "pivot" => ["rows", "cols", "values", "agg"].iter().cloned().collect(),
-        "timeround" => ["unit", "output"].iter().cloned().collect(),
         "partition" => HashSet::new(), // partition has no options
         "show" => {
             let mut opts = HashSet::new();
@@ -189,11 +192,6 @@ pub fn parse_commands(args: &[String]) -> Vec<Command> {
                         | "s"
                         | "number"
                         | "interval"
-                        | "sum"
-                        | "avg"
-                        | "min"
-                        | "max"
-                        | "std"
                         | "start"
                         | "end"
                         | "rows"
@@ -350,12 +348,18 @@ fn parse_option(cmd: &mut Command, option_str: &str) {
 // Help functions for CLI
 pub fn print_help() {
     println!("Quilter-CSV: A fast, flexible, and memory-efficient command-line tool written in Rust for processing large CSV files.\n");
-    println!("Usage: qsv load <file.csv> - <chainable> <args> - <finalizer> <args>\n");
+    println!("Usage: qsv load <input> - <chainable> <args> - <finalizer> <args>\n");
     println!("Initializers:");
-    println!("  load         Load CSV file(s)");
+    println!("  load         Load CSV/TSV, JSONL/NDJSON, or Parquet file(s)");
     println!();
     println!("Chainables:");
     println!("  select       Select columns");
+    println!("  cast         Strictly convert a column type");
+    println!("  bucket       Floor datetimes into fixed intervals");
+    println!("  delta        Calculate differences between adjacent rows");
+    println!("  extract      Extract named regex groups into columns");
+    println!("  flatten      Expand nested struct fields into dot-named columns");
+    println!("  parse-size   Parse human-readable sizes as bytes");
     println!("  isin         Filter rows by values");
     println!("  contains     Filter rows by pattern");
     println!("  sed          Replace values by pattern");
@@ -367,11 +371,7 @@ pub fn print_help() {
     println!("  uniq         Remove duplicate rows");
     println!("  changetz     Change timezone");
     println!("  renamecol    Rename column");
-    println!("  convert      Convert data formats (JSON, YAML, XML, etc.)");
-    println!("  timeline     Aggregate data by time intervals");
     println!("  timeslice    Filter data by time range");
-    println!("  pivot        Create grouped aggregations over row and column keys");
-    println!("  timeround    Round datetime to specified time unit");
     println!();
     println!("Finalizers:");
     println!("  show         Print as CSV");
@@ -387,6 +387,7 @@ pub fn print_help() {
     println!("  dump         Save as CSV");
     println!("  dumpcache    Save as parquet cache file");
     println!("  partition    Split data into separate files by column values");
+    println!("  calc         Calculate one numeric aggregation");
     println!();
     println!();
     println!("Quilters:");
@@ -411,6 +412,12 @@ pub fn print_chainable_help(cmd: &str) {
     match cmd {
         "load" => print_load_help(),
         "select" => print_select_help(),
+        "cast" => print_cast_help(),
+        "bucket" => print_bucket_help(),
+        "delta" => print_delta_help(),
+        "extract" => print_extract_help(),
+        "flatten" => print_flatten_help(),
+        "parse-size" => print_parse_size_help(),
         "isin" => print_isin_help(),
         "contains" => print_contains_help(),
         "sed" => print_sed_help(),
@@ -422,12 +429,9 @@ pub fn print_chainable_help(cmd: &str) {
         "uniq" => print_uniq_help(),
         "changetz" => print_changetz_help(),
         "renamecol" => print_renamecol_help(),
-        "convert" => print_convert_help(),
-        "timeline" => print_timeline_help(),
         "timeslice" => print_timeslice_help(),
+        "calc" => print_calc_help(),
         "partition" => print_partition_help(),
-        "pivot" => print_pivot_help(),
-        "timeround" => print_timeround_help(),
 
         "show" => print_show_help(),
         "showtable" => print_showtable_help(),
@@ -442,7 +446,7 @@ pub fn print_chainable_help(cmd: &str) {
     }
 }
 fn print_load_help() {
-    println!("load: Load CSV files\n");
+    println!("load: Load CSV, JSONL/NDJSON, or Parquet files\n");
     println!("Usage: load [files...] [options]\n");
     println!("Options:");
     println!("  -s, --separator <char> Field separator character (default: ',')");
@@ -463,6 +467,17 @@ fn print_load_help() {
     println!("  QSV_MEMORY_LIMIT_MB=2048 qsv load data.csv.gz - show  # Gzip memory limit");
     println!("  qsv load file1.csv file2.csv - show");
 }
+
+fn print_flatten_help() {
+    println!("flatten: Expand nested struct fields into dot-named columns\n");
+    println!("Usage: flatten");
+    println!("Struct fields are expanded recursively; lists remain list-valued.");
+}
+fn print_calc_help() {
+    println!("calc: Calculate one numeric aggregation and print a raw scalar\n");
+    println!("Usage: calc <column> --sum|--avg|--min|--max|--median|--std");
+    println!("Exactly one flag is required; --std uses sample standard deviation (ddof=1).");
+}
 fn print_select_help() {
     println!("select: Select columns from the DataFrame\n");
     println!("Usage: select <col1>[,<col2>,...]\n");
@@ -479,6 +494,60 @@ fn print_select_help() {
     println!("  qsv load data.csv - select col1:col3 - show");
     println!("  qsv load data.csv - select 2:4 - show  # Select 2nd-4th columns");
     println!("  qsv load data.csv - select \"col:1\":\"col:3\" - show  # Quoted for colons");
+}
+fn print_cast_help() {
+    println!("cast: Strictly convert a column to a stable type\n");
+    println!("Usage: cast <column> <type>\n");
+    println!("Types: int (Int64), uint (UInt64), float (Float64), string, bool, datetime");
+    println!("Datetime values use the project's automatic parser and are stored as Datetime[μs].");
+    println!("Null values remain null; invalid non-null values fail the command.");
+    println!("\nExamples:");
+    println!("  qsv load data.csv - cast EventId int - show");
+    println!("  qsv load data.csv - cast timestamp datetime - show");
+}
+fn print_parse_size_help() {
+    println!("parse-size: Parse sizes as integer bytes\n");
+    println!("Usage: parse-size <column>\n");
+    println!("Units are case-sensitive: B, KB, MB, GB, TB, KiB, MiB, GiB, TiB.");
+    println!("SI units use powers of 1000; IEC units use powers of 1024.");
+    println!("The source column is replaced with UInt64 bytes; nulls remain null.");
+    println!("\nExamples:");
+    println!("  qsv load data.csv - parse-size size - show");
+    println!("  qsv load data.csv - parse-size size - cast size string - show");
+}
+fn print_bucket_help() {
+    println!("bucket: Floor a datetime column into fixed intervals\n");
+    println!("Usage: bucket <column> <interval> [--output <name>]\n");
+    println!("Intervals must match ^[1-9][0-9]*(s|m|h|d)$, such as 1s, 5m, 1h, or 1d.");
+    println!("The default output is <column>_bucket; the source column is preserved.");
+    println!("Output values use Polars Datetime[μs] precision and nulls remain null.");
+    println!("\nExamples:");
+    println!("  qsv load data.csv - cast timestamp datetime - bucket timestamp 5m - show");
+    println!(
+        "  qsv load data.csv - cast timestamp datetime - bucket timestamp 1h --output hour - show"
+    );
+}
+fn print_delta_help() {
+    println!("delta: Calculate current minus previous row\n");
+    println!("Usage: delta <column> [--output <name>]\n");
+    println!("Supports numeric and datetime columns. Numeric output is Float64;");
+    println!("datetime output is Duration[μs]. The default output is <column>_delta.");
+    println!("The first row and pairs involving nulls produce null.");
+    println!("\nExamples:");
+    println!("  qsv load data.csv - delta count - show");
+    println!(
+        "  qsv load data.csv - cast timestamp datetime - delta timestamp --output elapsed - show"
+    );
+}
+fn print_extract_help() {
+    println!("extract: Extract named regex groups into new string columns\n");
+    println!("Usage: extract <column> <regex>\n");
+    println!("The regex must contain one or more named groups such as (?P<name>pattern).");
+    println!("Unmatched rows and optional groups become null; the source is preserved.");
+    println!("Quote the regex for your shell. Rust regex syntax is used; no expression parser is involved.");
+    println!("\nExamples:");
+    println!("  qsv load data.csv - extract message '(?P<user>[^@]+)@(?P<domain>.+)' - show");
+    println!("  qsv load data.csv - extract path '^(?P<dir>.*)/(?P<file>[^/]+)$' - show");
 }
 fn print_isin_help() {
     println!("isin: Filter rows by values in a column\n");
@@ -588,46 +657,6 @@ fn print_renamecol_help() {
     println!("Examples:");
     println!("  qsv load data.csv - renamecol col1 new_col - show");
 }
-fn print_convert_help() {
-    println!("convert: Convert data formats (JSON, YAML, XML, etc.)\n");
-    println!("Usage: convert <colname> --from <format> --to <format>\n");
-    println!("Options:");
-    println!("  --from <format>  Source format (json, yaml, xml)");
-    println!("  --to <format>    Target format (json, yaml, xml)");
-    println!("\nSupported conversions:");
-    println!("  json -> yaml     Convert JSON to YAML format");
-    println!("  yaml -> json     Convert YAML to JSON format");
-    println!("  json -> xml      Convert JSON to XML format");
-    println!("  xml -> json      Convert XML to JSON format");
-    println!("  yaml -> xml      Convert YAML to XML format");
-    println!("  xml -> yaml      Convert XML to YAML format");
-    println!("\nFormatting (same format conversions):\n");
-    println!("  json -> json     Format/prettify JSON");
-    println!("  yaml -> yaml     Format/prettify YAML");
-    println!("  xml -> xml       Format/prettify XML");
-    println!("\nExamples:");
-    println!("  qsv load data.csv - convert col1 --from json --to yaml - show");
-    println!("  qsv load data.csv - convert config --from yaml --to json - show");
-    println!("  qsv load data.csv - convert data --from json --to xml - show");
-    println!("  qsv load data.csv - convert xml_data --from xml --to json - show");
-    println!("  qsv load data.csv - convert json_data --from json --to json - show  # Format JSON");
-    println!("\nNote: Handles malformed JSON with extra quotes automatically.");
-}
-fn print_timeline_help() {
-    println!("timeline: Aggregate data by time intervals\n");
-    println!("Usage: timeline <time_column> --interval <interval> [--sum|--avg|--min|--max|--std <column>]\n");
-    println!("Options:");
-    println!("  --interval   Time interval (e.g., 1h, 5m, 30s, 1d)");
-    println!("  --sum        Sum values in specified column");
-    println!("  --avg        Average values in specified column");
-    println!("  --min        Minimum values in specified column");
-    println!("  --max        Maximum values in specified column");
-    println!("  --std        Standard deviation of values in specified column");
-    println!("\nExamples:");
-    println!("  qsv load access.log - timeline timestamp --interval 1h - show");
-    println!("  qsv load metrics.csv - timeline time --interval 5m --avg cpu_usage - show");
-    println!("  qsv load sales.csv - timeline date --interval 1d --sum amount - show");
-}
 fn print_timeslice_help() {
     println!("timeslice: Filter data by time range\n");
     println!("Usage: timeslice <time_column> [--start <start_time>] [--end <end_time>]\n");
@@ -655,45 +684,6 @@ fn print_partition_help() {
     println!("  qsv load sales.csv - partition region ./by_region/ - show");
     println!("  qsv load logs.csv - partition date ./daily_logs/ - show");
     println!("\nNote: Creates one CSV file per unique value in the specified column.");
-}
-fn print_pivot_help() {
-    println!("pivot: Create grouped aggregations over row and column keys\n");
-    println!(
-        "Usage: pivot --rows <columns> --cols <columns> --values <column> [--agg <function>]\n"
-    );
-    println!("Options:");
-    println!("  --rows <columns>    Comma-separated list of columns for rows");
-    println!("  --cols <columns>    Comma-separated list of columns for columns");
-    println!("  --values <column>   Column to aggregate");
-    println!(
-        "  --agg <function>    Aggregation function (sum, mean, count, min, max, median, std)"
-    );
-    println!("\nExamples:");
-    println!("  qsv load sales.csv - pivot --rows region --cols product --values sales_amount --agg sum - show");
-    println!("  qsv load data.csv - pivot --rows category --cols year --values revenue --agg mean - show");
-    println!("  qsv load logs.csv - pivot --rows date --cols error_type --values count --agg count - show");
-    println!(
-        "\nNote: Returns a long-form grouped aggregation over the requested keys, not a wide cross-tabulation table."
-    );
-}
-fn print_timeround_help() {
-    println!("timeround: Round datetime to specified time unit\n");
-    println!("Usage: timeround <colname> --unit <unit> [--output <colname>]\n");
-    println!("Options:");
-    println!("  --unit      Time unit: y/year, M/month, d/day, h/hour, m/minute, s/second");
-    println!("  --output    Output column name (default: replaces original column)");
-    println!("\nOutput formats by unit:");
-    println!("  year (y):   2023");
-    println!("  month (M):  2023-01");
-    println!("  day (d):    2023-01-01");
-    println!("  hour (h):   2023-01-01 12");
-    println!("  minute (m): 2023-01-01 12:34");
-    println!("  second (s): 2023-01-01 12:34:56");
-    println!("\nExamples:");
-    println!("  qsv load data.csv - timeround timestamp --unit d --output date_only");
-    println!("  qsv load data.csv - timeround timestamp --unit h --output hour_rounded");
-    println!("  qsv load data.csv - timeround timestamp --unit m");
-    println!("  qsv load logs.csv - timeround created_at --unit d --output created_day");
 }
 fn print_show_help() {
     println!("show: Print result as CSV\n");
