@@ -1,6 +1,9 @@
 use crate::controllers::log::LogController;
+use crate::error::QuiltError;
 use polars::prelude::*;
-pub fn tail(df: &LazyFrame, n: usize) -> LazyFrame {
+pub fn tail(df: &LazyFrame, n: usize) -> Result<LazyFrame, QuiltError> {
+    // Tail is a sink-time barrier in the execution engine because the last n
+    // rows cannot be known without consuming the upstream input.
     LogController::debug(&format!("Applying tail: n={n}"));
-    df.clone().tail(n as u32)
+    Ok(df.clone().tail(n as u32))
 }

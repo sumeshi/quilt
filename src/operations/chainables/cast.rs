@@ -1,129 +1,129 @@
-use super::datetime::parse_datetime_auto;
+use crate::error::QuiltError;
+use crate::operations::datetime::{
+    localize, parse_datetime_detailed_with_diagnostics, DateTimeConfig, ParserDiagnostics,
+};
 use polars::prelude::*;
 
-fn conversion_error(column: &str, target: &str, row: usize, value: &str) -> ! {
-    eprintln!("Error: Cannot cast column '{column}' value '{value}' at row {row} to {target}");
-    std::process::exit(1);
+pub fn cast(df: &LazyFrame, column: &str, target: &str) -> Result<LazyFrame, QuiltError> {
+    cast_with_config(df, column, target, &DateTimeConfig::default())
 }
 
-fn source_as_strings(series: &Column, column: &str, target: &str) -> Vec<Option<String>> {
-    let string_series = series.cast(&DataType::String).unwrap_or_else(|error| {
-        eprintln!("Error: Cannot cast column '{column}' to {target}: {error}");
-        std::process::exit(1);
-    });
-    string_series
-        .str()
-        .unwrap_or_else(|error| {
-            eprintln!("Error: Cannot read column '{column}' as text: {error}");
-            std::process::exit(1);
-        })
-        .into_iter()
-        .map(|value| value.map(ToOwned::to_owned))
-        .collect()
-}
-
-pub fn cast(df: &LazyFrame, column: &str, target: &str) -> LazyFrame {
+pub fn cast_with_config(
+    df: &LazyFrame,
+    column: &str,
+    target: &str,
+    datetime: &DateTimeConfig,
+) -> Result<LazyFrame, QuiltError> {
     let target = target.to_ascii_lowercase();
     if !matches!(
         target.as_str(),
         "int" | "uint" | "float" | "string" | "bool" | "datetime"
     ) {
-        eprintln!(
-            "Error: Unsupported cast type '{target}'. Expected int, uint, float, string, bool, or datetime"
-        );
-        std::process::exit(1);
+        return Err(QuiltError::usage(format!(
+            "Unsupported cast type '{target}'. Expected int, uint, float, string, bool, or datetime"
+        )));
     }
+    if target != "datetime" && datetime.options_present {
+        return Err(QuiltError::usage(
+            "datetime parsing options apply only to datetime casts",
+        ));
+    }
+    let diagnostics = ParserDiagnostics::new();
 
-    let mut frame = df.clone().collect().unwrap_or_else(|error| {
-        eprintln!("Error: Failed to evaluate input before cast: {error}");
-        std::process::exit(1);
-    });
-    let source = frame.column(column).unwrap_or_else(|_| {
-        eprintln!("Error: Column '{column}' not found for cast operation");
-        std::process::exit(1);
-    });
-    let values = source_as_strings(source, column, &target);
-
-    let replacement = match target.as_str() {
-        "int" => Series::new(
-            column.into(),
-            values
-                .iter()
-                .enumerate()
-                .map(|(row, value)| {
-                    value.as_deref().map(|value| {
-                        value
-                            .trim()
-                            .parse::<i64>()
-                            .unwrap_or_else(|_| conversion_error(column, &target, row, value))
-                    })
-                })
-                .collect::<Vec<_>>(),
-        ),
-        "uint" => Series::new(
-            column.into(),
-            values
-                .iter()
-                .enumerate()
-                .map(|(row, value)| {
-                    value.as_deref().map(|value| {
-                        value
-                            .trim()
-                            .parse::<u64>()
-                            .unwrap_or_else(|_| conversion_error(column, &target, row, value))
-                    })
-                })
-                .collect::<Vec<_>>(),
-        ),
-        "float" => Series::new(
-            column.into(),
-            values
-                .iter()
-                .enumerate()
-                .map(|(row, value)| {
-                    value.as_deref().map(|value| {
-                        value
-                            .trim()
-                            .parse::<f64>()
-                            .unwrap_or_else(|_| conversion_error(column, &target, row, value))
-                    })
-                })
-                .collect::<Vec<_>>(),
-        ),
-        "string" => Series::new(column.into(), values),
-        "bool" => Series::new(
-            column.into(),
-            values
-                .iter()
-                .enumerate()
-                .map(|(row, value)| {
-                    value
-                        .as_deref()
-                        .map(|value| match value.trim().to_ascii_lowercase().as_str() {
-                            "true" => true,
-                            "false" => false,
-                            _ => conversion_error(column, &target, row, value),
-                        })
-                })
-                .collect::<Vec<_>>(),
-        ),
-        "datetime" => DatetimeChunked::from_naive_datetime_options(
-            column.into(),
-            values.iter().enumerate().map(|(row, value)| {
-                value.as_deref().map(|value| {
-                    parse_datetime_auto(value)
-                        .unwrap_or_else(|| conversion_error(column, &target, row, value))
-                })
-            }),
-            TimeUnit::Microseconds,
-        )
-        .into_series(),
-        _ => unreachable!("cast target was validated above"),
+    let schema = df
+        .clone()
+        .collect_schema()
+        .map_err(|error| QuiltError::schema("cast", None::<String>, error.to_string()))?;
+    if !schema.iter_names().any(|name| name == column) {
+        return Err(QuiltError::schema("cast", Some(column), "column not found"));
+    }
+    let timezone = datetime
+        .timezone
+        .as_deref()
+        .map(|value| {
+            value
+                .parse::<chrono_tz::Tz>()
+                .map_err(|_| QuiltError::usage(format!("invalid timezone '{value}'")))?;
+            TimeZone::opt_try_new(Some(value))
+                .map_err(|error| QuiltError::usage(format!("invalid timezone '{value}': {error}")))
+        })
+        .transpose()?
+        .flatten();
+    let dtype = match target.as_str() {
+        "int" => DataType::Int64,
+        "uint" => DataType::UInt64,
+        "float" => DataType::Float64,
+        "string" => DataType::String,
+        "bool" => DataType::Boolean,
+        "datetime" => DataType::Datetime(TimeUnit::Microseconds, timezone.clone()),
+        _ => unreachable!(),
     };
-
-    frame.replace(column, replacement).unwrap_or_else(|error| {
-        eprintln!("Error: Failed to replace column '{column}' after cast: {error}");
-        std::process::exit(1);
-    });
-    frame.lazy()
+    let expression = if target == "datetime" {
+        let output_name = column.to_string();
+        let config = datetime.clone();
+        let diagnostics = diagnostics.clone();
+        let output_dtype = dtype.clone();
+        col(column).cast(DataType::String).map(
+            move |series| {
+                let values = series.str()?.into_iter().enumerate();
+                let parsed = values
+                    .map(|(row, value)| {
+                        value
+                            .map(|value| {
+                                let parsed = parse_datetime_detailed_with_diagnostics(value, &config, Some(&diagnostics))
+                                    .map_err(|error| PolarsError::ComputeError(
+                                        format!("Cannot cast column '{}' at row {} to datetime (value redacted): {error}", output_name, row).into(),
+                                    ))?
+                                    .ok_or_else(|| PolarsError::ComputeError(
+                                        format!("Cannot cast column '{}' at row {} to datetime (value redacted)", output_name, row).into(),
+                                    ))?;
+                                if let Some(timezone) = &config.timezone {
+                                    if parsed.authoritative_offset {
+                                        return Ok(parsed.value);
+                                    }
+                                    localize(parsed.value, timezone, config.ambiguous, config.nonexistent)
+                                        .map_err(|error| PolarsError::ComputeError(
+                                            format!("Cannot cast column '{}' at row {} to datetime (value redacted): {error}", output_name, row).into(),
+                                        ))
+                                        .map(|value| value.with_timezone(&chrono::Utc).naive_utc())
+                                } else {
+                                    Ok(parsed.value)
+                                }
+                            })
+                            .transpose()
+                    })
+                    .collect::<PolarsResult<Vec<_>>>()?;
+                let mut datetime = DatetimeChunked::from_naive_datetime_options(
+                    output_name.clone().into(),
+                    parsed,
+                    TimeUnit::Microseconds,
+                );
+                if let DataType::Datetime(_, Some(timezone)) = &output_dtype {
+                    datetime.set_time_zone(timezone.clone()).map_err(|error| PolarsError::ComputeError(error.to_string().into()))?;
+                }
+                Ok(Some(datetime.into_series().into()))
+            },
+            GetOutput::from_type(dtype),
+        )
+    } else {
+        let target_name = target.clone();
+        let output_name = column.to_string();
+        let output_dtype = dtype.clone();
+        col(column).map(
+            move |series| {
+                let casted = series.strict_cast(&output_dtype).map_err(|error| {
+                    PolarsError::ComputeError(
+                        format!(
+                            "Cannot cast column '{output_name}' to {target_name}: {error}"
+                        )
+                        .into(),
+                    )
+                })?;
+                Ok(Some(casted))
+            },
+            GetOutput::from_type(dtype),
+        )
+    }
+    .alias(column);
+    Ok(df.clone().with_columns([expression]))
 }

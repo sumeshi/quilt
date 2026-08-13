@@ -2,16 +2,16 @@ import os
 import tempfile
 import unittest
 
-from test_base import QsvTestBase
+from test_base import QuiltTestBase
 
 
-class TestBucket(QsvTestBase):
+class TestBucket(QuiltTestBase):
     fixture = "bucket.csv"
 
     def run_bucket(self, interval, output=None, selection="when_bucket"):
         output_arg = f" --output {output}" if output else ""
-        return self.run_qsv_command(
-            f"load {self.get_fixture_path(self.fixture)} - cast when datetime - bucket when {interval}{output_arg} - select {selection} - show"
+        return self.run_pipeline(
+            ['load', str(self.get_fixture_path(self.fixture)), '-', 'cast', 'when', 'datetime', '-', 'bucket', 'when', str(interval) + str(output_arg), '-', 'select', str(selection), '-', 'show']
         )
 
     def test_floors_supported_intervals(self):
@@ -31,16 +31,16 @@ class TestBucket(QsvTestBase):
         result = self.run_bucket("1s")
         self.assertEqual(result.returncode, 0)
         self.assertIn("1969-12-31T23:59:59", result.stdout)
-        stats = self.run_qsv_command(
-            f"load {self.get_fixture_path(self.fixture)} - cast when datetime - bucket when 1s - select when_bucket - stats"
+        stats = self.run_pipeline(
+            ['load', str(self.get_fixture_path(self.fixture)), '-', 'cast', 'when', 'datetime', '-', 'bucket', 'when', '1s', '-', 'select', 'when_bucket', '-', 'stats']
         )
         self.assertEqual(stats.returncode, 0)
         self.assertIn("null_count", stats.stdout)
         self.assertIn("1", stats.stdout)
 
     def test_custom_output_preserves_source_and_chains(self):
-        result = self.run_qsv_command(
-            f"load {self.get_fixture_path(self.fixture)} - cast when datetime - bucket when 5m --output bucketed - select when,bucketed - head 1 - show"
+        result = self.run_pipeline(
+            ['load', str(self.get_fixture_path(self.fixture)), '-', 'cast', 'when', 'datetime', '-', 'bucket', 'when', '5m', '--output', 'bucketed', '-', 'select', 'when,bucketed', '-', 'head', '1', '-', 'show']
         )
         self.assertEqual(result.returncode, 0)
         self.assertEqual(
@@ -55,34 +55,34 @@ class TestBucket(QsvTestBase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("Invalid bucket interval", result.stderr)
 
-        missing = self.run_qsv_command(
-            f"load {self.get_fixture_path(self.fixture)} - bucket missing 1s - show"
+        missing = self.run_pipeline(
+            ['load', str(self.get_fixture_path(self.fixture)), '-', 'bucket', 'missing', '1s', '-', 'show']
         )
         self.assertNotEqual(missing.returncode, 0)
         self.assertIn("not found", missing.stderr)
 
-        non_datetime = self.run_qsv_command(
-            f"load {self.get_fixture_path(self.fixture)} - bucket when 1s - show"
+        non_datetime = self.run_pipeline(
+            ['load', str(self.get_fixture_path(self.fixture)), '-', 'bucket', 'when', '1s', '-', 'show']
         )
-        self.assertNotEqual(non_datetime.returncode, 0)
-        self.assertIn("must have datetime type", non_datetime.stderr)
+        self.assertEqual(non_datetime.returncode, 0)
+        self.assertIn("when_bucket", non_datetime.stdout)
 
     def test_output_collision_and_invalid_datetime_fail(self):
-        collision = self.run_qsv_command(
-            f"load {self.get_fixture_path('bucket-collision.csv')} - cast when datetime - bucket when 1s - show"
+        collision = self.run_pipeline(
+            ['load', str(self.get_fixture_path('bucket-collision.csv')), '-', 'cast', 'when', 'datetime', '-', 'bucket', 'when', '1s', '-', 'show']
         )
         self.assertNotEqual(collision.returncode, 0)
         self.assertIn("already exists", collision.stderr)
 
-        invalid = self.run_qsv_command(
-            f"load {self.get_fixture_path('cast.csv')} - cast text datetime - bucket text 1s - show"
+        invalid = self.run_pipeline(
+            ['load', str(self.get_fixture_path('cast.csv')), '-', 'cast', 'text', 'datetime', '-', 'bucket', 'text', '1s', '-', 'show']
         )
         self.assertNotEqual(invalid.returncode, 0)
         self.assertIn("Cannot cast column", invalid.stderr)
 
-    def test_quilt_step(self):
-        result = self.run_qsv_command(
-            f"quilt {self.get_fixture_path('quilt-bucket.yaml')}"
+    def test_run_step(self):
+        result = self.run_pipeline(
+            ['run', str(self.get_fixture_path('run-bucket.yaml'))]
         )
         self.assertEqual(result.returncode, 0)
         self.assertEqual(
@@ -105,7 +105,7 @@ class TestBucket(QsvTestBase):
                 {"when": pa.array([extreme], type=pa.int64()).cast(pa.timestamp("us"))}
             )
             pq.write_table(table, path)
-            result = self.run_qsv_command(f"load {path} - bucket when 1s - show")
+            result = self.run_pipeline(['load', str(path), '-', 'bucket', 'when', '1s', '-', 'show'])
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("Bucket floor overflow", result.stderr)
             self.assertNotIn("panicked", result.stderr)

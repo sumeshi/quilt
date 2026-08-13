@@ -1,21 +1,31 @@
-import unittest
+import shutil
 import subprocess
-import os
-import sys
-import io
-import contextlib
+import tempfile
+import textwrap
+import unittest
 from pathlib import Path
+from typing import Sequence
 
-class QsvTestBase(unittest.TestCase):
-    """
-    Base test class for QSV module testing
-    """
-    
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.root_dir = Path(__file__).parent.parent.resolve()
-        self.fixtures_dir = self.root_dir / "tests" / "fixtures"
-        self.qsv_path = self.root_dir / "target" / "debug" / "qsv"
+class QuiltTestBase(unittest.TestCase):
+    """Shared real-binary harness for CLI and run-document contract tests."""
+
+    root_dir = Path(__file__).resolve().parents[1]
+    fixtures_dir = root_dir / "tests" / "fixtures"
+    qlt_path = root_dir / "target" / "debug" / "qlt"
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        if not cls.qlt_path.is_file():
+            raise AssertionError(
+                f"compiled qlt binary not found at {cls.qlt_path}; "
+                "run 'cargo build' before Python tests"
+            )
+
+    def setUp(self):
+        super().setUp()
+        self.temp_dir = tempfile.mkdtemp(prefix="qlt-test-")
+        self.addCleanup(shutil.rmtree, self.temp_dir, True)
     
     def get_fixture_path(self, filename):
         """
@@ -29,19 +39,36 @@ class QsvTestBase(unittest.TestCase):
         """
         return str(self.fixtures_dir / filename)
     
-    def run_qsv_command(self, command_str):
-        """
-        Run a QSV command and return its output
-        
-        Args:
-            command_str: Command string to run
-            
-        Returns:
-            Output of the command as a string
-        """
-        full_command = f"{self.qsv_path} {command_str}"
-        
-        with contextlib.redirect_stdout(io.StringIO()):
-            result = subprocess.run(full_command, shell=True, capture_output=True, text=True, cwd=self.root_dir)
-        
-        return result
+    def run_cli(self, args: Sequence[object], *, cwd=None, env=None):
+        """Run qlt with an argv list; shell parsing is deliberately disabled."""
+        argv = [str(self.qlt_path), *(str(arg) for arg in args)]
+        return subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            cwd=cwd or self.root_dir,
+            env=env,
+            check=False,
+        )
+
+    def run_pipeline(self, *steps: Sequence[object], cwd=None, env=None):
+        """Run one or more argv-form pipeline steps separated by '-'."""
+        args = []
+        for index, step in enumerate(steps):
+            if index:
+                args.append("-")
+            args.extend(str(arg) for arg in step)
+        return self.run_cli(args, cwd=cwd, env=env)
+
+    def run_run_document(self, config, *args):
+        """Run a canonical v1 document using the real qlt run command."""
+        return self.run_cli(["run", config, *args])
+
+    def write_run_document(self, name, content):
+        """Write a temporary canonical run document and return its path."""
+        filename = name if name.startswith("run-") else f"run-{name}"
+        if not filename.endswith(".yaml"):
+            filename = f"{filename}.yaml"
+        path = Path(self.temp_dir) / filename
+        path.write_text(textwrap.dedent(content).strip() + "\n", encoding="utf-8")
+        return str(path)

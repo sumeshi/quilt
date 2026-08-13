@@ -1,0 +1,18 @@
+version: 1
+title: "Run v1 smoke"
+stages:
+  - name: input
+    steps:
+      - load:
+          paths: ["tests/fixtures/cast.csv"]
+      - cast:
+          column: number
+          type: int
+  - name: output
+    from: input
+    steps:
+      - select:
+          columns: [number]
+      - head:
+          number: 1
+      - show: {}

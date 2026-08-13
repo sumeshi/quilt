@@ -1,14 +1,14 @@
 import unittest
 
-from test_base import QsvTestBase
+from test_base import QuiltTestBase
 
 
-class TestExtract(QsvTestBase):
+class TestExtract(QuiltTestBase):
     fixture = "extract.csv"
 
     def test_multiple_groups_unicode_unmatched_and_null(self):
-        result = self.run_qsv_command(
-            f"load {self.get_fixture_path(self.fixture)} - extract value '(?P<user>[^@]+)@(?P<domain>.+)' - select value,user,domain - show"
+        result = self.run_pipeline(
+            ['load', str(self.get_fixture_path(self.fixture)), '-', 'extract', 'value', '(?P<user>[^@]+)@(?P<domain>.+)', '-', 'select', 'value,user,domain', '-', 'show']
         )
         self.assertEqual(result.returncode, 0)
         lines = result.stdout.strip().splitlines()
@@ -20,8 +20,8 @@ class TestExtract(QsvTestBase):
         self.assertEqual(lines[5], "carol@example.net,carol,example.net")
 
     def test_optional_groups_and_chaining(self):
-        result = self.run_qsv_command(
-            f"load {self.get_fixture_path('extract-optional.csv')} - extract value '^(?P<country>\\+\\d+-)?(?P<number>\\d+-\\d+)$' - select country,number - head 2 - show"
+        result = self.run_pipeline(
+            ['load', str(self.get_fixture_path('extract-optional.csv')), '-', 'extract', 'value', '^(?P<country>\\+\\d+-)?(?P<number>\\d+-\\d+)$', '-', 'select', 'country,number', '-', 'head', '2', '-', 'show']
         )
         self.assertEqual(result.returncode, 0)
         self.assertEqual(
@@ -32,35 +32,35 @@ class TestExtract(QsvTestBase):
     def test_failures(self):
         cases = [
             (
-                f"load {self.get_fixture_path(self.fixture)} - extract value '(' - show",
+                ['load', str(self.get_fixture_path(self.fixture)), '-', 'extract', 'value', '(', '-', 'show'],
                 "Invalid extract regex",
             ),
             (
-                f"load {self.get_fixture_path(self.fixture)} - extract value 'email' - show",
+                ['load', str(self.get_fixture_path(self.fixture)), '-', 'extract', 'value', 'email', '-', 'show'],
                 "named capture group",
             ),
             (
-                f"load {self.get_fixture_path(self.fixture)} - extract missing '(?P<x>.+)' - show",
+                ['load', str(self.get_fixture_path(self.fixture)), '-', 'extract', 'missing', '(?P<x>.+)', '-', 'show'],
                 "not found",
             ),
             (
-                f"load {self.get_fixture_path('cast.csv')} - extract number '(?P<x>.+)' - show",
+                ['load', str(self.get_fixture_path('cast.csv')), '-', 'extract', 'number', '(?P<x>.+)', '-', 'show'],
                 "must be string",
             ),
             (
-                f"load {self.get_fixture_path('extract-collision.csv')} - extract value '(?P<domain>[^@]+)' - show",
+                ['load', str(self.get_fixture_path('extract-collision.csv')), '-', 'extract', 'value', '(?P<domain>[^@]+)', '-', 'show'],
                 "already exists",
             ),
         ]
         for command, message in cases:
             with self.subTest(command=command):
-                result = self.run_qsv_command(command)
+                result = self.run_pipeline(command)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(message, result.stderr)
 
-    def test_quilt_step(self):
-        result = self.run_qsv_command(
-            f"quilt {self.get_fixture_path('quilt-extract.yaml')}"
+    def test_run_step(self):
+        result = self.run_pipeline(
+            ['run', str(self.get_fixture_path('run-extract.yaml'))]
         )
         self.assertEqual(result.returncode, 0)
         self.assertEqual(

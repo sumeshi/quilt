@@ -1,0 +1,37 @@
+title: Quilt Join Pipeline
+description: Fixture for joining projected event fields
+version: 1
+author: qlt test suite
+stages:
+- name: load_stage
+  steps:
+  - load:
+      paths:
+      - sample-min.csv
+- name: stage_1
+  from: load_stage
+  steps:
+  - select:
+      columns:
+      - TimeCreated
+      - EventId
+- name: stage_2
+  from: load_stage
+  steps:
+  - select:
+      columns:
+      - TimeCreated
+      - Level
+- name: merge_stage
+  join:
+    inputs:
+    - stage_1
+    - stage_2
+    how: inner
+    'on':
+    - TimeCreated
+    coalesce: true
+- name: final_stage
+  from: merge_stage
+  steps:
+  - show: {}

@@ -1,0 +1,16 @@
+title: Flatten
+description: Flatten test fixture
+version: 1
+author: qlt test suite
+stages:
+- name: process_data
+  steps:
+  - load:
+      paths:
+      - flatten.jsonl
+  - flatten: {}
+  - select:
+      columns:
+      - id
+      - user.name
+  - show: {}

@@ -1,19 +1,25 @@
 use crate::controllers::log::LogController;
+use crate::error::QuiltError;
 use polars::prelude::*;
 use regex;
 
-pub fn contains(df: &LazyFrame, colname: &str, pattern: &str, ignorecase: bool) -> LazyFrame {
-    let schema = match df.clone().collect_schema() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Error getting schema for contains operation: {e}");
-            std::process::exit(1);
-        }
-    };
+pub fn contains(
+    df: &LazyFrame,
+    colname: &str,
+    pattern: &str,
+    ignorecase: bool,
+) -> Result<LazyFrame, QuiltError> {
+    let schema = df
+        .clone()
+        .collect_schema()
+        .map_err(|e| QuiltError::schema("contains", Some(colname), e.to_string()))?;
 
     if !schema.iter_names().any(|s| s == colname) {
-        eprintln!("Error: Column '{colname}' not found in DataFrame for contains operation");
-        std::process::exit(1);
+        return Err(QuiltError::schema(
+            "contains",
+            Some(colname),
+            "column not found",
+        ));
     }
 
     LogController::debug(&format!(
@@ -36,5 +42,5 @@ pub fn contains(df: &LazyFrame, colname: &str, pattern: &str, ignorecase: bool) 
             .contains(lit(pattern), true) // literal=true for exact string match
     };
 
-    df.clone().filter(expr)
+    Ok(df.clone().filter(expr))
 }

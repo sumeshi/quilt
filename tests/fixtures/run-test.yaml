@@ -1,0 +1,39 @@
+title: Quilt Test Pipeline
+description: Fixture for a full join and tail showtable pipeline
+version: 1
+author: qlt test suite
+stages:
+- name: load_stage
+  steps:
+  - load:
+      paths:
+      - sample-min.csv
+- name: stage_1
+  from: load_stage
+  steps:
+  - select:
+      columns:
+      - TimeCreated
+      - EventId
+- name: stage_2
+  from: load_stage
+  steps:
+  - select:
+      columns:
+      - TimeCreated
+      - Provider
+- name: merge_stage
+  join:
+    inputs:
+    - stage_1
+    - stage_2
+    how: full
+    'on':
+    - TimeCreated
+    coalesce: true
+- name: stage_3
+  from: merge_stage
+  steps:
+  - tail:
+      number: 1
+  - showtable: {}

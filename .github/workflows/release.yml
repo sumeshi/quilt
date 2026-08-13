@@ -105,10 +105,10 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-            name: qsv-rs-linux-x64
+            name: quilt-linux-x64
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            name: qsv-rs-windows-x64
+            name: quilt-windows-x64
     
     runs-on: ${{ matrix.os }}
     
@@ -170,7 +170,7 @@ jobs:
     - name: Prepare binary (Linux)
       if: matrix.os != 'windows-latest'
       run: |
-        cp target/${{ matrix.target }}/release/qsv ${{ matrix.name }}-${{ steps.get_version.outputs.VERSION }}
+        cp target/${{ matrix.target }}/release/qlt ${{ matrix.name }}-${{ steps.get_version.outputs.VERSION }}
         chmod +x ${{ matrix.name }}-${{ steps.get_version.outputs.VERSION }}
         
     - name: Prepare binary (Windows)
@@ -182,9 +182,9 @@ jobs:
         echo "Version: $version"
         echo "Name: $name"
         echo "Output file: $outputFile"
-        echo "Source file: target/${{ matrix.target }}/release/qsv.exe"
+        echo "Source file: target/${{ matrix.target }}/release/qlt.exe"
         Get-ChildItem target/${{ matrix.target }}/release/
-        cp target/${{ matrix.target }}/release/qsv.exe $outputFile
+        cp target/${{ matrix.target }}/release/qlt.exe $outputFile
         echo "Created file:"
         Get-ChildItem $outputFile | Format-List
       shell: powershell
@@ -224,8 +224,8 @@ jobs:
           ls -la "$dir"
           echo "---"
         done
-        echo "=== All files that match qsv-rs pattern ==="
-        find artifacts -name "*qsv-rs*" -type f
+        echo "=== All files that match quilt pattern ==="
+        find artifacts -name "*quilt*" -type f
         echo "=== All files in artifacts ==="
         find artifacts -type f
         
@@ -261,12 +261,12 @@ jobs:
       id: release_notes
       run: |
         cat > release_notes.md << 'EOF'
-        ## Quilter-CSV ${{ steps.get_version.outputs.VERSION }}
+        ## Quilt ${{ steps.get_version.outputs.VERSION }}
         
         ### Features
         - Pipeline-style command chaining: Chain multiple commands in a single line for fast and efficient data processing
         - Flexible filtering and transformation: Perform operations like select, filter, sort, deduplicate, and timezone conversion
-        - YAML-based batch processing (Quilt): Automate complex workflows using YAML configuration files
+        - YAML `run` workflows: Automate validated pipelines with joins, branches, and multiple outputs
         
         ### Supported Platforms
         - Linux (x64) - Static binary with musl
@@ -274,16 +274,16 @@ jobs:
         
         ### Installation
         1. Download the appropriate binary for your platform
-        2. Make it executable (Unix systems): `chmod +x qsv-rs-*`
-        3. Move to a directory in your PATH: `sudo mv qsv-rs-* /usr/local/bin/qsv`
-        4. Verify installation: `qsv --help`
+        2. Make it executable (Unix systems): `chmod +x quilt-*`
+        3. Move to a directory in your PATH: `sudo mv quilt-* /usr/local/bin/qlt`
+        4. Verify installation: `qlt --help`
         EOF
         
     - name: Create Release
       uses: softprops/action-gh-release@v1
       with:
         tag_name: ${{ steps.get_version.outputs.VERSION }}
-        name: Quilter-CSV ${{ steps.get_version.outputs.VERSION }}
+        name: Quilt ${{ steps.get_version.outputs.VERSION }}
         body_path: release_notes.md
         draft: false
         prerelease: false
@@ -316,6 +316,6 @@ jobs:
     - name: Upload development artifact
       uses: actions/upload-artifact@v4
       with:
-        name: qsv-rs-dev-linux
-        path: target/x86_64-unknown-linux-musl/release/qsv
-        retention-days: 7 
+        name: quilt-dev-linux
+        path: target/x86_64-unknown-linux-musl/release/qlt
+        retention-days: 7

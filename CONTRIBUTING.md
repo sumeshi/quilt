@@ -1,124 +1,104 @@
-# Contributing to Quilter-CSV
+# Contributing to Quilt
 
-Thank you for your interest in contributing to Quilter-CSV!
+Quilt is a Rust/Polars structured-record pipeline. The public binary is `qlt`; automation is
+`qlt run`. Keep the initializer → chainable → finalizer model intact: operations append to one
+`LazyFrame`, and evaluation belongs at a finalizer or documented global barrier.
 
-## Development Setup
+## Project structure
 
-### Using Dev Container
-
-1. Clone the repository and open in VS Code
-2. Click "Reopen in Container" when prompted
-3. The development environment will be set up automatically
-
-## Project Structure
-
-```
+```text
 src/
-├── controllers/     # Command parsing and control
-├── operations/      # Data processing operations
-│   ├── chainables/  # Transformations (select, filter, etc.)
-│   ├── finalizers/  # Output operations (show, dump, etc.)
-│   └── initializers/ # Data loading
-└── main.rs         # Entry point
-tests/              # Python test suite
+├── controllers/       typed command model, parser, executor, and errors
+├── operations/
+│   ├── initializers/  LazyFrame sources such as load
+│   ├── chainables/    lazy transformations and filters
+│   ├── finalizers/    evaluation and output boundaries
+│   └── automation/   v1 run documents, graph, join, concat, and branch
+├── lib.rs             reusable library boundary and Rust tests
+└── main.rs            binary boundary: stderr diagnostics and exit codes
+tests/
+├── fixtures/          deterministic CSV/JSONL/Parquet/YAML inputs
+└── test_*.py          real-binary CLI and run-document contracts
 ```
 
-## Testing
+## Development setup
 
-### Running Tests
+Build the binary before Python tests:
 
 ```bash
-# Run all tests (132 tests covering all features)
-$ python3 tests/run_tests.py
-
-# Run individual test modules
-$ python3 tests/test_chainables_select.py
-$ python3 tests/test_finalizers_show.py
-$ python3 tests/test_quilters_quilt.py
-
-# Run using unittest module
-$ python3 -m unittest tests.test_chainables_select
+cargo build --all-features --offline
 ```
 
-### Test Requirements
-
-- **100% Feature Coverage**: All new features must include comprehensive tests
-- **Test Categories**: Initializers, Chainables, Finalizers, Quilters
-- **Naming Convention**: `test_{category}_{feature}.py`
-- **Base Class**: Inherit from `QsvTestBase` for consistent infrastructure
-- **Manual Registration**: Add new test classes to `tests/run_tests.py`
-
-### Adding Tests for New Features
-
-1. **Create Test File**: Follow naming pattern `test_{category}_{feature}.py`
-2. **Implement Tests**: Use `QsvTestBase` and cover all functionality
-3. **Register in run_tests.py**:
-   ```python
-   # Add import
-   from test_chainables_newfeature import TestNewFeature
-   
-   # Add to appropriate list
-   chainables = [
-       TestSelect,
-       # ... existing tests ...
-       TestNewFeature,  # Add here
-   ]
-   ```
-4. **Use Fixtures**: Leverage existing test data in `tests/fixtures/`
-5. **Verify Coverage**: Ensure all commands, options, and edge cases are tested
-
-## Code Standards
+`showtable` is part of the unconditional public surface. The no-default-features build is a
+feature-matrix check, not a reduced command surface:
 
 ```bash
-# Format and lint
-$ cargo fmt --all
-$ cargo fmt-check
-$ cargo lint
-
-# Check before submitting
-$ cargo build --release
-$ python3 tests/run_tests.py
+cargo build --no-default-features --offline
 ```
 
-## Performance and Size Baselines
+## Test and quality gates
 
-Use the benchmark script before and after optimization work so runtime and release binary size are captured with the same workflow:
+The Python suite uses standard-library discovery; there is no manual test registration. The
+wrapper exists for CI compatibility:
 
 ```bash
-$ ./scripts/benchmark_baseline.sh
+python3 -m unittest discover -s tests -p 'test_*.py'
+cd tests && python3 run_tests.py
 ```
 
-The script builds `target/release/qsv`, prints the binary size in bytes, and measures representative `load`, `select`, `grep`, `bucket`, `dump`, and `quilt` commands against the test fixtures.
-
-To compare a smaller build without the table renderer:
+Run the complete Rust matrix and strict lint before submitting:
 
 ```bash
-$ ./scripts/benchmark_baseline.sh --no-default-features
+cargo test --all-features --offline
+cargo test --no-default-features --offline
+cargo build --all-features --offline
+cargo build --no-default-features --offline
+cargo clippy --all-targets --all-features --offline -- -D warnings
+cargo fmt --check
+git diff --check
 ```
 
-The optional `table` cargo feature controls `showtable` and the `comfy-table` dependency. Default builds keep `showtable`; non-`table` builds fall back to `show` when no finalizer is specified, and `showtable` prints a clear rebuild hint.
+Focused Python modules can be run with discovery:
 
-The current Polars `0.48.1` IO feature set still pulls `object_store`, `reqwest`, `rustls`, and `ring` through `polars-io` when CSV/Parquet support is enabled. The audit for smaller local-only builds did not find a narrower feature combination that preserves the current CLI surface while removing those remote IO dependencies.
+```bash
+python3 -m unittest discover -s tests -p 'test_run_join.py'
+python3 -m unittest discover -s tests -p 'test_chainables_select.py'
+```
 
-## Submitting Changes
+Tests inherit `QuiltTestBase`, invoke `target/debug/qlt` with argv lists and `shell=False`, and
+receive isolated temporary directories. Add a focused `test_*.py` module; discovery finds it
+automatically. Run-document tests are split by schema, validation, graph, joins, concat,
+parameters, operation reuse, outputs, and failures.
 
-1. Create a feature branch: `git checkout -b feature/your-feature`
-2. Make your changes with clear commit messages
-3. Add tests for new functionality
-4. Ensure all tests pass
-5. Submit a pull request with a clear description
+## Adding operations
 
-## Adding New Operations
+1. Add the implementation under the appropriate `src/operations` category and return
+   `Result<_, QuiltError>`.
+2. Add typed arguments, registry specification, CLI parsing, and the automation adapter in the
+   shared command model. CLI and run must use the same typed command and core implementation.
+3. Document accepted dtypes, output schema, null/error behavior, lazy/barrier/finalizer status,
+   and memory/streaming characteristics in `README.md`.
+4. Add focused Rust tests for reusable behavior and real-binary Python tests for the public
+   contract. Include CLI/run parity where applicable.
+5. Run the full gates above and `python3 -m unittest tests.test_repository_audit`.
 
-1. **Create Operation**: Implement in `src/operations/chainables/yourfeature.rs`
-2. **Module Export**: Add to `src/operations/chainables/mod.rs`
-3. **Controller Integration**: Add to dataframe controller
-4. **Command Parsing**: Add command parsing in `main.rs`
-5. **Write Tests**: Create `tests/test_chainables_yourfeature.py`
-6. **Register Tests**: Manually add test class to `tests/run_tests.py`
-7. **Verify**: Run `python3 tests/run_tests.py` to ensure all tests pass
+Unknown fields/options should fail before input I/O. Do not add compatibility aliases or a
+second dispatch table. User-facing errors must carry operation/stage/path context without
+leaking declared secret parameter values. Only `main.rs` may choose a process exit code.
 
-## Getting Help
+## Performance baselines
 
-- Report issues: [GitHub Issues](https://github.com/sumeshi/qsv-rs/issues)
-- Ask questions: [GitHub Discussions](https://github.com/sumeshi/qsv-rs/discussions)
+Use the benchmark script for comparable measurements; it creates isolated temporary dump
+targets and cleans them after each run:
+
+```bash
+./scripts/benchmark_baseline.sh
+```
+
+The README records a reproducible debug build/runtime baseline and the exact commands used to
+repeat it. Do not commit generated binaries, benchmark output, cache files, or temporary data.
+
+## Submitting changes
+
+Use a focused branch and explain behavior changes, test coverage, and any memory or output
+contract implications. Keep commits small enough to review and do not commit generated files.

@@ -1,18 +1,19 @@
 use crate::controllers::log::LogController;
+use crate::error::QuiltError;
 use polars::prelude::*;
 
-pub fn isin(df: &LazyFrame, colname: &str, values: &[String]) -> LazyFrame {
-    let schema = match df.clone().collect_schema() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Error getting schema for isin operation: {e}");
-            std::process::exit(1);
-        }
-    };
+pub fn isin(df: &LazyFrame, colname: &str, values: &[String]) -> Result<LazyFrame, QuiltError> {
+    let schema = df
+        .clone()
+        .collect_schema()
+        .map_err(|e| QuiltError::schema("isin", Some(colname), e.to_string()))?;
 
     if !schema.iter_names().any(|s| s == colname) {
-        eprintln!("Error: Column '{colname}' not found in DataFrame for isin operation");
-        std::process::exit(1);
+        return Err(QuiltError::schema(
+            "isin",
+            Some(colname),
+            "column not found",
+        ));
     }
 
     LogController::debug(&format!(
@@ -21,11 +22,17 @@ pub fn isin(df: &LazyFrame, colname: &str, values: &[String]) -> LazyFrame {
 
     if values.is_empty() {
         LogController::debug("Empty values list for isin, returning empty result");
-        return df.clone().filter(lit(false));
+        return Ok(df.clone().filter(lit(false)));
     }
 
     // Get the column data type
-    let col_dtype = schema.get(colname).unwrap();
+    let col_dtype = schema.get(colname).ok_or_else(|| {
+        QuiltError::schema(
+            "isin",
+            Some(colname),
+            "column disappeared during schema inspection",
+        )
+    })?;
 
     // Build filter expression efficiently using fold instead of manual iteration
     let filter_expr = if matches!(
@@ -51,5 +58,5 @@ pub fn isin(df: &LazyFrame, colname: &str, values: &[String]) -> LazyFrame {
             .unwrap_or_else(|| lit(false))
     };
 
-    df.clone().filter(filter_expr)
+    Ok(df.clone().filter(filter_expr))
 }

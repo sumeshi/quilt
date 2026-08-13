@@ -1,0 +1,20 @@
+title: Delta
+description: Delta test fixture
+version: 1
+author: qlt test suite
+stages:
+- name: process_data
+  steps:
+  - load:
+      paths:
+      - delta.csv
+  - delta:
+      column: signed
+      output: difference
+  - select:
+      columns:
+      - signed
+      - difference
+  - head:
+      number: 2
+  - show: {}

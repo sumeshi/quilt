@@ -1,0 +1,19 @@
+title: Cast
+description: Cast test fixture
+version: 1
+author: qlt test suite
+stages:
+- name: process_data
+  steps:
+  - load:
+      paths:
+      - cast.csv
+  - cast:
+      column: number
+      type: int
+  - select:
+      columns:
+      - number
+  - head:
+      number: 1
+  - show: {}

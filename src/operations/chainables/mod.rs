@@ -3,7 +3,6 @@ pub mod cast;
 pub mod changetz;
 pub mod contains;
 pub mod count;
-pub mod datetime;
 pub mod delta;
 pub mod extract;
 pub mod flatten;

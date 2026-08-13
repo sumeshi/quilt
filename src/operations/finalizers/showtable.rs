@@ -1,33 +1,30 @@
 use crate::controllers::log::LogController;
-#[cfg(feature = "table")]
+use crate::error::QuiltError;
+use crate::operations::finalizers::FinalizerResult;
 use comfy_table::presets::UTF8_FULL;
-#[cfg(feature = "table")]
 use comfy_table::{Cell, ContentArrangement, Table};
 use polars::prelude::*;
 
-#[cfg(feature = "table")]
 const MAX_DISPLAY_ROWS: usize = 8;
-#[cfg(not(feature = "table"))]
-const SHOWTABLE_DISABLED_MESSAGE: &str =
-    "Error: 'showtable' is not available in this build. Rebuild with `--features table`.";
+const MAX_DISPLAY_WIDTH: usize = 40;
 
-pub fn showtable(df: &LazyFrame) {
+pub fn showtable(df: &LazyFrame) -> Result<FinalizerResult, QuiltError> {
     LogController::debug("Applying showtable (display DataFrame as a formatted table)");
 
-    match render_table(df) {
-        Ok(table_output) => println!("{table_output}"),
-        Err(e) => eprintln!("{e}"),
-    }
+    Ok(FinalizerResult::PlanTable(format!(
+        "{}\n",
+        render_table(df)?
+    )))
 }
 
-#[cfg(feature = "table")]
-pub fn render_table(df: &LazyFrame) -> Result<String, String> {
+pub fn render_table(df: &LazyFrame) -> Result<String, QuiltError> {
     // Try to estimate the size using limit + head approach to avoid full collection
     let head_df = match df.clone().limit((MAX_DISPLAY_ROWS + 1) as u32).collect() {
         Ok(df) => df,
         Err(e) => {
-            return Err(format!(
-                "Error: Failed to collect DataFrame for showtable: {e}"
+            return Err(QuiltError::operation(
+                "showtable",
+                format!("Error: Failed to collect DataFrame for showtable: {e}"),
             ));
         }
     };
@@ -69,10 +66,14 @@ pub fn render_table(df: &LazyFrame) -> Result<String, String> {
     for row_idx in 0..shape.0 {
         let mut row_cells = Vec::new();
         for col_name in &colnames {
-            let s = display_df.column(col_name).unwrap();
-            let val_result = s.get(row_idx);
+            let val_result = display_df
+                .column(col_name)
+                .map_err(|error| {
+                    QuiltError::schema("showtable", Some(col_name), error.to_string())
+                })?
+                .get(row_idx);
             let cell_content = match val_result {
-                Ok(val) => format_anyvalue(&val),
+                Ok(val) => truncate_display(&format_anyvalue(&val)),
                 Err(_) => "Error".to_string(),
             };
             row_cells.push(Cell::new(cell_content));
@@ -93,12 +94,6 @@ pub fn render_table(df: &LazyFrame) -> Result<String, String> {
     Ok(output)
 }
 
-#[cfg(not(feature = "table"))]
-pub fn render_table(_df: &LazyFrame) -> Result<String, String> {
-    Err(SHOWTABLE_DISABLED_MESSAGE.to_string())
-}
-
-#[cfg(feature = "table")]
 fn format_anyvalue(val: &AnyValue) -> String {
     match val {
         AnyValue::Null => "null".to_string(),
@@ -120,4 +115,16 @@ fn format_anyvalue(val: &AnyValue) -> String {
         AnyValue::Duration(d, _) => d.to_string(),
         _ => format!("{val}"),
     }
+}
+
+fn truncate_display(value: &str) -> String {
+    if value.chars().count() <= MAX_DISPLAY_WIDTH {
+        return value.to_string();
+    }
+    let mut truncated = value
+        .chars()
+        .take(MAX_DISPLAY_WIDTH - 1)
+        .collect::<String>();
+    truncated.push('…');
+    truncated
 }

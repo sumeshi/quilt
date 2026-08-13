@@ -1,16 +1,24 @@
 use crate::controllers::csv::{exists_path, CsvController};
 use crate::controllers::log::LogController;
+use crate::error::QuiltError;
 use glob::glob;
 use polars::prelude::*;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+/// Number of NDJSON records inspected per file by default.  Keeping this
+/// bounded prevents a load command from scanning an entire large log merely
+/// to construct its lazy schema.  Callers that need complete inference can
+/// opt into it explicitly with `--infer-schema-length full`.
+pub const DEFAULT_NDJSON_INFER_SCHEMA_LENGTH: usize = 1_000;
 
 fn has_glob_pattern(path: &Path) -> bool {
     let path_str = path.to_string_lossy();
     path_str.contains('*') || path_str.contains('?') || path_str.contains('[')
 }
 
-fn expand_input_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
+fn expand_input_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>, QuiltError> {
     let mut expanded_paths = Vec::new();
 
     for path in paths {
@@ -24,21 +32,24 @@ fn expand_input_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
                         match entry {
                             Ok(matched_path) => matches.push(matched_path),
                             Err(e) => {
-                                eprintln!("Error while expanding glob '{pattern}': {e}");
-                                std::process::exit(1);
+                                return Err(QuiltError::usage(format!(
+                                    "Error while expanding glob '{pattern}': {e}"
+                                )))
                             }
                         }
                     }
                 }
                 Err(e) => {
-                    eprintln!("Invalid glob pattern '{pattern}': {e}");
-                    std::process::exit(1);
+                    return Err(QuiltError::usage(format!(
+                        "Invalid glob pattern '{pattern}': {e}"
+                    )))
                 }
             }
 
             if matches.is_empty() {
-                eprintln!("No files found matching pattern: {pattern}");
-                std::process::exit(1);
+                return Err(QuiltError::usage(format!(
+                    "No files found matching pattern: {pattern}"
+                )));
             }
 
             expanded_paths.extend(matches);
@@ -47,7 +58,7 @@ fn expand_input_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
         }
     }
 
-    expanded_paths
+    Ok(expanded_paths)
 }
 
 pub fn load(
@@ -56,13 +67,35 @@ pub fn load(
     low_memory: bool,
     no_headers: bool,
     chunk_size: Option<usize>,
-) -> LazyFrame {
-    let expanded_paths = expand_input_paths(paths);
+) -> Result<LazyFrame, QuiltError> {
+    load_with_ndjson_inference(
+        paths,
+        separator,
+        low_memory,
+        no_headers,
+        chunk_size,
+        Some(DEFAULT_NDJSON_INFER_SCHEMA_LENGTH),
+    )
+}
 
-    if !exists_path(&expanded_paths) {
-        eprintln!("One or more files do not exist");
-        std::process::exit(1);
+/// Load input files while retaining a bounded NDJSON schema inference policy.
+/// `infer_schema_length == None` requests Polars' full inference mode.
+pub fn load_with_ndjson_inference(
+    paths: &[PathBuf],
+    separator: &str,
+    low_memory: bool,
+    no_headers: bool,
+    chunk_size: Option<usize>,
+    infer_schema_length: Option<usize>,
+) -> Result<LazyFrame, QuiltError> {
+    if infer_schema_length == Some(0) {
+        return Err(QuiltError::usage(
+            "NDJSON inference length must be positive or omitted for full inference",
+        ));
     }
+    let expanded_paths = expand_input_paths(paths)?;
+
+    exists_path(&expanded_paths)?;
     LogController::debug(&format!(
         "{} files are loaded. [{}]",
         expanded_paths.len(),
@@ -97,13 +130,14 @@ pub fn load(
         .filter(|present| *present)
         .count();
     if family_count > 1 {
-        eprintln!("Error: Cannot mix CSV, parquet, and NDJSON files in the same load command");
-        std::process::exit(1);
+        return Err(QuiltError::usage(
+            "Error: Cannot mix CSV, parquet, and NDJSON files in the same load command",
+        ));
     }
     if has_parquet {
         load_parquet_files(&expanded_paths)
     } else if has_ndjson {
-        load_ndjson_files(&expanded_paths)
+        load_ndjson_files(&expanded_paths, infer_schema_length)
     } else {
         load_csv_files(
             &expanded_paths,
@@ -115,32 +149,33 @@ pub fn load(
     }
 }
 
-fn load_ndjson_files(paths: &[PathBuf]) -> LazyFrame {
+fn load_ndjson_files(
+    paths: &[PathBuf],
+    infer_schema_length: Option<usize>,
+) -> Result<LazyFrame, QuiltError> {
     // Polars infers each file without materializing its rows. We merge those metadata
     // schemas so sparse columns present only in later files are retained.
     let mut merged_schema = Schema::default();
     for path in paths {
         let file_schema = LazyJsonLineReader::new(path)
-            .with_infer_schema_length(None)
+            .with_infer_schema_length(infer_schema_length.and_then(NonZeroUsize::new))
             .finish()
             .and_then(|mut frame| frame.collect_schema())
-            .unwrap_or_else(|error| {
-                eprintln!(
-                    "Error inferring NDJSON schema from {}: {error}",
-                    path.display()
-                );
-                std::process::exit(1);
-            });
+            .map_err(|error| QuiltError::Schema {
+                operation: "infer NDJSON schema".into(),
+                column: None,
+                message: format!("{}: {error}", path.display()),
+            })?;
 
         for (name, dtype) in file_schema.iter() {
             let dtype = match merged_schema.get(name) {
-                Some(existing) => merge_ndjson_dtype(existing, dtype).unwrap_or_else(|error| {
-                    eprintln!(
-                        "Error merging NDJSON schema for column '{name}' in {}: {error}",
-                        path.display()
-                    );
-                    std::process::exit(1);
-                }),
+                Some(existing) => {
+                    merge_ndjson_dtype(existing, dtype).map_err(|error| QuiltError::Schema {
+                        operation: "merge NDJSON schema".into(),
+                        column: Some(name.to_string()),
+                        message: format!("{}: {error}", path.display()),
+                    })?
+                }
                 None => dtype.clone(),
             };
             merged_schema.insert(name.clone(), dtype);
@@ -155,12 +190,13 @@ fn load_ndjson_files(paths: &[PathBuf]) -> LazyFrame {
                 .with_schema(Some(schema.clone()))
                 .with_rechunk(true)
                 .finish()
-                .unwrap_or_else(|error| {
-                    eprintln!("Error reading NDJSON file {}: {error}", path.display());
-                    std::process::exit(1);
+                .map_err(|error| QuiltError::Io {
+                    operation: "read NDJSON".into(),
+                    path: Some(path.display().to_string()),
+                    message: error.to_string(),
                 })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, QuiltError>>()?;
 
     concat(
         frames,
@@ -170,10 +206,7 @@ fn load_ndjson_files(paths: &[PathBuf]) -> LazyFrame {
             ..Default::default()
         },
     )
-    .unwrap_or_else(|error| {
-        eprintln!("Error concatenating NDJSON files: {error}");
-        std::process::exit(1);
-    })
+    .map_err(|error| QuiltError::operation("concatenate NDJSON files", error.to_string()))
 }
 
 fn merge_ndjson_dtype(left: &DataType, right: &DataType) -> PolarsResult<DataType> {
@@ -222,20 +255,23 @@ fn merge_ndjson_dtype(left: &DataType, right: &DataType) -> PolarsResult<DataTyp
     }
 }
 
-fn load_parquet_files(paths: &[PathBuf]) -> LazyFrame {
+fn load_parquet_files(paths: &[PathBuf]) -> Result<LazyFrame, QuiltError> {
     if paths.len() == 1 {
-        LazyFrame::scan_parquet(&paths[0], ScanArgsParquet::default()).unwrap_or_else(|e| {
-            eprintln!("Error reading parquet file {}: {}", paths[0].display(), e);
-            std::process::exit(1);
+        LazyFrame::scan_parquet(&paths[0], ScanArgsParquet::default()).map_err(|e| QuiltError::Io {
+            operation: "read parquet".into(),
+            path: Some(paths[0].display().to_string()),
+            message: e.to_string(),
         })
     } else {
         let mut dataframes = Vec::new();
         for path in paths {
-            let df =
-                LazyFrame::scan_parquet(path, ScanArgsParquet::default()).unwrap_or_else(|e| {
-                    eprintln!("Error reading parquet file {}: {}", path.display(), e);
-                    std::process::exit(1);
-                });
+            let df = LazyFrame::scan_parquet(path, ScanArgsParquet::default()).map_err(|e| {
+                QuiltError::Io {
+                    operation: "read parquet".into(),
+                    path: Some(path.display().to_string()),
+                    message: e.to_string(),
+                }
+            })?;
             dataframes.push(df);
         }
         concat(
@@ -246,10 +282,7 @@ fn load_parquet_files(paths: &[PathBuf]) -> LazyFrame {
                 ..Default::default()
             },
         )
-        .unwrap_or_else(|e| {
-            eprintln!("Error concatenating parquet files: {e}");
-            std::process::exit(1);
-        })
+        .map_err(|e| QuiltError::operation("concatenate parquet files", e.to_string()))
     }
 }
 
@@ -259,6 +292,6 @@ fn load_csv_files(
     low_memory: bool,
     no_headers: bool,
     chunk_size: Option<usize>,
-) -> LazyFrame {
+) -> Result<LazyFrame, QuiltError> {
     CsvController::new(paths).get_dataframe(separator, low_memory, no_headers, chunk_size)
 }

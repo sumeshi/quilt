@@ -1,11 +1,10 @@
+use crate::error::QuiltError;
 use polars::prelude::*;
 
-fn fail(message: &str) -> ! {
-    eprintln!("Error: {message}");
-    std::process::exit(1);
-}
+// Datetime deltas are normalized to Duration[μs], matching the shared
+// datetime parser's internal precision regardless of source datetime unit.
 
-fn numeric_dtype(dtype: &DataType) -> bool {
+fn integral_dtype(dtype: &DataType) -> bool {
     matches!(
         dtype,
         DataType::Int8
@@ -16,92 +15,60 @@ fn numeric_dtype(dtype: &DataType) -> bool {
             | DataType::UInt16
             | DataType::UInt32
             | DataType::UInt64
-            | DataType::Float32
-            | DataType::Float64
     )
 }
 
-fn check_output_name(frame: &DataFrame, output: &str) {
-    if frame.column(output).is_ok() {
-        fail(&format!("Delta output column '{output}' already exists"));
-    }
-}
-
-pub fn delta(df: &LazyFrame, column: &str, output: Option<&str>) -> LazyFrame {
-    let mut frame = df.clone().collect().unwrap_or_else(|error| {
-        fail(&format!("Failed to evaluate input before delta: {error}"));
-    });
-    let source = frame
-        .column(column)
-        .unwrap_or_else(|_| fail(&format!("Column '{column}' not found for delta operation")));
+pub fn delta(df: &LazyFrame, column: &str, output: Option<&str>) -> Result<LazyFrame, QuiltError> {
+    let schema = df
+        .clone()
+        .collect_schema()
+        .map_err(|error| QuiltError::schema("delta", None::<String>, error.to_string()))?;
+    let source = schema
+        .get(column)
+        .ok_or_else(|| QuiltError::schema("delta", Some(column), "column not found"))?;
     let output = output
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| format!("{column}_delta"));
-    check_output_name(&frame, &output);
-
-    if numeric_dtype(source.dtype()) {
-        let float_source = source.cast(&DataType::Float64).unwrap_or_else(|error| {
-            fail(&format!("Cannot read numeric column '{column}': {error}"))
-        });
-        let values = float_source.f64().unwrap_or_else(|error| {
-            fail(&format!("Cannot read numeric column '{column}': {error}"))
-        });
-        let mut previous: Option<f64> = None;
-        let deltas = values
-            .into_iter()
-            .map(|current| {
-                let delta = match (previous, current) {
-                    (Some(previous), Some(current)) => {
-                        let delta = current - previous;
-                        if current.is_finite() && previous.is_finite() && !delta.is_finite() {
-                            fail("Numeric delta overflow");
-                        }
-                        Some(delta)
-                    }
-                    _ => None,
-                };
-                previous = current;
-                delta
-            })
-            .collect::<Vec<_>>();
-        frame
-            .with_column(Series::new(output.into(), deltas))
-            .unwrap_or_else(|error| fail(&format!("Failed to add delta column: {error}")));
-    } else if matches!(source.dtype(), DataType::Datetime(_, _)) {
-        let datetime = source.datetime().unwrap_or_else(|error| {
-            fail(&format!("Cannot read datetime column '{column}': {error}"))
-        });
-        let source_unit = datetime.time_unit();
-        let mut previous: Option<i64> = None;
-        let deltas = datetime.into_iter().map(|current| {
-            let current = current.map(|value| match source_unit {
-                TimeUnit::Nanoseconds => value.div_euclid(1_000),
-                TimeUnit::Microseconds => value,
-                TimeUnit::Milliseconds => value
-                    .checked_mul(1_000)
-                    .unwrap_or_else(|| fail("Datetime value cannot be represented in μs")),
-            });
-            let delta = match (previous, current) {
-                (Some(previous), Some(current)) => Some(
-                    current
-                        .checked_sub(previous)
-                        .unwrap_or_else(|| fail("Datetime delta overflow")),
-                ),
-                _ => None,
-            };
-            previous = current;
-            delta
-        });
-        let duration = Int64Chunked::from_iter_options(output.into(), deltas)
-            .into_duration(TimeUnit::Microseconds);
-        frame
-            .with_column(duration)
-            .unwrap_or_else(|error| fail(&format!("Failed to add delta column: {error}")));
-    } else {
-        fail(&format!(
-            "Delta column '{column}' must be numeric or datetime, found {}",
-            source.dtype()
+    if schema.get(&output).is_some() {
+        return Err(QuiltError::schema(
+            "delta",
+            Some(output),
+            "output column already exists",
         ));
     }
-    frame.lazy()
+    if integral_dtype(source) {
+        // Decimal128 performs lossless subtraction across the complete
+        // integer input range; the final strict cast makes the public result
+        // Int64 and reports out-of-range values at sink time.
+        let decimal = DataType::Decimal(Some(38), Some(0));
+        let difference =
+            col(column).cast(decimal.clone()) - col(column).cast(decimal).shift(lit(1i64));
+        Ok(df
+            .clone()
+            .with_columns([difference.strict_cast(DataType::Int64).alias(output)]))
+    } else if matches!(source, DataType::Float32 | DataType::Float64) {
+        // Floating inputs retain their source precision; Float32 deltas are
+        // Float32 and Float64 deltas are Float64.
+        Ok(df
+            .clone()
+            .with_columns([(col(column) - col(column).shift(lit(1i64))).alias(output)]))
+    } else if let DataType::Datetime(unit, timezone) = source {
+        let raw_delta =
+            col(column).cast(DataType::Int64) - col(column).cast(DataType::Int64).shift(lit(1i64));
+        let micros = match unit {
+            TimeUnit::Nanoseconds => raw_delta / lit(1_000i64),
+            TimeUnit::Microseconds => raw_delta,
+            TimeUnit::Milliseconds => raw_delta * lit(1_000i64),
+        };
+        let _ = timezone;
+        Ok(df.clone().with_columns([micros
+            .cast(DataType::Duration(TimeUnit::Microseconds))
+            .alias(output)]))
+    } else {
+        Err(QuiltError::schema(
+            "delta",
+            Some(column),
+            format!("column must be numeric or datetime, found {}", source),
+        ))
+    }
 }

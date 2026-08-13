@@ -1,3 +1,4 @@
+use crate::error::QuiltError;
 use crate::operations::chainables::{
     bucket, cast, changetz, contains, count, delta, extract, flatten, grep, head, isin, parse_size,
     renamecol, sed, select, sort, tail, timeslice, uniq,
@@ -6,7 +7,6 @@ use crate::operations::finalizers::{
     calc, dump, dumpcache, headers, partition, show, showquery, showtable, stats,
 };
 use crate::operations::initializers::load;
-use chrono::Local;
 use polars::prelude::*;
 use std::path::PathBuf;
 
@@ -14,6 +14,13 @@ use std::path::PathBuf;
 pub struct DataFrameController {
     df: Option<LazyFrame>,
 }
+
+impl Default for DataFrameController {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DataFrameController {
     pub fn new() -> Self {
         Self { df: None }
@@ -21,8 +28,14 @@ impl DataFrameController {
     pub fn set_df(&mut self, df: LazyFrame) {
         self.df = Some(df);
     }
+    pub fn into_df(self) -> Option<LazyFrame> {
+        self.df
+    }
     pub fn is_empty(&self) -> bool {
         self.df.is_none()
+    }
+    pub fn frame(&self) -> Option<&LazyFrame> {
+        self.df.as_ref()
     }
     // -- initializers --
     pub fn load(
@@ -32,72 +45,96 @@ impl DataFrameController {
         low_memory: bool,
         no_headers: bool,
         chunk_size: Option<usize>,
-    ) -> &mut Self {
-        self.df = Some(load::load(
-            paths, separator, low_memory, no_headers, chunk_size,
-        ));
-        self
+        infer_schema_length: Option<usize>,
+    ) -> Result<&mut Self, QuiltError> {
+        self.df = Some(load::load_with_ndjson_inference(
+            paths,
+            separator,
+            low_memory,
+            no_headers,
+            chunk_size,
+            infer_schema_length,
+        )?);
+        Ok(self)
     }
     // -- chainables --
-    pub fn cast(&mut self, colname: &str, target: &str) -> &mut Self {
+    pub fn cast(
+        &mut self,
+        colname: &str,
+        target: &str,
+        datetime: &crate::operations::datetime::DateTimeConfig,
+    ) -> Result<&mut Self, QuiltError> {
         if let Some(df) = &self.df {
-            self.df = Some(cast::cast(df, colname, target));
+            self.df = Some(cast::cast_with_config(df, colname, target, datetime)?);
         }
-        self
+        Ok(self)
     }
 
-    pub fn parse_size(&mut self, colname: &str) -> &mut Self {
+    pub fn parse_size(&mut self, colname: &str) -> Result<&mut Self, QuiltError> {
         if let Some(df) = &self.df {
-            self.df = Some(parse_size::parse_size_column(df, colname));
+            self.df = Some(parse_size::parse_size_column(df, colname)?);
         }
-        self
+        Ok(self)
     }
 
-    pub fn bucket(&mut self, colname: &str, interval: &str, output: Option<&str>) -> &mut Self {
+    pub fn bucket(
+        &mut self,
+        colname: &str,
+        interval: &str,
+        output: Option<&str>,
+        datetime: crate::operations::datetime::DateTimeConfig,
+    ) -> Result<&mut Self, QuiltError> {
         if let Some(df) = &self.df {
-            self.df = Some(bucket::bucket(df, colname, interval, output));
+            self.df = Some(bucket::bucket_with_config(
+                df, colname, interval, output, datetime,
+            )?);
         }
-        self
+        Ok(self)
     }
 
-    pub fn delta(&mut self, colname: &str, output: Option<&str>) -> &mut Self {
+    pub fn delta(&mut self, colname: &str, output: Option<&str>) -> Result<&mut Self, QuiltError> {
         if let Some(df) = &self.df {
-            self.df = Some(delta::delta(df, colname, output));
+            self.df = Some(delta::delta(df, colname, output)?);
         }
-        self
+        Ok(self)
     }
 
-    pub fn extract(&mut self, colname: &str, pattern: &str) -> &mut Self {
+    pub fn extract(&mut self, colname: &str, pattern: &str) -> Result<&mut Self, QuiltError> {
         if let Some(df) = &self.df {
-            self.df = Some(extract::extract(df, colname, pattern));
+            self.df = Some(extract::extract(df, colname, pattern)?);
         }
-        self
+        Ok(self)
     }
 
-    pub fn flatten(&mut self) -> &mut Self {
+    pub fn flatten(&mut self) -> Result<&mut Self, QuiltError> {
         if let Some(df) = &self.df {
-            self.df = Some(flatten::flatten(df));
+            self.df = Some(flatten::flatten(df)?);
         }
-        self
+        Ok(self)
     }
 
-    pub fn select(&mut self, colnames: &[String]) -> &mut Self {
+    pub fn select(&mut self, colnames: &[String]) -> Result<&mut Self, QuiltError> {
         if let Some(df) = &self.df {
-            self.df = Some(select::select(df, colnames));
+            self.df = Some(select::select(df, colnames)?);
         }
-        self
+        Ok(self)
     }
-    pub fn isin(&mut self, colname: &str, values: &[String]) -> &mut Self {
+    pub fn isin(&mut self, colname: &str, values: &[String]) -> Result<&mut Self, QuiltError> {
         if let Some(df) = &self.df {
-            self.df = Some(isin::isin(df, colname, values));
+            self.df = Some(isin::isin(df, colname, values)?);
         }
-        self
+        Ok(self)
     }
-    pub fn contains(&mut self, colname: &str, pattern: &str, ignorecase: bool) -> &mut Self {
+    pub fn contains(
+        &mut self,
+        colname: &str,
+        pattern: &str,
+        ignorecase: bool,
+    ) -> Result<&mut Self, QuiltError> {
         if let Some(df) = &self.df {
-            self.df = Some(contains::contains(df, colname, pattern, ignorecase));
+            self.df = Some(contains::contains(df, colname, pattern, ignorecase)?);
         }
-        self
+        Ok(self)
     }
     pub fn sed(
         &mut self,
@@ -105,11 +142,11 @@ impl DataFrameController {
         pattern: &str,
         replacement: &str,
         ignorecase: bool,
-    ) -> &mut Self {
+    ) -> Result<&mut Self, QuiltError> {
         if let Some(df) = &self.df {
-            self.df = Some(sed::sed(df, colname, pattern, replacement, ignorecase));
+            self.df = Some(sed::sed(df, colname, pattern, replacement, ignorecase)?);
         }
-        self
+        Ok(self)
     }
     pub fn grep(
         &mut self,
@@ -117,42 +154,43 @@ impl DataFrameController {
         ignorecase: bool,
         is_inverted: bool,
         columns: Option<&[String]>,
-    ) -> &mut Self {
+    ) -> Result<&mut Self, QuiltError> {
         if let Some(df) = &self.df {
-            self.df = Some(grep::grep(df, pattern, ignorecase, is_inverted, columns));
+            self.df = Some(grep::grep(df, pattern, ignorecase, is_inverted, columns)?);
         }
-        self
+        Ok(self)
     }
-    pub fn head(&mut self, number: usize) -> &mut Self {
+    pub fn head(&mut self, number: usize) -> Result<&mut Self, QuiltError> {
         if let Some(df) = &self.df {
-            self.df = Some(head::head(df, number));
+            self.df = Some(head::head(df, number)?);
         }
-        self
+        Ok(self)
     }
-    pub fn tail(&mut self, number: usize) -> &mut Self {
+    pub fn tail(&mut self, number: usize) -> Result<&mut Self, QuiltError> {
         if let Some(df) = &self.df {
-            self.df = Some(tail::tail(df, number));
+            self.df = Some(tail::tail(df, number)?);
         }
-        self
+        Ok(self)
     }
-    pub fn sort(&mut self, colnames: &[String], desc: bool) -> &mut Self {
+    pub fn sort(&mut self, colnames: &[String], desc: bool) -> Result<&mut Self, QuiltError> {
         if let Some(df) = &self.df {
-            self.df = Some(sort::sort(df, colnames, desc));
+            self.df = Some(sort::sort(df, colnames, desc)?);
         }
-        self
+        Ok(self)
     }
-    pub fn count(&mut self, columns: &[String]) -> &mut Self {
+    pub fn count(&mut self, columns: &[String]) -> Result<&mut Self, QuiltError> {
         if let Some(df) = &self.df {
-            self.df = Some(count::count(df, columns));
+            self.df = Some(count::count(df, columns)?);
         }
-        self
+        Ok(self)
     }
-    pub fn uniq(&mut self) -> &mut Self {
+    pub fn uniq(&mut self) -> Result<&mut Self, QuiltError> {
         if let Some(df) = &self.df {
-            self.df = Some(uniq::uniq(df));
+            self.df = Some(uniq::uniq(df)?);
         }
-        self
+        Ok(self)
     }
+    #[allow(clippy::too_many_arguments)]
     pub fn changetz(
         &mut self,
         colname: &str,
@@ -161,104 +199,154 @@ impl DataFrameController {
         input_format: Option<&str>,
         output_format: Option<&str>,
         ambiguous_time: Option<&str>,
-    ) -> &mut Self {
+        nonexistent_time: Option<&str>,
+    ) -> Result<&mut Self, QuiltError> {
         if let Some(df) = &self.df {
-            let input_format_str = input_format.unwrap_or("auto");
-            let output_format_str = output_format.unwrap_or("auto");
-            let ambiguous_str = ambiguous_time.unwrap_or("earliest");
             self.df = Some(changetz::changetz(
                 df,
                 colname,
                 tz_from,
                 tz_to,
-                input_format_str,
-                output_format_str,
-                ambiguous_str,
-            ));
+                input_format,
+                output_format,
+                ambiguous_time,
+                nonexistent_time,
+            )?);
         }
-        self
+        Ok(self)
     }
-    pub fn renamecol(&mut self, old_name: &str, new_name: &str) -> &mut Self {
+    pub fn changetz_with_config(
+        &mut self,
+        colname: &str,
+        tz_from: &str,
+        tz_to: &str,
+        output_format: Option<&str>,
+        datetime: crate::operations::datetime::DateTimeConfig,
+    ) -> Result<&mut Self, QuiltError> {
         if let Some(df) = &self.df {
-            self.df = Some(renamecol::renamecol(df, old_name, new_name));
+            self.df = Some(changetz::changetz_with_config(
+                df,
+                colname,
+                tz_from,
+                tz_to,
+                output_format,
+                datetime,
+            )?);
         }
-        self
+        Ok(self)
+    }
+    pub fn renamecol(&mut self, old_name: &str, new_name: &str) -> Result<&mut Self, QuiltError> {
+        if let Some(df) = &self.df {
+            self.df = Some(renamecol::renamecol(df, old_name, new_name)?);
+        }
+        Ok(self)
     }
     pub fn timeslice(
         &mut self,
         time_column: &str,
         start_time: Option<&str>,
         end_time: Option<&str>,
-    ) -> &mut Self {
+        datetime: &crate::operations::datetime::DateTimeConfig,
+    ) -> Result<&mut Self, QuiltError> {
         if let Some(df) = &self.df {
-            self.df = Some(timeslice::timeslice(df, time_column, start_time, end_time));
+            self.df = Some(timeslice::timeslice(
+                df,
+                time_column,
+                start_time,
+                end_time,
+                datetime,
+            )?);
         }
-        self
+        Ok(self)
     }
     // -- finalizers --
-    pub fn headers(&self, plain: bool) {
-        if let Some(df) = &self.df {
-            headers::headers(df, plain);
-        }
+    pub fn headers_result(
+        &self,
+        plain: bool,
+    ) -> Result<crate::operations::finalizers::FinalizerResult, QuiltError> {
+        self.df
+            .as_ref()
+            .map(|df| headers::headers(df, plain))
+            .transpose()?
+            .ok_or_else(|| QuiltError::usage("no data loaded"))
     }
-    pub fn stats(&self) {
-        if let Some(df) = &self.df {
-            stats::stats(df);
-        }
+    pub fn stats_result(
+        &self,
+    ) -> Result<crate::operations::finalizers::FinalizerResult, QuiltError> {
+        self.df
+            .as_ref()
+            .map(stats::stats)
+            .transpose()?
+            .ok_or_else(|| QuiltError::usage("no data loaded"))
     }
-    pub fn showquery(&self) {
-        if let Some(df) = &self.df {
-            showquery::showquery(df);
-        }
+    pub fn showquery_result(
+        &self,
+    ) -> Result<crate::operations::finalizers::FinalizerResult, QuiltError> {
+        self.df
+            .as_ref()
+            .map(showquery::showquery)
+            .transpose()?
+            .ok_or_else(|| QuiltError::usage("no data loaded"))
     }
-    pub fn show(&self) {
-        if let Some(df) = &self.df {
-            show::show(df);
-        }
+    pub fn show_result(
+        &self,
+    ) -> Result<crate::operations::finalizers::FinalizerResult, QuiltError> {
+        self.df
+            .as_ref()
+            .map(show::show)
+            .transpose()?
+            .ok_or_else(|| QuiltError::usage("no data loaded"))
     }
-    pub fn show_with_batch_size(&self, batch_size: usize) {
-        if let Some(df) = &self.df {
-            show::show_with_batch_size(df, batch_size);
-        }
+    pub fn showtable_result(
+        &self,
+    ) -> Result<crate::operations::finalizers::FinalizerResult, QuiltError> {
+        self.df
+            .as_ref()
+            .map(showtable::showtable)
+            .transpose()?
+            .ok_or_else(|| QuiltError::usage("no data loaded"))
     }
-    pub fn showtable(&self) {
-        if let Some(df) = &self.df {
-            showtable::showtable(df);
-        }
+    pub fn partition_result(
+        &self,
+        colname: &str,
+        output_dir: &str,
+    ) -> Result<crate::operations::finalizers::FinalizerResult, QuiltError> {
+        self.df
+            .as_ref()
+            .map(|df| partition::partition(df, colname, output_dir))
+            .transpose()?
+            .ok_or_else(|| QuiltError::usage("no data loaded"))
     }
-    pub fn partition(&self, colname: &str, output_dir: &str) {
-        if let Some(df) = &self.df {
-            partition::partition(df, colname, output_dir);
-        }
+    pub fn dumpcache_result(
+        &self,
+        output_path: Option<&str>,
+    ) -> Result<crate::operations::finalizers::FinalizerResult, QuiltError> {
+        self.df
+            .as_ref()
+            .map(|df| dumpcache::dumpcache(df, output_path))
+            .transpose()?
+            .ok_or_else(|| QuiltError::usage("no data loaded"))
     }
-    pub fn dump(&self, path: Option<&str>, separator: Option<char>) {
-        if let Some(df) = &self.df {
-            let output_path_str = path.map(|p| p.to_string()).unwrap_or_else(|| {
-                let now = Local::now();
-                format!("dump_{}.csv", now.format("%Y%m%d_%H%M%S"))
-            });
-            let sep_char = separator.unwrap_or(',');
-            dump::dump(df, Some(&output_path_str), sep_char);
-        }
+    pub fn dump_result(
+        &self,
+        path: Option<&str>,
+        separator: char,
+    ) -> Result<crate::operations::finalizers::FinalizerResult, QuiltError> {
+        self.df
+            .as_ref()
+            .map(|df| dump::dump(df, path, separator))
+            .transpose()?
+            .ok_or_else(|| QuiltError::usage("no data loaded"))
     }
-    pub fn dump_with_batch_size(&self, path: Option<&str>, separator: char, batch_size: usize) {
-        if let Some(df) = &self.df {
-            let output_path_str = path.map(|p| p.to_string()).unwrap_or_else(|| {
-                let now = Local::now();
-                format!("dump_{}.csv", now.format("%Y%m%d_%H%M%S"))
-            });
-            dump::dump_with_batch_size(df, Some(&output_path_str), separator, batch_size);
-        }
-    }
-    pub fn dumpcache(&self, output_path: Option<&str>) {
-        if let Some(df) = &self.df {
-            dumpcache::dumpcache(df, output_path);
-        }
-    }
-
-    pub fn calc(&self, column: &str, mode: &str) {
-        if let Some(df) = &self.df {
-            calc::calc(df, column, mode);
-        }
+    pub fn calc_result(
+        &self,
+        column: &str,
+        mode: &str,
+    ) -> Result<crate::operations::finalizers::FinalizerResult, QuiltError> {
+        self.df
+            .as_ref()
+            .map(|df| calc::calc(df, column, mode))
+            .transpose()?
+            .ok_or_else(|| QuiltError::usage("no data loaded"))
     }
 }

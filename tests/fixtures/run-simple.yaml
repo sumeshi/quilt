@@ -1,0 +1,26 @@
+title: Quilt Simple Pipeline
+description: Fixture for a basic Quilt select and filter pipeline
+version: 1
+author: qlt test suite
+stages:
+- name: load_data
+  steps:
+  - load:
+      paths:
+      - sample-min.csv
+- name: select_columns
+  from: load_data
+  steps:
+  - select:
+      columns:
+      - EventId
+      - Level
+- name: filter_data
+  from: select_columns
+  steps:
+  - isin:
+      column: Level
+      values:
+      - Info
+      - LogAlways
+  - show: {}

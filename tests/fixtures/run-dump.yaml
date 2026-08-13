@@ -1,0 +1,18 @@
+title: Quilt Dump Pipeline
+description: Fixture for dumping Quilt output to a CSV file
+version: 1
+author: qlt test suite
+stages:
+- name: load_and_process
+  steps:
+  - load:
+      paths:
+      - sample-min.csv
+  - select:
+      columns:
+      - TimeCreated
+      - EventId
+  - head:
+      number: 2
+  - dump:
+      output: test_output.csv

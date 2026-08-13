@@ -2,24 +2,24 @@ import os
 import tempfile
 import unittest
 
-from test_base import QsvTestBase
+from test_base import QuiltTestBase
 
 
-class TestDelta(QsvTestBase):
+class TestDelta(QuiltTestBase):
     fixture = "delta.csv"
 
     def test_signed_and_float_deltas_preserve_order_and_source(self):
-        signed = self.run_qsv_command(
-            f"load {self.get_fixture_path(self.fixture)} - delta signed - select signed,signed_delta - show"
+        signed = self.run_pipeline(
+            ['load', str(self.get_fixture_path(self.fixture)), '-', 'delta', 'signed', '-', 'select', 'signed,signed_delta', '-', 'show']
         )
         self.assertEqual(signed.returncode, 0)
         self.assertEqual(
             signed.stdout.strip().splitlines(),
-            ["signed,signed_delta", "1,", "3,2.0", "-2,-5.0", ",", "5,"],
+            ["signed,signed_delta", "1,", "3,2", "-2,-5", ",", "5,"],
         )
 
-        floating = self.run_qsv_command(
-            f"load {self.get_fixture_path(self.fixture)} - delta float - select float,float_delta - show"
+        floating = self.run_pipeline(
+            ['load', str(self.get_fixture_path(self.fixture)), '-', 'delta', 'float', '-', 'select', 'float,float_delta', '-', 'show']
         )
         self.assertEqual(floating.returncode, 0)
         self.assertEqual(
@@ -28,18 +28,18 @@ class TestDelta(QsvTestBase):
         )
 
     def test_unsigned_deltas_are_signed_and_nulls_propagate(self):
-        result = self.run_qsv_command(
-            f"load {self.get_fixture_path(self.fixture)} - cast unsigned uint - delta unsigned - select unsigned,unsigned_delta - show"
+        result = self.run_pipeline(
+            ['load', str(self.get_fixture_path(self.fixture)), '-', 'cast', 'unsigned', 'uint', '-', 'delta', 'unsigned', '-', 'select', 'unsigned,unsigned_delta', '-', 'show']
         )
         self.assertEqual(result.returncode, 0)
         self.assertEqual(
             result.stdout.strip().splitlines(),
-            ["unsigned,unsigned_delta", "1,", "4,3.0", "2,-2.0", ",", "10,"],
+            ["unsigned,unsigned_delta", "1,", "4,3", "2,-2", ",", "10,"],
         )
 
     def test_datetime_deltas_are_microsecond_durations(self):
-        result = self.run_qsv_command(
-            f"load {self.get_fixture_path(self.fixture)} - cast datetime datetime - delta datetime --output elapsed - stats"
+        result = self.run_pipeline(
+            ['load', str(self.get_fixture_path(self.fixture)), '-', 'cast', 'datetime', 'datetime', '-', 'delta', 'datetime', '--output', 'elapsed', '-', 'stats']
         )
         self.assertEqual(result.returncode, 0)
         self.assertIn("elapsed", result.stdout)
@@ -51,9 +51,10 @@ class TestDelta(QsvTestBase):
             self.skipTest("pyarrow is unavailable for duration value inspection")
         with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as temporary:
             path = temporary.name
+        os.unlink(path)
         try:
-            dumped = self.run_qsv_command(
-                f"load {self.get_fixture_path(self.fixture)} - cast datetime datetime - delta datetime --output elapsed - dumpcache --output {path}"
+            dumped = self.run_pipeline(
+                ['load', str(self.get_fixture_path(self.fixture)), '-', 'cast', 'datetime', 'datetime', '-', 'delta', 'datetime', '--output', 'elapsed', '-', 'dumpcache', '--output', str(path)]
             )
             self.assertEqual(dumped.returncode, 0)
             values = pq.read_table(path).column("elapsed").to_pylist()
@@ -65,31 +66,31 @@ class TestDelta(QsvTestBase):
                 os.unlink(path)
 
     def test_chaining_names_collisions_and_failures(self):
-        chained = self.run_qsv_command(
-            f"load {self.get_fixture_path(self.fixture)} - delta signed --output first - delta first --output second - select second - head 3 - show"
+        chained = self.run_pipeline(
+            ['load', str(self.get_fixture_path(self.fixture)), '-', 'delta', 'signed', '--output', 'first', '-', 'delta', 'first', '--output', 'second', '-', 'select', 'second', '-', 'head', '3', '-', 'show']
         )
         self.assertEqual(chained.returncode, 0)
-        self.assertEqual(chained.stdout.strip().splitlines(), ["second", "", "", "-7.0"])
+        self.assertEqual(chained.stdout.strip().splitlines(), ["second", "", "", "-7"])
 
-        collision = self.run_qsv_command(
-            f"load {self.get_fixture_path(self.fixture)} - delta signed --output float - show"
+        collision = self.run_pipeline(
+            ['load', str(self.get_fixture_path(self.fixture)), '-', 'delta', 'signed', '--output', 'float', '-', 'show']
         )
         self.assertNotEqual(collision.returncode, 0)
         self.assertIn("already exists", collision.stderr)
 
-        missing = self.run_qsv_command(
-            f"load {self.get_fixture_path(self.fixture)} - delta missing - show"
+        missing = self.run_pipeline(
+            ['load', str(self.get_fixture_path(self.fixture)), '-', 'delta', 'missing', '-', 'show']
         )
         self.assertNotEqual(missing.returncode, 0)
         self.assertIn("not found", missing.stderr)
 
-        unsupported = self.run_qsv_command(
-            f"load {self.get_fixture_path(self.fixture)} - delta text - show"
+        unsupported = self.run_pipeline(
+            ['load', str(self.get_fixture_path(self.fixture)), '-', 'delta', 'text', '-', 'show']
         )
         self.assertNotEqual(unsupported.returncode, 0)
         self.assertIn("must be numeric or datetime", unsupported.stderr)
 
-    def test_extreme_unsigned_values_do_not_wrap(self):
+    def test_uint64_out_of_range_fails_without_panic(self):
         try:
             import pyarrow as pa
             import pyarrow.parquet as pq
@@ -103,21 +104,74 @@ class TestDelta(QsvTestBase):
                 {"unsigned": pa.array([0, 2**64 - 1, 0], type=pa.uint64())}
             )
             pq.write_table(table, path)
-            result = self.run_qsv_command(
-                f"load {path} - delta unsigned - show"
+            result = self.run_pipeline(
+                ['load', str(path), '-', 'delta', 'unsigned', '-', 'show']
             )
-            self.assertEqual(result.returncode, 0)
-            self.assertIn("-", result.stdout)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("conversion", result.stderr.lower())
+            self.assertNotIn("panicked", result.stderr.lower())
         finally:
             if os.path.exists(path):
                 os.unlink(path)
 
-    def test_quilt_step(self):
-        result = self.run_qsv_command(
-            f"quilt {self.get_fixture_path('quilt-delta.yaml')}"
+    def test_run_step(self):
+        result = self.run_pipeline(
+            ['run', str(self.get_fixture_path('run-delta.yaml'))]
         )
         self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout.strip().splitlines()[:3], ["signed,difference", "1,", "3,2.0"])
+        self.assertEqual(result.stdout.strip().splitlines()[:3], ["signed,difference", "1,", "3,2"])
+
+    def test_uint64_high_values_have_exact_small_deltas(self):
+        try:
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+        except ImportError:
+            self.skipTest("pyarrow is unavailable for the UInt64 precision regression")
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as temporary:
+            source_path = temporary.name
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as temporary:
+            output_path = temporary.name
+        os.unlink(output_path)
+        try:
+            base = 2**64 - 10
+            pq.write_table(
+                pa.table({"value": pa.array([base, base + 2, base - 1], type=pa.uint64())}),
+                source_path,
+            )
+            result = self.run_pipeline(
+                ['load', str(source_path), '-', 'delta', 'value', '-', 'dumpcache', '--output', str(output_path)]
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            table = pq.read_table(output_path)
+            self.assertEqual(str(table.schema.field("value_delta").type), "int64")
+            self.assertEqual(table.column("value_delta").to_pylist(), [None, 2, -3])
+        finally:
+            for path in (source_path, output_path):
+                if os.path.exists(path):
+                    os.unlink(path)
+
+    def test_integral_extreme_ranges_fail_cleanly(self):
+        try:
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+        except ImportError:
+            self.skipTest("pyarrow is unavailable for the range regression")
+        for values, dtype in (
+            ([0, 2**63 - 1, -2**63], pa.int64()),
+            ([0, -2**63, 2**63 - 1], pa.int64()),
+            ([0, 2**64 - 1], pa.uint64()),
+        ):
+            with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as temporary:
+                path = temporary.name
+            try:
+                pq.write_table(pa.table({"value": pa.array(values, type=dtype)}), path)
+                result = self.run_pipeline(['load', str(path), '-', 'delta', 'value', '-', 'show'])
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("conversion", result.stderr.lower())
+                self.assertNotIn("panicked", result.stderr.lower())
+            finally:
+                if os.path.exists(path):
+                    os.unlink(path)
 
 
 if __name__ == "__main__":

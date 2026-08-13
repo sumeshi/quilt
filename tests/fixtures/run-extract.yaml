@@ -1,0 +1,21 @@
+title: Extract
+description: Extract test fixture
+version: 1
+author: qlt test suite
+stages:
+- name: process_data
+  steps:
+  - load:
+      paths:
+      - extract.csv
+  - extract:
+      column: value
+      pattern: (?P<user>[^@]+)@(?P<domain>.+)
+  - select:
+      columns:
+      - value
+      - user
+      - domain
+  - head:
+      number: 1
+  - show: {}

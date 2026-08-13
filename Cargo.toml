@@ -1,30 +1,33 @@
 [package]
-name = "qsv"
+name = "quilt"
 version = "0.7.1"
 edition = "2021"
-description = "A fast, flexible, and memory-efficient command-line tool written in Rust for processing large CSV files."
+description = "A fast, flexible, and memory-efficient command-line tool written in Rust for processing CSV/TSV, JSONL/NDJSON, and Parquet structured records."
 authors = ["sumeshi <sum3sh1@protonmail.com>"]
 license = "MIT"
 
+[[bin]]
+name = "qlt"
+path = "src/main.rs"
+
 [features]
-default = ["table"]
-table = ["dep:comfy-table"]
+default = []
 
 [dependencies]
-comfy-table = { version = "7.1", optional = true }
+comfy-table = { version = "7.1" }
 # Used for serde support for chrono
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
 serde_yml = "0.0.12"
 # Keep these Polars features aligned with current CLI surface:
 # - lazy: core query pipeline
 # - csv: load/show/dump CSV support
 # - temporal: changetz/timeslice
 # - strings + regex: select/contains/sed/grep string operations
-# - is_in: sigma multi-value matching
+# - is_in: membership filtering
 # - describe: showquery plan rendering
 # - parquet: parquet load + dumpcache
-polars = { version = "0.48.1", features = ["lazy", "csv", "json", "temporal", "strings", "regex", "is_in", "describe", "parquet"], default-features = false }
+# - dtype-decimal: lossless Decimal128 intermediate for integer delta
+polars = { version = "0.48.1", features = ["lazy", "csv", "json", "temporal", "timezones", "strings", "regex", "is_in", "describe", "parquet", "dtype-decimal"], default-features = false }
 regex = "1.9"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
@@ -33,9 +36,8 @@ env_logger = "0.10"
 glob = "0.3"
 once_cell = "1"
 flate2 = "1.0"
-dtparse = "2.0"
 rayon = "1.10.0"
-sqlparser = "0.53"
+rustix = { version = "1.0.7", features = ["fs"] }
 
 [profile.release]
 # Optimize for speed with some size reduction

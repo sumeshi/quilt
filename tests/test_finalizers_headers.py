@@ -1,17 +1,17 @@
 import unittest
-from test_base import QsvTestBase
+from test_base import QuiltTestBase
 
 
-class TestHeaders(QsvTestBase):
+class TestHeaders(QuiltTestBase):
     fixture = "sample-min.csv"
 
     def test_headers_basic(self):
-        result = self.run_qsv_command(f"load {self.get_fixture_path(self.fixture)} - headers --plain")
+        result = self.run_pipeline(['load', str(self.get_fixture_path(self.fixture)), '-', 'headers', '--plain'])
         self.assertEqual(result.returncode, 0)
         self.assertEqual(len(result.stdout.strip().splitlines()), 27)
 
     def test_headers_contains_key_columns(self):
-        result = self.run_qsv_command(f"load {self.get_fixture_path(self.fixture)} - headers --plain")
+        result = self.run_pipeline(['load', str(self.get_fixture_path(self.fixture)), '-', 'headers', '--plain'])
         self.assertIn("TimeCreated", result.stdout)
         self.assertIn("EventId", result.stdout)
         self.assertIn("Level", result.stdout)

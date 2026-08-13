@@ -1,3 +1,4 @@
+use crate::error::QuiltError;
 use polars::prelude::*;
 
 const UNITS: [(&str, u128); 9] = [
@@ -73,49 +74,44 @@ fn parse_size(value: &str) -> Result<u64, String> {
     parse_decimal_bytes(magnitude, multiplier)
 }
 
-pub fn parse_size_column(df: &LazyFrame, column: &str) -> LazyFrame {
-    let mut frame = df.clone().collect().unwrap_or_else(|error| {
-        eprintln!("Error: Failed to evaluate input before parse-size: {error}");
-        std::process::exit(1);
-    });
-    let source = frame.column(column).unwrap_or_else(|_| {
-        eprintln!("Error: Column '{column}' not found for parse-size operation");
-        std::process::exit(1);
-    });
-    let strings = source
-        .cast(&DataType::String)
-        .unwrap_or_else(|error| {
-            eprintln!("Error: Cannot read column '{column}' for parse-size: {error}");
-            std::process::exit(1);
-        })
-        .str()
-        .unwrap_or_else(|error| {
-            eprintln!("Error: Cannot read column '{column}' as text: {error}");
-            std::process::exit(1);
-        })
-        .into_iter()
-        .map(|value| value.map(ToOwned::to_owned))
-        .collect::<Vec<_>>();
-
-    let bytes = strings
-        .iter()
-        .enumerate()
-        .map(|(row, value)| {
-            value.as_deref().map(|value| {
-                parse_size(value).unwrap_or_else(|error| {
-                    eprintln!(
-                        "Error: Cannot parse size in column '{column}' at row {row}: {error}"
-                    );
-                    std::process::exit(1);
+pub fn parse_size_column(df: &LazyFrame, column: &str) -> Result<LazyFrame, QuiltError> {
+    let schema = df
+        .clone()
+        .collect_schema()
+        .map_err(|error| QuiltError::schema("parse-size", None::<String>, error.to_string()))?;
+    if !schema.iter_names().any(|name| name == column) {
+        return Err(QuiltError::schema(
+            "parse-size",
+            Some(column),
+            "column not found",
+        ));
+    }
+    let output_name = column.to_string();
+    let output = col(column).cast(DataType::String).map(
+        move |series| {
+            let casted = series.cast(&DataType::String)?;
+            let strings = casted.str()?.into_iter();
+            let bytes = strings
+                .enumerate()
+                .map(|(row, value)| {
+                    value
+                        .map(|value| {
+                            parse_size(value).map_err(|error| {
+                                PolarsError::ComputeError(
+                                    format!("parse-size column '{output_name}' row {row}: {error}")
+                                        .into(),
+                                )
+                            })
+                        })
+                        .transpose()
                 })
-            })
-        })
-        .collect::<Vec<_>>();
-    frame
-        .replace(column, Series::new(column.into(), bytes))
-        .unwrap_or_else(|error| {
-            eprintln!("Error: Failed to replace column '{column}' after parse-size: {error}");
-            std::process::exit(1);
-        });
-    frame.lazy()
+                .collect::<PolarsResult<Vec<_>>>()?;
+            Ok(Some(Column::from(Series::new(
+                output_name.clone().into(),
+                bytes,
+            ))))
+        },
+        GetOutput::from_type(DataType::UInt64),
+    );
+    Ok(df.clone().with_columns([output]))
 }

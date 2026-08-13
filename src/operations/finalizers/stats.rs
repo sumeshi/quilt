@@ -1,62 +1,50 @@
 use crate::controllers::log::LogController;
-#[cfg(feature = "table")]
+use crate::error::QuiltError;
+use crate::operations::finalizers::FinalizerResult;
 use comfy_table::{presets::UTF8_FULL, Cell, Color, Table};
 use polars::prelude::*;
 
-pub fn stats(df: &LazyFrame) {
+pub fn stats(df: &LazyFrame) -> Result<FinalizerResult, QuiltError> {
     LogController::debug("Calculating statistics for DataFrame using lazy evaluation");
 
     // Get schema to understand the columns and their types
-    let schema = match df.clone().collect_schema() {
-        Ok(schema) => schema,
-        Err(e) => {
-            eprintln!("Error: Failed to get DataFrame schema: {e}");
-            return;
-        }
-    };
+    let schema = df.clone().collect_schema().map_err(|e| {
+        QuiltError::schema(
+            "stats",
+            None::<String>,
+            format!("Error: Failed to get DataFrame schema: {e}"),
+        )
+    })?;
 
     let column_names: Vec<String> = schema.iter_names().map(|s| s.to_string()).collect();
 
-    // Calculate statistics using lazy evaluation
-    let stats_result = calculate_stats_lazy(df, &column_names, &schema);
+    // Statistics are one explicit aggregate barrier. The result is rendered
+    // only after this single-row aggregate has completed.
+    let stats_data = calculate_stats_lazy(df, &column_names, &schema).map_err(|error| {
+        QuiltError::operation("stats", format!("failed to evaluate statistics: {error}"))
+    })?;
+    {
+        let mut table = Table::new();
+        table.load_preset(UTF8_FULL);
 
-    match stats_result {
-        Ok(stats_data) => {
-            #[cfg(feature = "table")]
-            {
-                let mut table = Table::new();
-                table.load_preset(UTF8_FULL);
-
-                let mut header_cells = vec![Cell::new("Statistic").fg(Color::Green)];
-                for name in &column_names {
-                    header_cells.push(Cell::new(name).fg(Color::Green));
-                }
-                table.set_header(header_cells);
-
-                table.add_row(build_stat_row("count", &stats_data.counts));
-                table.add_row(build_stat_row("null_count", &stats_data.null_counts));
-                table.add_row(build_stat_row("datatype", &stats_data.dtypes));
-                table.add_row(build_stat_row("mean", &stats_data.means));
-                table.add_row(build_stat_row("std", &stats_data.stds));
-                table.add_row(build_stat_row("min", &stats_data.mins));
-                table.add_row(build_stat_row("25%", &stats_data.p25s));
-                table.add_row(build_stat_row("50% (median)", &stats_data.p50s));
-                table.add_row(build_stat_row("75%", &stats_data.p75s));
-                table.add_row(build_stat_row("max", &stats_data.maxs));
-
-                println!("{table}");
-            }
-
-            #[cfg(not(feature = "table"))]
-            {
-                print!("{}", render_stats_plain(&column_names, &stats_data));
-            }
+        let mut header_cells = vec![Cell::new("Statistic").fg(Color::Green)];
+        for name in &column_names {
+            header_cells.push(Cell::new(name).fg(Color::Green));
         }
-        Err(e) => {
-            eprintln!("Error calculating statistics: {e}");
-            LogController::debug("Falling back to traditional stats calculation");
-            stats_fallback(df);
-        }
+        table.set_header(header_cells);
+
+        table.add_row(build_stat_row("count", &stats_data.counts));
+        table.add_row(build_stat_row("null_count", &stats_data.null_counts));
+        table.add_row(build_stat_row("datatype", &stats_data.dtypes));
+        table.add_row(build_stat_row("mean", &stats_data.means));
+        table.add_row(build_stat_row("std", &stats_data.stds));
+        table.add_row(build_stat_row("min", &stats_data.mins));
+        table.add_row(build_stat_row("25%", &stats_data.p25s));
+        table.add_row(build_stat_row("50% (median)", &stats_data.p50s));
+        table.add_row(build_stat_row("75%", &stats_data.p75s));
+        table.add_row(build_stat_row("max", &stats_data.maxs));
+
+        Ok(FinalizerResult::Stdout(format!("{table}\n")))
     }
 }
 
@@ -91,13 +79,15 @@ fn calculate_stats_lazy(
         p75s: Vec::new(),
     };
 
-    // Separate numeric and string columns for batch processing
+    // Separate numeric and string columns for aggregate processing.
     let column_count = column_names.len();
     let mut numeric_cols = Vec::with_capacity(column_count);
     let mut string_cols = Vec::with_capacity(column_count);
 
     for col_name in column_names {
-        let dtype = schema.get(col_name).unwrap();
+        let dtype = schema
+            .get(col_name)
+            .ok_or_else(|| format!("column '{col_name}' disappeared from the collected schema"))?;
         stats_data.dtypes.push(dtype.to_string());
 
         if is_numeric_dtype(dtype) {
@@ -162,7 +152,9 @@ fn calculate_stats_lazy(
 
     // Process results for each column
     for col_name in column_names {
-        let dtype = schema.get(col_name).unwrap();
+        let dtype = schema
+            .get(col_name)
+            .ok_or_else(|| format!("column '{col_name}' disappeared from the collected schema"))?;
         stats_data.counts.push(total_count.to_string());
 
         // Extract null count
@@ -256,60 +248,10 @@ fn format_string_stat(val: AnyValue) -> String {
     }
 }
 
-#[cfg(feature = "table")]
 fn build_stat_row(stat_name: &str, values: &[String]) -> Vec<Cell> {
     let mut row = vec![Cell::new(stat_name)];
     for value in values {
         row.push(Cell::new(value));
     }
     row
-}
-
-#[cfg(not(feature = "table"))]
-fn render_stats_plain(column_names: &[String], stats_data: &StatsData) -> String {
-    let rows = [
-        ("count", &stats_data.counts),
-        ("null_count", &stats_data.null_counts),
-        ("datatype", &stats_data.dtypes),
-        ("mean", &stats_data.means),
-        ("std", &stats_data.stds),
-        ("min", &stats_data.mins),
-        ("25%", &stats_data.p25s),
-        ("50% (median)", &stats_data.p50s),
-        ("75%", &stats_data.p75s),
-        ("max", &stats_data.maxs),
-    ];
-
-    let mut output = String::from("Statistic");
-    for name in column_names {
-        output.push('\t');
-        output.push_str(name);
-    }
-    output.push('\n');
-
-    for (label, values) in rows {
-        output.push_str(label);
-        for value in values {
-            output.push('\t');
-            output.push_str(value);
-        }
-        output.push('\n');
-    }
-
-    output
-}
-
-// Fallback to original implementation if lazy evaluation fails
-fn stats_fallback(df: &LazyFrame) {
-    LogController::debug("Using fallback stats calculation");
-    let _df_collected = match df.clone().collect() {
-        Ok(df) => df,
-        Err(e) => {
-            eprintln!("Error: Failed to collect DataFrame: {e}");
-            return;
-        }
-    };
-
-    // ... existing fallback implementation would go here ...
-    eprintln!("Fallback stats calculation not yet implemented");
 }
