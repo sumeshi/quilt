@@ -2,7 +2,7 @@
 [![MIT License](http://img.shields.io/badge/license-MIT-blue.svg?style=flat)](LICENSE)
 [![CI/CD Pipeline](https://github.com/sumeshi/quilt/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/sumeshi/quilt/actions/workflows/release.yml)
 
-![quilt](https://gist.githubusercontent.com/sumeshi/c2f430d352ae763273faadf9616a29e5/raw/29fa84d98f83bbdff095c73598dd49ff1cad5e9c/quilt.svg)
+![quilt](https://github.com/user-attachments/assets/06953756-430c-49d3-98bd-11c4b16c8bea)
 
 A Rust CLI for processing CSV/TSV, JSONL/NDJSON, and Parquet data with composable pipelines and streaming-capable execution.
 Built for ad-hoc analysis of logs, event exports, and forensic datasets.
