@@ -46,10 +46,22 @@ fn main() {
             eprintln!("run document '{}' is valid", path.display());
         }
         Ok(_) => {
-            for result in executor.finalizer_results() {
-                if let Err(error) = quilt::operations::finalizers::write_result(result) {
-                    eprintln!("Error: {error}");
-                    process::exit(1);
+            let mut stdout = std::io::stdout();
+            let mut stderr = std::io::stderr();
+            for result in executor.take_finalizer_results() {
+                let status = match &result {
+                    quilt::operations::finalizers::FinalizerResult::Stderr(_) => {
+                        quilt::operations::finalizers::write_stdout(&result, &mut stderr)
+                    }
+                    _ => quilt::operations::finalizers::write_stdout(&result, &mut stdout),
+                };
+                match status {
+                    Ok(quilt::operations::finalizers::WriteStatus::Complete) => {}
+                    Ok(quilt::operations::finalizers::WriteStatus::BrokenPipe) => break,
+                    Err(error) => {
+                        eprintln!("Error: {error}");
+                        process::exit(1);
+                    }
                 }
             }
         }

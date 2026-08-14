@@ -2,7 +2,7 @@
 [![MIT License](http://img.shields.io/badge/license-MIT-blue.svg?style=flat)](LICENSE)
 [![CI/CD Pipeline](https://github.com/sumeshi/quilt/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/sumeshi/quilt/actions/workflows/release.yml)
 
-![quilt](https://gist.githubusercontent.com/sumeshi/c2f430d352ae763273faadf9616a29e5/raw/8484142e88948ecc0c8887db8f3bbb5be0dbe51e/quilt.svg)
+![quilt](https://gist.githubusercontent.com/sumeshi/c2f430d352ae763273faadf9616a29e5/raw/29fa84d98f83bbdff095c73598dd49ff1cad5e9c/quilt.svg)
 
 A fast, flexible, and memory-efficient command-line tool written in Rust for processing CSV/TSV, JSONL/NDJSON, and Parquet structured records. Inspired by [xsv](https://github.com/BurntSushi/xsv) and built on [Polars](https://www.pola.rs/), it's designed for handling tens or hundreds of gigabytes of data efficiently in workflows like log analysis and digital forensics.
 
@@ -14,6 +14,21 @@ A fast, flexible, and memory-efficient command-line tool written in Rust for pro
 - **Pipeline-style command chaining**: Chain multiple commands in a single line for fast and efficient data processing
 - **Flexible filtering and transformation**: Perform operations like select, filter, sort, deduplicate, and timezone conversion
 - **YAML workflow automation**: Compose validated `run` documents with joins, branches, and multiple outputs
+
+Stage schema example:
+
+```yaml
+stages:
+  - name: prepared
+    materialize: auto # auto | always | never
+    steps:
+      - load: {paths: [input.csv]}
+```
+
+`auto` keeps serial pipelines lazy and materializes once for reusable fan-out,
+reused global barriers, or multiple row-evaluating outputs. `always` forces one managed
+Parquet artifact; `never` allows recomputation. Artifacts are cleaned up after
+success or failure, while `--check` and `--show-plan` create none.
 
 ## Usage
 ![](https://gist.githubusercontent.com/sumeshi/644af27c8960a9b6be6c7470fe4dca59/raw/2a19fafd4f4075723c731e4a8c8d21c174cf0ffb/qlt.svg)
@@ -100,8 +115,7 @@ Load one or more CSV, JSONL/NDJSON, or Parquet files.
 | --infer-schema-length | int or `full` | `1000` | Number of NDJSON records inspected per file for schema inference. Use `full` when sparse fields require a complete scan. |
 
 **Environment Variables:**
-- `QLT_CHUNK_SIZE`: Default chunk size for CSV processing (overrides auto-detection, can be overridden by --chunk-size)
-- `QLT_MEMORY_LIMIT_MB`: Memory limit for gzip decompression and streaming operations (default: 1024MB, range: 512-4096MB)
+- `QLT_CHUNK_SIZE`: Positive default chunk size for CSV processing. An explicit `--chunk-size` takes precedence and bypasses this variable; malformed, zero, or overflowing environment values are errors.
 
 Example:
 ```bash
@@ -513,8 +527,11 @@ Unsafe filename characters and path separators become `_`; null
 uses `_null`, empty values use `_empty`, reserved names are prefixed with `_`,
 and sanitization collisions receive deterministic `-2`, `-3`, ... suffixes.
 Files are written through same-filesystem temporary siblings and are never
-silently overwritten. Partition files are published only after the complete
-directory has been built, so a failed partition leaves no partial output.
+silently overwritten. Partition input is staged in a schema-preserving Parquet
+spool and replayed in bounded batches through a capped open-writer pool; each
+partition receives one header.
+Partition files are published only after the complete directory has been built,
+so a failed partition leaves no partial output.
 
 Example:
 ```bash
@@ -620,8 +637,8 @@ $ qlt load large_data.csv - select col1,col2
 #### `dump`
 Outputs the processing results to a CSV/TSV file. The destination must not
 already exist; output is first written to a temporary sibling and atomically
-renamed into place. The finalizer evaluates the lazy frame as its required
-write barrier.
+published with a no-replace primitive (with a safe hard-link fallback where
+supported). The finalizer evaluates the lazy frame as its required write barrier.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -695,11 +712,11 @@ contextual error at evaluation time.
 | `extract` | String source plus named Rust regex groups; adds nullable String columns | Unmatched/absent optional groups are null; invalid regex, no names, non-string, and collisions error | Lazy extraction UDF; sink-time evaluation |
 | `flatten` | Nested JSON Struct fields; recursively adds dot-named scalar fields, preserving lists | Missing/null nested fields remain null; collisions and mixed/non-object records error | Lazy struct projection; lists are not exploded |
 | `calc` | Numeric source and exactly one aggregation; outputs one raw scalar line | Null-only/empty is `null`; non-numeric/missing source errors | Finalizer aggregate barrier |
-| `partition` | Any source dtype; writes one CSV per distinct value with sanitized names | Null is `_null`, empty is `_empty`; unsafe names/collisions are sanitized; existing destination rejected | Finalizer materializes groups, writes atomic staged directory |
+| `partition` | Any source dtype; writes one CSV per distinct value with sanitized names | Null is `_null`, empty is `_empty`; unsafe names/collisions are sanitized; existing destination rejected | Global finalizer; schema-preserving Parquet spool, bounded batches, capped open writers, atomic staged directory |
 | `headers` | Any schema; outputs names (plain one-per-line or formatted) | Empty schema is valid; no row evaluation required | Finalizer/schema inspection only |
 | `stats` | Supported Polars dtypes; outputs one summary table per column | Null counts are reported; unsupported measures use `-`; empty/all-null inputs do not panic | Finalizer aggregate barrier; may use input-sized memory |
 | `showquery` | Any LazyFrame; outputs logical/optimized plan text | No row conversion; plan errors are returned | Inspection finalizer; does not collect rows |
-| `show` | Any schema; outputs machine-readable CSV including header | Conversion/write errors are returned; stdout contains data only | Intrinsic finalizer; evaluates through CSV output |
+| `show` | Any schema; outputs machine-readable CSV including header | Conversion/write errors are returned; stdout contains data only | Lazy CSV sink to an execution-owned temporary artifact, then bounded 64KiB copying |
 | `showtable` | Any schema; bounded formatted preview with shape | Truncates rows/cells; rendering errors are returned | Intrinsic bounded-preview finalizer |
 | `dump` | Any schema; writes CSV/TSV with header | Existing target rejected; staged atomic write cleans failures | Streaming-capable sink/finalizer; target is never overwritten |
 | `dumpcache` | Any schema including nested/timezone values; writes Snappy Parquet | Existing target rejected; extension normalized to `.parquet`; failures clean staging | Typed Parquet finalizer; evaluates and writes cache |
@@ -893,13 +910,14 @@ Not all commands stream. Before running a pipeline on a large file, check the me
 
 | Mode | Commands | Notes |
 |------|----------|-------|
-| **Streaming-capable** | `show`, `dump`, `dumpcache` | Prefer these sinks for large inputs; bounded memory depends on upstream operations |
+| **Streaming-capable** | `show`, `dump`, `dumpcache` | Prefer these sinks for large inputs; `show` uses bounded memory while its temporary CSV artifact consumes disk proportional to rendered output |
 | **Bounded / lazy** | `head`, `showtable`, `showquery` | `head` limits output; `showtable` previews a bounded number of rows; plans do not collect |
 | **Lazy / Polars-optimized** | `select`, `isin`, `contains`, `grep`, `sed`, `cast`, `parse-size`, `bucket`, `delta`, `extract`, `flatten` | Pushdown; usually safe |
 | **Global barriers** ⚠️ | `sort`, `uniq`, `count` | Polars may maintain input-proportional state to produce a global result |
-| **Aggregate finalizer** ⚠️ | `stats` | Evaluates aggregate summaries and may maintain input-proportional state |
+| **Aggregate finalizers** ⚠️ | `stats` | Materialize input-proportional state |
+| **Global / disk-backed finalizers** ⚠️ | `partition` | Scans the complete input through a schema-preserving Parquet spool and bounded batches; output directory is fully staged before publication |
 
-> **Warning:** Running a global barrier or aggregate finalizer on a multi-GB file may require substantial input-proportional state. Use `head`, `timeslice`, or `isin` to reduce the dataset first.
+> **Warning:** Running a global barrier or aggregate finalizer on a multi-GB file may require substantial input-proportional state. `partition` bounds in-memory writer state but consumes disk proportional to the input and output. Use `head`, `timeslice`, or `isin` to reduce the dataset first.
 
 The lazy chainables remain logical-plan nodes until a finalizer or sink runs.
 Their map/UDF closures collect values only from the current Polars execution
@@ -908,21 +926,13 @@ LazyFrame or materialize the complete input. Chunk-local UDFs can still limit
 some streaming optimizations, so use `dump`/`dumpcache` sinks and avoid global
 barriers when bounded memory is required.
 
-### Memory Configuration
-
-```bash
-# Configure gzip decompression memory (environment variable)
-export QLT_MEMORY_LIMIT_MB=512   # Low memory systems
-export QLT_MEMORY_LIMIT_MB=1024  # Default (1GB)
-export QLT_MEMORY_LIMIT_MB=2048  # High memory systems (2GB+)
-```
-
 ### Gzip File Processing
 
 ```bash
-# Process large gzip files with different memory settings
-$ QLT_MEMORY_LIMIT_MB=2048 qlt load huge.csv.gz - show
-$ QLT_MEMORY_LIMIT_MB=512 qlt load huge.csv.gz - head 1000 - show  # Low memory
+# Gzip input is decompressed to an execution-owned temporary CSV spool, then
+# scanned lazily. The spool uses bounded decompression buffers and disk space
+# proportional to the uncompressed input until the pipeline is dropped.
+$ qlt load huge.csv.gz - head 1000 - show
 ```
 
 ### Parquet Cache for Performance
@@ -960,10 +970,14 @@ trap 'rm -rf "$baseline_dir"' EXIT
   - dump --output "$baseline_dir/result.csv"
 ```
 
-On the T12 reference environment (2026-08-13), this produced a debug build in 18.62 seconds
-with 3,629,304 KiB peak build RSS, a 1,132,142,560-byte debug binary, and a representative
-0.69-second run with 112,844 KiB peak RSS. The build and runtime command are the reproducible
-source of truth; these values are included to make future regressions visible.
+On the T12 reference environment (2026-08-13), the debug build produced a 1,132,142,560-byte
+binary and the representative dump took 0.69 seconds with 112,844 KiB peak RSS. A release
+baseline on the current environment (2026-08-14, `QLT_BENCH_RUNS=1`) produced a 39,849,848-byte
+binary, 190 ms incremental build, 230 ms `load_show` runtime at 162,884 KiB peak RSS, and a
+61,665,558-byte published dump. The benchmark records build RSS separately, samples peak
+execution-owned `.qlt-*` spool/staging bytes during each command, and checks residual files;
+small fixtures may report zero peak spool bytes. These values are evidence rather than
+thresholds; rerun the script to compare the same toolchain and fixture.
 
 ## Installation
 

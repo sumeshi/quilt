@@ -39,6 +39,9 @@ flate2 = "1.0"
 rayon = "1.10.0"
 rustix = { version = "1.0.7", features = ["fs"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
+
 [profile.release]
 # Optimize for speed with some size reduction
 opt-level = 3        # Maximum speed optimization

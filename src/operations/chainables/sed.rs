@@ -26,9 +26,7 @@ pub fn sed(
             if !schema.iter_names().any(|s| s == col) {
                 return Err(QuiltError::schema("sed", Some(col), "column not found"));
             }
-            LogController::debug(&format!(
-                "Replacing values in '{col}' column using regex pattern '{pattern}' -> '{replacement}' (case-insensitive: {ignorecase})"
-            ));
+            LogController::debug("Replacing values in selected column");
             let replace_expr = polars::prelude::col(col)
                 .cast(DataType::String) // Ensure the column is String
                 .str()
@@ -38,9 +36,7 @@ pub fn sed(
         }
         None => {
             // Apply sed to all columns
-            LogController::debug(&format!(
-                "Replacing values in all columns using regex pattern '{pattern}' -> '{replacement}' (case-insensitive: {ignorecase})"
-            ));
+            LogController::debug("Replacing values in all columns");
             let mut result_df = df.clone();
             // Apply replacement to all columns
             for (column_name, _) in schema.iter() {

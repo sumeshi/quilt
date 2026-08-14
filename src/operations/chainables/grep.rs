@@ -26,9 +26,7 @@ pub fn grep(
         all_column_names
     };
 
-    LogController::debug(&format!(
-        "Applying grep: pattern='{pattern}', ignorecase={ignorecase}, invert={is_inverted}"
-    ));
+    LogController::debug("Applying grep");
 
     let final_pattern = if ignorecase {
         format!("(?i){pattern}")

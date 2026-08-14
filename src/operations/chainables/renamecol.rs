@@ -20,9 +20,7 @@ pub fn renamecol(
         ));
     }
 
-    LogController::debug(&format!(
-        "Renaming column '{old_colname}' to '{new_colname}'"
-    ));
+    LogController::debug("Renaming column");
 
     // Get all column names and replace the old one with the new one
     let all_columns: Vec<Expr> = schema

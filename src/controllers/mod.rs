@@ -1,7 +1,12 @@
+pub mod arguments;
 pub mod batch;
+pub mod cli_adapter;
 pub mod command;
 pub mod command_model;
 pub mod csv;
-pub mod dataframe;
+pub mod definitions;
 pub mod executor;
 pub mod log;
+pub mod pipeline;
+pub mod resources;
+pub mod yaml_adapter;

@@ -1,11 +1,11 @@
 use crate::controllers::log::LogController;
+use crate::controllers::resources::ExecutionResources;
 use crate::error::QuiltError;
 use polars::prelude::*;
 use rayon::prelude::*; // Re-enabled for parallel processing
-use std::fs::{remove_file, File};
+use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 // Performance optimization constants
 const OPTIMAL_CHUNK_SIZE: usize = 8192; // Optimized chunk size for CSV reading
 const PARALLEL_THRESHOLD: usize = 2; // Minimum files to use parallel processing
@@ -26,10 +26,23 @@ pub fn separator_byte(separator: &str) -> Result<u8, QuiltError> {
 }
 
 // Environment variable helpers for unified configuration
-fn get_env_chunk_size() -> Option<usize> {
-    std::env::var("QLT_CHUNK_SIZE")
-        .ok()
-        .and_then(|s| s.parse().ok())
+fn get_env_chunk_size() -> Result<Option<usize>, QuiltError> {
+    let Ok(raw) = std::env::var("QLT_CHUNK_SIZE") else {
+        return Ok(None);
+    };
+    parse_chunk_size(&raw).map(Some)
+}
+
+fn parse_chunk_size(raw: &str) -> Result<usize, QuiltError> {
+    let value = raw
+        .parse::<usize>()
+        .map_err(|_| QuiltError::usage("QLT_CHUNK_SIZE must be a positive integer"))?;
+    if value == 0 {
+        return Err(QuiltError::usage(
+            "QLT_CHUNK_SIZE must be greater than zero",
+        ));
+    }
+    Ok(value)
 }
 
 // Utility function to check if file paths exist
@@ -56,13 +69,15 @@ fn get_optimized_csv_options(
 ) -> Result<CsvReadOptions, QuiltError> {
     let sep_byte = separator_byte(separator)?;
 
-    // Prioritize environment variable, then provided chunk_size, then defaults
-    let optimized_chunk_size = get_env_chunk_size().or(chunk_size).unwrap_or({
-        match file_size {
-            Some(size) if size > LARGE_FILE_THRESHOLD => OPTIMAL_CHUNK_SIZE * 2, // Larger chunks for big files
+    // An explicit CLI value wins and therefore does not consult the environment.
+    let optimized_chunk_size = match chunk_size {
+        Some(value) if value > 0 => value,
+        Some(_) => return Err(QuiltError::usage("chunk size must be greater than zero")),
+        None => get_env_chunk_size()?.unwrap_or(match file_size {
+            Some(size) if size > LARGE_FILE_THRESHOLD => OPTIMAL_CHUNK_SIZE * 2,
             _ => OPTIMAL_CHUNK_SIZE,
-        }
-    });
+        }),
+    };
 
     let mut options = CsvReadOptions::default()
         .with_has_header(has_header)
@@ -93,19 +108,22 @@ impl CsvController {
             paths: paths.to_vec(),
         }
     }
-    pub fn get_dataframe(
+    pub fn get_dataframe_with_resources(
         &self,
         separator: &str,
         low_memory: bool,
         no_headers: bool,
         chunk_size: Option<usize>,
+        resources: &ExecutionResources,
     ) -> Result<LazyFrame, QuiltError> {
         separator_byte(separator)?;
         if self.paths.len() == 1 {
             let path = &self.paths[0];
-            self.read_csv_file(path, separator, low_memory, no_headers, chunk_size)
+            self.read_csv_file(
+                path, separator, low_memory, no_headers, chunk_size, resources,
+            )
         } else {
-            self.concat_csv_files(separator, low_memory, no_headers, chunk_size)
+            self.concat_csv_files(separator, low_memory, no_headers, chunk_size, resources)
         }
     }
     fn read_csv_file(
@@ -115,8 +133,9 @@ impl CsvController {
         low_memory: bool,
         no_headers: bool,
         chunk_size: Option<usize>,
+        resources: &ExecutionResources,
     ) -> Result<LazyFrame, QuiltError> {
-        LogController::debug(&format!("Reading CSV file: {}", path.display()));
+        LogController::debug("Reading CSV file");
         let has_header = !no_headers;
         // Check if file is gzipped based on extension
         let is_gzipped = path
@@ -125,8 +144,10 @@ impl CsvController {
             .map(|ext| ext.to_lowercase() == "gz")
             .unwrap_or(false);
         if is_gzipped {
-            LogController::debug(&format!("Reading gzipped file: {}", path.display()));
-            self.read_gzipped_csv_file(path, separator, low_memory, has_header, chunk_size)
+            LogController::debug("Reading gzipped CSV file");
+            self.read_gzipped_csv_file(
+                path, separator, low_memory, has_header, chunk_size, resources,
+            )
         } else {
             // Get file size for optimization
             let file_size = std::fs::metadata(path).ok().map(|m| m.len());
@@ -137,8 +158,7 @@ impl CsvController {
             )?;
 
             LogController::debug(&format!(
-                "Reading CSV file: {} (size: {}MB)",
-                path.display(),
+                "Reading CSV file (size_mb={})",
                 file_size.map(|s| s / 1024 / 1024).unwrap_or(0)
             ));
 
@@ -151,7 +171,9 @@ impl CsvController {
                 .finish();
 
             match reader {
-                Ok(df) => Ok(df),
+                Ok(df) => Ok(crate::controllers::resources::instrument_evaluation(
+                    df, resources,
+                )),
                 Err(e) => Err(QuiltError::Io {
                     operation: "read CSV".into(),
                     path: Some(path.display().to_string()),
@@ -168,9 +190,16 @@ impl CsvController {
         low_memory: bool,
         has_header: bool,
         chunk_size: Option<usize>,
+        resources: &ExecutionResources,
     ) -> Result<LazyFrame, QuiltError> {
         use flate2::read::GzDecoder;
         use std::io::{BufReader, BufWriter, Read};
+
+        if !resources.temp_files_enabled() {
+            return Err(QuiltError::usage(
+                "run --show-plan cannot inspect gzipped CSV without execution",
+            ));
+        }
 
         let source = File::open(path).map_err(|e| QuiltError::Io {
             operation: "open gzip".into(),
@@ -178,20 +207,26 @@ impl CsvController {
             message: e.to_string(),
         })?;
 
-        let temp_path = create_gzip_spool_path(path);
-        LogController::debug(&format!(
-            "Spooling gzip payload to temporary file: {}",
-            temp_path.display()
-        ));
+        LogController::debug("Spooling gzip payload to temporary file");
 
-        let temp_file = File::create(&temp_path).map_err(|e| QuiltError::Io {
-            operation: "create gzip spool".into(),
-            path: Some(temp_path.display().to_string()),
-            message: e.to_string(),
-        })?;
+        let mut reservation = resources
+            .reserve_temp_file("qlt-gzip-spool", "csv")
+            .map_err(|e| QuiltError::Io {
+                operation: "create gzip spool".into(),
+                path: Some(path.display().to_string()),
+                message: e.to_string(),
+            })?;
 
         let mut gz_decoder = GzDecoder::new(BufReader::new(source));
-        let mut spool_writer = BufWriter::new(temp_file);
+        let temp_path = reservation.path().to_path_buf();
+        let Some(spool_file) = reservation.file_mut() else {
+            return Err(QuiltError::Io {
+                operation: "create gzip spool".into(),
+                path: Some(temp_path.display().to_string()),
+                message: "temporary spool reservation was already consumed".into(),
+            });
+        };
+        let mut spool_writer = BufWriter::new(spool_file);
         let mut total_written = 0usize;
         let mut buffer = vec![0u8; GZIP_BUFFER_SIZE];
 
@@ -200,7 +235,6 @@ impl CsvController {
                 Ok(0) => break,
                 Ok(n) => {
                     if let Err(e) = spool_writer.write_all(&buffer[..n]) {
-                        let _ = remove_file(&temp_path);
                         return Err(QuiltError::Io {
                             operation: "write gzip spool".into(),
                             path: Some(temp_path.display().to_string()),
@@ -210,7 +244,6 @@ impl CsvController {
                     total_written += n;
                 }
                 Err(e) => {
-                    let _ = remove_file(&temp_path);
                     return Err(QuiltError::Io {
                         operation: "decompress gzip".into(),
                         path: Some(path.display().to_string()),
@@ -221,31 +254,18 @@ impl CsvController {
         }
 
         if let Err(e) = spool_writer.flush() {
-            let _ = remove_file(&temp_path);
             return Err(QuiltError::Io {
                 operation: "flush gzip spool".into(),
                 path: Some(temp_path.display().to_string()),
                 message: e.to_string(),
             });
         }
+        drop(spool_writer);
 
         LogController::debug(&format!(
-            "Decompressed {}MB from {} to spool file",
-            total_written / (1024 * 1024),
-            path.display()
+            "Decompressed {}MB to spool file",
+            total_written / (1024 * 1024)
         ));
-
-        let temp_reader = match File::open(&temp_path) {
-            Ok(file) => file,
-            Err(e) => {
-                let _ = remove_file(&temp_path);
-                return Err(QuiltError::Io {
-                    operation: "reopen gzip spool".into(),
-                    path: Some(temp_path.display().to_string()),
-                    message: e.to_string(),
-                });
-            }
-        };
 
         let csv_options = get_optimized_csv_options(
             separator,
@@ -255,18 +275,25 @@ impl CsvController {
             Some(total_written as u64),
         )?;
 
-        let reader = csv_options.into_reader_with_file_handle(BufReader::new(temp_reader));
-        let result = reader.finish();
-        let _ = remove_file(&temp_path);
-
-        match result {
-            Ok(df) => Ok(df.lazy()),
-            Err(e) => Err(QuiltError::Io {
-                operation: "parse gzip CSV".into(),
+        let reader = LazyCsvReader::new(&temp_path)
+            .with_separator(csv_options.parse_options.separator)
+            .with_has_header(csv_options.has_header)
+            .with_low_memory(csv_options.low_memory)
+            .with_chunk_size(csv_options.chunk_size)
+            .finish()
+            .map_err(|e| QuiltError::Io {
+                operation: "scan gzip CSV".into(),
                 path: Some(path.display().to_string()),
-                message: format!("{e}. Please check the file format and separator."),
-            }),
-        }
+                message: e.to_string(),
+            })?;
+        resources
+            .retain_temp_file(reservation)
+            .map_err(|e| QuiltError::Io {
+                operation: "retain gzip spool".into(),
+                path: Some(temp_path.display().to_string()),
+                message: e.to_string(),
+            })?;
+        Ok(reader)
     }
     fn concat_csv_files(
         &self,
@@ -274,6 +301,7 @@ impl CsvController {
         low_memory: bool,
         no_headers: bool,
         chunk_size: Option<usize>,
+        resources: &ExecutionResources,
     ) -> Result<LazyFrame, QuiltError> {
         LogController::debug(&format!("Reading {} CSV files", self.paths.len()));
 
@@ -282,13 +310,21 @@ impl CsvController {
             LogController::debug("Using parallel file reading for better performance");
             self.paths
                 .par_iter() // Enabled parallel processing
-                .map(|path| self.read_csv_file(path, separator, low_memory, no_headers, chunk_size))
+                .map(|path| {
+                    self.read_csv_file(
+                        path, separator, low_memory, no_headers, chunk_size, resources,
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>()?
         } else {
             // Sequential for small number of files
             self.paths
                 .iter()
-                .map(|path| self.read_csv_file(path, separator, low_memory, no_headers, chunk_size))
+                .map(|path| {
+                    self.read_csv_file(
+                        path, separator, low_memory, no_headers, chunk_size, resources,
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>()?
         };
 
@@ -307,14 +343,45 @@ impl CsvController {
     }
 }
 
-fn create_gzip_spool_path(source_path: &Path) -> PathBuf {
-    let stem = source_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("qlt-gzip");
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    std::env::temp_dir().join(format!("qlt-gzip-spool-{stem}-{timestamp}.csv"))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunk_size_parser_rejects_zero_malformed_and_overflow() {
+        assert_eq!(parse_chunk_size("42").unwrap(), 42);
+        assert!(parse_chunk_size("0").is_err());
+        assert!(parse_chunk_size("not-a-number").is_err());
+        assert!(parse_chunk_size("999999999999999999999999999999").is_err());
+    }
+
+    #[test]
+    fn gzip_decompression_buffer_is_fixed_and_bounded() {
+        assert_eq!(GZIP_BUFFER_SIZE, 16 * 1024 * 1024);
+    }
+
+    #[test]
+    fn gzip_load_returns_pending_scan_with_execution_owned_spool() {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/sample-min.csv.gz"
+        ));
+        let resources = ExecutionResources::new();
+        let frame = CsvController::new(&[path])
+            .get_dataframe_with_resources(",", false, false, None, &resources)
+            .unwrap();
+        let plan = frame.describe_plan().unwrap();
+        assert!(plan.contains("CSV SCAN") || plan.contains("Csv SCAN"));
+        assert_eq!(resources.tracked_count(), 1);
+        let spool_paths = resources.tracked_paths();
+        assert_eq!(spool_paths.len(), 1);
+        assert!(spool_paths[0].exists());
+        drop(frame);
+        assert_eq!(resources.tracked_count(), 1);
+        let cloned_resources = resources.clone();
+        drop(resources);
+        assert!(spool_paths[0].exists());
+        drop(cloned_resources);
+        assert!(!spool_paths[0].exists());
+    }
 }

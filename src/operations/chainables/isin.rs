@@ -16,9 +16,7 @@ pub fn isin(df: &LazyFrame, colname: &str, values: &[String]) -> Result<LazyFram
         ));
     }
 
-    LogController::debug(&format!(
-        "Applying isin: column={colname} values={values:?}"
-    ));
+    LogController::debug("Applying isin");
 
     if values.is_empty() {
         LogController::debug("Empty values list for isin, returning empty result");

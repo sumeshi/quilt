@@ -4,69 +4,12 @@ pub mod operations;
 
 pub use error::QuiltError;
 
-use polars::prelude::LazyFrame;
-
-/// Reusable execution state shared by library callers and the CLI boundary.
-#[derive(Default)]
-pub struct Pipeline {
-    frame: Option<LazyFrame>,
-    pub operation: Option<String>,
-}
-
-impl Pipeline {
-    pub fn new(frame: Option<LazyFrame>) -> Self {
-        Self {
-            frame,
-            operation: None,
-        }
-    }
-    pub fn frame(&self) -> Option<&LazyFrame> {
-        self.frame.as_ref()
-    }
-    pub fn into_frame(self) -> Option<LazyFrame> {
-        self.frame
-    }
-    pub fn set_frame(&mut self, frame: LazyFrame) {
-        self.frame = Some(frame);
-    }
-
-    pub fn apply<F>(&mut self, operation: impl Into<String>, f: F) -> Result<&mut Self, QuiltError>
-    where
-        F: FnOnce(&LazyFrame) -> Result<LazyFrame, QuiltError>,
-    {
-        let name = operation.into();
-        let frame = self
-            .frame
-            .as_ref()
-            .ok_or_else(|| QuiltError::usage("no data loaded"))?;
-        self.frame = Some(f(frame).map_err(|error| match error {
-            QuiltError::Automation { .. } | QuiltError::Finalizer { .. } => error,
-            other => QuiltError::Operation {
-                operation: name.clone(),
-                message: other.to_string(),
-            },
-        })?);
-        self.operation = Some(name);
-        Ok(self)
-    }
-}
-
-pub type ExecutionContext = Pipeline;
+pub use controllers::pipeline::Pipeline;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use polars::prelude::*;
-
-    #[test]
-    fn pipeline_reports_missing_input_without_exiting() {
-        let mut pipeline = Pipeline::default();
-        let error = match pipeline.apply("cast", |frame| Ok(frame.clone())) {
-            Ok(_) => panic!("an empty pipeline must reject operations"),
-            Err(error) => error,
-        };
-        assert!(matches!(error, QuiltError::Usage { .. }));
-    }
 
     #[test]
     fn cast_returns_classified_error_and_successful_chain_remains_usable() {
@@ -98,6 +41,7 @@ mod tests {
             false,
             false,
             None,
+            &crate::controllers::resources::ExecutionResources::new(),
         );
         assert!(matches!(missing_path, Err(QuiltError::Io { .. })));
 
@@ -144,10 +88,15 @@ mod tests {
         assert!(
             matches!(headers, crate::operations::finalizers::FinalizerResult::Stdout(ref value) if value == "value\nname\n")
         );
-        let show = crate::operations::finalizers::show::show(&frame).unwrap();
-        assert!(
-            matches!(show, crate::operations::finalizers::FinalizerResult::Stdout(ref value) if value.contains("value,name"))
-        );
+        let show = crate::operations::finalizers::show::show(
+            &frame,
+            &crate::controllers::resources::ExecutionResources::new(),
+        )
+        .unwrap();
+        assert!(matches!(
+            show,
+            crate::operations::finalizers::FinalizerResult::Artifact(_)
+        ));
         let error = crate::operations::finalizers::dump::dump(&frame, Some("-"), ',');
         assert!(matches!(error, Err(QuiltError::Usage { .. })));
     }
@@ -735,10 +684,14 @@ mod tests {
         let frame = df!("value" => &[1i64, 2]).unwrap().lazy();
         let mut executor = CommandExecutor::from_frame(frame);
         executor
-            .execute(&TypedCommand::Headers { plain: true })
+            .execute(&TypedCommand::Headers(
+                crate::controllers::command_model::HeadersArgs { plain: true },
+            ))
             .unwrap();
         executor
-            .execute(&TypedCommand::Show { debug: false })
+            .execute(&TypedCommand::Show(
+                crate::controllers::command_model::ShowArgs { debug: false },
+            ))
             .unwrap();
         assert_eq!(executor.finalizer_results().len(), 2);
         assert!(matches!(
@@ -746,11 +699,15 @@ mod tests {
             crate::operations::finalizers::FinalizerResult::Stdout(text)
                 if text == "value\n"
         ));
-        assert!(matches!(
+        let mut rendered = Vec::new();
+        crate::operations::finalizers::write_stdout(
             &executor.finalizer_results()[1],
-            crate::operations::finalizers::FinalizerResult::Stdout(text)
-                if text.starts_with("value\n1\n")
-        ));
+            &mut rendered,
+        )
+        .unwrap();
+        assert!(String::from_utf8(rendered)
+            .unwrap()
+            .starts_with("value\n1\n"));
     }
 
     #[test]
@@ -921,24 +878,48 @@ mod tests {
 
     #[test]
     fn ndjson_inference_default_is_bounded_and_full_is_explicit() {
-        use crate::operations::initializers::load::{load, load_with_ndjson_inference};
+        use crate::operations::initializers::load::{
+            load, load_with_ndjson_inference_with_resources,
+        };
+        let resources = crate::controllers::resources::ExecutionResources::new();
         use std::fs;
-        let path = std::env::temp_dir().join(format!("qlt-ndjson-{}.jsonl", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "qlt-ndjson-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let mut contents = String::new();
         for _ in 0..1_001 {
             contents.push_str("{\"id\":1}\n");
         }
         contents.push_str("{\"id\":1,\"late\":true}\n");
         fs::write(&path, contents).unwrap();
-        let default_schema = load(std::slice::from_ref(&path), ",", false, false, None)
-            .unwrap()
-            .collect_schema()
-            .unwrap();
-        let full_schema =
-            load_with_ndjson_inference(std::slice::from_ref(&path), ",", false, false, None, None)
-                .unwrap()
-                .collect_schema()
-                .unwrap();
+        let default_schema = load(
+            std::slice::from_ref(&path),
+            ",",
+            false,
+            false,
+            None,
+            &resources,
+        )
+        .unwrap()
+        .collect_schema()
+        .unwrap();
+        let full_schema = load_with_ndjson_inference_with_resources(
+            std::slice::from_ref(&path),
+            ",",
+            false,
+            false,
+            None,
+            None,
+            &resources,
+        )
+        .unwrap()
+        .collect_schema()
+        .unwrap();
         fs::remove_file(path).unwrap();
         assert!(default_schema.get("late").is_none());
         assert_eq!(full_schema.get("late"), Some(&DataType::Boolean));
@@ -1027,8 +1008,20 @@ mod tests {
         for command in &run_commands {
             run.execute(command).unwrap();
         }
-        let cli_df = cli.into_frame().unwrap().collect().unwrap();
-        let run_df = run.into_frame().unwrap().collect().unwrap();
+        let cli_df = cli
+            .into_pipeline()
+            .unwrap()
+            .into_parts()
+            .0
+            .collect()
+            .unwrap();
+        let run_df = run
+            .into_pipeline()
+            .unwrap()
+            .into_parts()
+            .0
+            .collect()
+            .unwrap();
         assert_eq!(cli_df.schema(), run_df.schema());
         assert_eq!(cli_df, run_df);
 
@@ -1055,8 +1048,20 @@ mod tests {
         bucket_cli.execute(&bucket_cli_command).unwrap();
         let mut bucket_run = CommandExecutor::from_frame(datetime_frame);
         bucket_run.execute(&bucket_run_command).unwrap();
-        let bucket_cli_df = bucket_cli.into_frame().unwrap().collect().unwrap();
-        let bucket_run_df = bucket_run.into_frame().unwrap().collect().unwrap();
+        let bucket_cli_df = bucket_cli
+            .into_pipeline()
+            .unwrap()
+            .into_parts()
+            .0
+            .collect()
+            .unwrap();
+        let bucket_run_df = bucket_run
+            .into_pipeline()
+            .unwrap()
+            .into_parts()
+            .0
+            .collect()
+            .unwrap();
         assert_eq!(bucket_cli_df.schema(), bucket_run_df.schema());
         assert_eq!(bucket_cli_df, bucket_run_df);
 
@@ -1070,8 +1075,20 @@ mod tests {
         let mut flatten_run = CommandExecutor::from_frame(flatten_frame);
         flatten_run.execute(&flatten_run_command).unwrap();
         assert_eq!(
-            flatten_cli.into_frame().unwrap().collect().unwrap(),
-            flatten_run.into_frame().unwrap().collect().unwrap()
+            flatten_cli
+                .into_pipeline()
+                .unwrap()
+                .into_parts()
+                .0
+                .collect()
+                .unwrap(),
+            flatten_run
+                .into_pipeline()
+                .unwrap()
+                .into_parts()
+                .0
+                .collect()
+                .unwrap()
         );
 
         let calc_frame = df!("value" => &[1i64, 2, 3]).unwrap().lazy();

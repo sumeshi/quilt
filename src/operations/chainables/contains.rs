@@ -22,9 +22,7 @@ pub fn contains(
         ));
     }
 
-    LogController::debug(&format!(
-        "Applying contains: column={colname} pattern='{pattern}' ignorecase={ignorecase}"
-    ));
+    LogController::debug("Applying contains");
 
     // Use Polars' native string operations for better performance
     let expr = if ignorecase {

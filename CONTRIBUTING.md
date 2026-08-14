@@ -38,8 +38,9 @@ cargo build --no-default-features --offline
 
 ## Test and quality gates
 
-The Python suite uses standard-library discovery; there is no manual test registration. The
-wrapper exists for CI compatibility:
+The Python suite uses one standard-library discovery launcher. `tests/run_tests.py` is retained
+as the CI-friendly entry point because it sets the test directory on `sys.path` and returns a
+process status; it does not maintain a second test registry:
 
 ```bash
 python3 -m unittest discover -s tests -p 'test_*.py'
@@ -74,8 +75,10 @@ parameters, operation reuse, outputs, and failures.
 
 1. Add the implementation under the appropriate `src/operations` category and return
    `Result<_, QuiltError>`.
-2. Add typed arguments, registry specification, CLI parsing, and the automation adapter in the
-   shared command model. CLI and run must use the same typed command and core implementation.
+2. Add one `define_operations!` declaration in `controllers/definitions.rs`; keep its generated
+   exhaustive `TypedCommand`/`OperationId` coverage complete, then implement the CLI and YAML
+   adapters against those generated types. CLI and run must use the same typed command and core
+   implementation.
 3. Document accepted dtypes, output schema, null/error behavior, lazy/barrier/finalizer status,
    and memory/streaming characteristics in `README.md`.
 4. Add focused Rust tests for reusable behavior and real-binary Python tests for the public

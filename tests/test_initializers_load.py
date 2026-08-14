@@ -21,15 +21,47 @@ class TestLoad(QuiltTestBase):
         self.assertEqual(len(lines), 2)
         self.assertIn("1102,Info", lines[1])
 
-    def test_load_gzip_file_with_memory_limit_env(self):
-        env = os.environ.copy()
-        env["QLT_MEMORY_LIMIT_MB"] = "512"
+    def test_gzip_showquery_remains_a_scan_plan(self):
         result = self.run_pipeline(
-            ['load', str(self.get_fixture_path('sample-min.csv.gz')), '-', 'head', '1', '-', 'show'],
+            ['load', str(self.get_fixture_path('sample-min.csv.gz')), '-', 'showquery']
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CSV SCAN", result.stdout.upper())
+
+    def test_gzip_lazy_chain_dump_and_dumpcache(self):
+        dump_target = os.path.join(self.temp_dir, "output.csv")
+        cache_target = os.path.join(self.temp_dir, "output-cache")
+        result = self.run_pipeline(
+            ['load', str(self.get_fixture_path('sample-min.csv.gz')), '-', 'head', '1', '-', 'dump', '--output', dump_target]
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(os.path.isfile(dump_target))
+        result = self.run_pipeline(
+            ['load', str(self.get_fixture_path('sample-min.csv.gz')), '-', 'head', '1', '-', 'dumpcache', '--output', cache_target]
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(os.path.exists(cache_target + ".parquet"))
+
+    def test_explicit_chunk_size_overrides_invalid_environment(self):
+        env = os.environ.copy()
+        env["QLT_CHUNK_SIZE"] = "not-a-number"
+        result = self.run_pipeline(
+            ['load', str(self.get_fixture_path('sample-min.csv')), '--chunk-size', '42', '-', 'head', '1', '-', 'show'],
             env=env,
         )
-        self.assertEqual(result.returncode, 0)
-        self.assertIn("1102,Info", result.stdout)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_invalid_chunk_size_environment_is_typed_error(self):
+        for value in ("0", "not-a-number", "999999999999999999999999999999"):
+            with self.subTest(value=value):
+                env = os.environ.copy()
+                env["QLT_CHUNK_SIZE"] = value
+                result = self.run_pipeline(
+                    ['load', str(self.get_fixture_path('sample-min.csv')), '-', 'show'],
+                    env=env,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("QLT_CHUNK_SIZE", result.stderr)
 
     def test_load_tsv_separator_short(self):
         separator = "\t"

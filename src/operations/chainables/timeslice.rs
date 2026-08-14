@@ -35,11 +35,7 @@ pub fn timeslice(
             "datetime parsing options apply only to string timeslice input",
         ));
     }
-    LogController::debug(&format!(
-        "Creating timeslice: column={time_column}, start_present={}, end_present={}",
-        start_time.is_some(),
-        end_time.is_some()
-    ));
+    LogController::debug("Creating timeslice");
 
     // Start with the original dataframe
     let mut result_df = df.clone();

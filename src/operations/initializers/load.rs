@@ -1,5 +1,6 @@
 use crate::controllers::csv::{exists_path, CsvController};
 use crate::controllers::log::LogController;
+use crate::controllers::resources::ExecutionResources;
 use crate::error::QuiltError;
 use glob::glob;
 use polars::prelude::*;
@@ -67,26 +68,29 @@ pub fn load(
     low_memory: bool,
     no_headers: bool,
     chunk_size: Option<usize>,
+    resources: &ExecutionResources,
 ) -> Result<LazyFrame, QuiltError> {
-    load_with_ndjson_inference(
+    load_with_ndjson_inference_with_resources(
         paths,
         separator,
         low_memory,
         no_headers,
         chunk_size,
         Some(DEFAULT_NDJSON_INFER_SCHEMA_LENGTH),
+        resources,
     )
 }
 
 /// Load input files while retaining a bounded NDJSON schema inference policy.
 /// `infer_schema_length == None` requests Polars' full inference mode.
-pub fn load_with_ndjson_inference(
+pub fn load_with_ndjson_inference_with_resources(
     paths: &[PathBuf],
     separator: &str,
     low_memory: bool,
     no_headers: bool,
     chunk_size: Option<usize>,
     infer_schema_length: Option<usize>,
+    resources: &ExecutionResources,
 ) -> Result<LazyFrame, QuiltError> {
     if infer_schema_length == Some(0) {
         return Err(QuiltError::usage(
@@ -96,15 +100,7 @@ pub fn load_with_ndjson_inference(
     let expanded_paths = expand_input_paths(paths)?;
 
     exists_path(&expanded_paths)?;
-    LogController::debug(&format!(
-        "{} files are loaded. [{}]",
-        expanded_paths.len(),
-        expanded_paths
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    ));
+    LogController::debug(&format!("Loading {} input files", expanded_paths.len()));
     let has_parquet = expanded_paths.iter().any(|path| {
         path.extension()
             .and_then(|ext| ext.to_str())
@@ -135,7 +131,7 @@ pub fn load_with_ndjson_inference(
         ));
     }
     if has_parquet {
-        load_parquet_files(&expanded_paths)
+        load_parquet_files(&expanded_paths, resources)
     } else if has_ndjson {
         load_ndjson_files(&expanded_paths, infer_schema_length)
     } else {
@@ -145,6 +141,7 @@ pub fn load_with_ndjson_inference(
             low_memory,
             no_headers,
             chunk_size,
+            resources,
         )
     }
 }
@@ -255,13 +252,18 @@ fn merge_ndjson_dtype(left: &DataType, right: &DataType) -> PolarsResult<DataTyp
     }
 }
 
-fn load_parquet_files(paths: &[PathBuf]) -> Result<LazyFrame, QuiltError> {
+fn load_parquet_files(
+    paths: &[PathBuf],
+    resources: &ExecutionResources,
+) -> Result<LazyFrame, QuiltError> {
     if paths.len() == 1 {
-        LazyFrame::scan_parquet(&paths[0], ScanArgsParquet::default()).map_err(|e| QuiltError::Io {
-            operation: "read parquet".into(),
-            path: Some(paths[0].display().to_string()),
-            message: e.to_string(),
-        })
+        LazyFrame::scan_parquet(&paths[0], ScanArgsParquet::default())
+            .map(|frame| crate::controllers::resources::instrument_evaluation(frame, resources))
+            .map_err(|e| QuiltError::Io {
+                operation: "read parquet".into(),
+                path: Some(paths[0].display().to_string()),
+                message: e.to_string(),
+            })
     } else {
         let mut dataframes = Vec::new();
         for path in paths {
@@ -272,7 +274,9 @@ fn load_parquet_files(paths: &[PathBuf]) -> Result<LazyFrame, QuiltError> {
                     message: e.to_string(),
                 }
             })?;
-            dataframes.push(df);
+            dataframes.push(crate::controllers::resources::instrument_evaluation(
+                df, resources,
+            ));
         }
         concat(
             dataframes,
@@ -292,6 +296,8 @@ fn load_csv_files(
     low_memory: bool,
     no_headers: bool,
     chunk_size: Option<usize>,
+    resources: &ExecutionResources,
 ) -> Result<LazyFrame, QuiltError> {
-    CsvController::new(paths).get_dataframe(separator, low_memory, no_headers, chunk_size)
+    CsvController::new(paths)
+        .get_dataframe_with_resources(separator, low_memory, no_headers, chunk_size, resources)
 }

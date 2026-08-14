@@ -21,9 +21,7 @@ pub fn sort(df: &LazyFrame, colnames: &[String], desc: bool) -> Result<LazyFrame
         }
     }
 
-    LogController::debug(&format!(
-        "Sorting by columns: {colnames:?}, descending: {desc}"
-    ));
+    LogController::debug("Sorting columns");
 
     let sort_exprs: Vec<Expr> = colnames.iter().map(col).collect();
     let sort_options = SortMultipleOptions::default().with_order_descending(desc);
