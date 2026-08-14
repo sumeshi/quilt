@@ -73,10 +73,13 @@ fn main() {
 }
 
 fn print_registry_help() {
-    println!("Quilt: A fast, flexible, and memory-efficient structured-record pipeline tool.\n");
-    println!("Usage: qlt load <input> - <chainable> <args> - <finalizer> <args>\n");
-    print!("{}", render_registry_help());
     println!(
-        "\nUse --option=value or -- before a positional value when the value begins with '-'."
+        "Quilt: A Rust CLI for processing CSV/TSV, JSONL/NDJSON, and Parquet data with composable pipelines and streaming-capable execution."
     );
+    println!("Built for ad-hoc analysis of logs, event exports, and forensic datasets.\n");
+    println!("Usage: qlt <initializer> <args> - <chainable> <args> - <finalizer> <args>\n");
+    print!("{}", render_registry_help());
+    println!("\nIf an option value is '-', use an attached form such as --separator=- or -s-.");
+    println!("If a positional value begins with '-', pass -- first.");
+    println!("If no finalizer is specified, Quilt uses machine-readable show.");
 }

@@ -4,20 +4,22 @@
 
 ![quilt](https://gist.githubusercontent.com/sumeshi/c2f430d352ae763273faadf9616a29e5/raw/29fa84d98f83bbdff095c73598dd49ff1cad5e9c/quilt.svg)
 
-A fast, flexible, and memory-efficient command-line tool written in Rust for processing CSV/TSV, JSONL/NDJSON, and Parquet structured records. Inspired by [xsv](https://github.com/BurntSushi/xsv) and built on [Polars](https://www.pola.rs/), it's designed for handling tens or hundreds of gigabytes of data efficiently in workflows like log analysis and digital forensics.
+A Rust CLI for processing CSV/TSV, JSONL/NDJSON, and Parquet data with composable pipelines and streaming-capable execution.
+Built for ad-hoc analysis of logs, event exports, and forensic datasets.
 
 > [!NOTE]
 > The original version of this project was implemented in Python and can be found at [sumeshi/quilter-csv](https://github.com/sumeshi/quilter-csv). This Rust version is a complete rewrite.
 
 ## Features
 
-- **Pipeline-style command chaining**: Chain multiple commands in a single line for fast and efficient data processing
+- **Pipeline-style command chaining**: Chain multiple operations in a single command
 - **Flexible filtering and transformation**: Perform operations like select, filter, sort, deduplicate, and timezone conversion
 - **YAML workflow automation**: Compose validated `run` documents with joins, branches, and multiple outputs
 
 Stage schema example:
 
 ```yaml
+version: 1
 stages:
   - name: prepared
     materialize: auto # auto | always | never
@@ -350,11 +352,11 @@ $ qlt load logs.csv - grep "192\\.168\\." --column src_ip,dst_ip
 ```
 
 #### `head`
-Displays the first N rows of the dataset.
+Limits the dataset to its first N rows.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| number | int  | 5       | Number of rows to display. Can be specified as positional argument or with -n/--number option. |
+| number | int  | 5       | Number of rows to keep. Can be specified as positional argument or with -n/--number option. |
 | -n, --number | int | | Alternative way to specify number of rows. |
 
 ```bash
@@ -365,11 +367,11 @@ $ qlt load data.csv - head --number 10
 ```
 
 #### `tail`
-Displays the last N rows of the dataset.
+Keeps the last N rows of the dataset.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| number | int  | 5       | Number of rows to display. Can be specified as positional argument or with -n/--number option. |
+| number | int  | 5       | Number of rows to keep. Can be specified as positional argument or with -n/--number option. |
 | -n, --number | int | | Alternative way to specify number of rows. |
 
 ```bash
@@ -382,7 +384,7 @@ $ qlt load data.csv - tail --number 10
 #### `sort`
 Sorts the dataset based on the specified column(s).
 
-> ⚠️ **Memory:** This command materializes the full dataset into memory.
+> ⚠️ **Memory:** This is a global operation and may require memory proportional to the input.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -399,7 +401,7 @@ $ qlt load data.csv - sort col1,col2,col3 --desc
 #### `count`
 Count duplicate rows, grouping by all columns by default. Results are automatically sorted by count in descending order.
 
-> ⚠️ **Memory:** This command materializes the full dataset into memory.
+> ⚠️ **Memory:** This is a global operation and may require memory proportional to the input.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -415,7 +417,7 @@ $ qlt load data.csv - count - sort col1          # Count and then sort by col1 i
 #### `uniq`
 Filters unique rows, removing duplicates based on all columns.
 
-> ⚠️ **Memory:** This command materializes the full dataset into memory.
+> ⚠️ **Memory:** This is a global operation and may require memory proportional to the input.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -909,7 +911,7 @@ For scalar aggregation in a `run` output stage:
 
 ## Huge File Processing
 
-Quilt supports streaming processing for huge files without loading them entirely into memory.
+Quilt supports streaming-capable execution for many large-file processing pipelines.
 
 ### Memory Behavior by Command
 
@@ -944,47 +946,21 @@ $ qlt load huge.csv.gz - head 1000 - show
 
 ### Parquet Cache for Performance
 
-For repeated processing of large CSV files, convert to Parquet format for significantly faster loading.
+For repeated processing of large CSV files, converting once to Parquet avoids repeated CSV parsing and preserves inferred data types.
 
 **Performance Benefits:**
-- Faster loading compared to CSV format
-- Better compression (smaller file sizes)
-- Preserves data types (no re-parsing needed)
+- Avoids repeated CSV parsing
+- Typically offers compact columnar storage
+- Preserves data types
 
 ```bash
 # One-time conversion: CSV to Parquet cache
 $ qlt load huge.csv - dumpcache -o huge.parquet
 
-# Subsequent processing: Load from Parquet (much faster)
+# Subsequent processing: Load from Parquet without reparsing CSV
 $ qlt load huge.parquet - select col1,col2 - show
 $ qlt load huge.parquet - isin category "important" - dump -o result.csv
 ```
-
-## Reproducible baselines
-
-These are reference measurements, not runtime guarantees. Repeat them on the same machine and
-toolchain after changing dependencies or Polars features; generated binaries and result files
-are intentionally not committed.
-
-```bash
-/usr/bin/time -f 'build_seconds=%e max_rss_kb=%M' \
-  cargo build --all-features --offline
-wc -c target/debug/qlt
-baseline_dir="$(mktemp -d /tmp/qlt-baseline.XXXXXX)"
-trap 'rm -rf "$baseline_dir"' EXIT
-/usr/bin/time -f 'runtime_seconds=%e max_rss_kb=%M' \
-  target/debug/qlt load tests/fixtures/sample.csv - head 1000 \
-  - dump --output "$baseline_dir/result.csv"
-```
-
-On the T12 reference environment (2026-08-13), the debug build produced a 1,132,142,560-byte
-binary and the representative dump took 0.69 seconds with 112,844 KiB peak RSS. A release
-baseline on the current environment (2026-08-14, `QLT_BENCH_RUNS=1`) produced a 39,849,848-byte
-binary, 190 ms incremental build, 230 ms `load_show` runtime at 162,884 KiB peak RSS, and a
-61,665,558-byte published dump. The benchmark records build RSS separately, samples peak
-execution-owned `.qlt-*` spool/staging bytes during each command, and checks residual files;
-small fixtures may report zero peak spool bytes. These values are evidence rather than
-thresholds; rerun the script to compare the same toolchain and fixture.
 
 ## Installation
 

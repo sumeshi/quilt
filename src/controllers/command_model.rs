@@ -43,12 +43,13 @@ pub fn render_command_help(name: &str) -> Option<String> {
         return Some(
             "run\n\nUsage: qlt run <config> [files...] [options]\n\n"
                 .to_string()
-                + "Execute a canonical version-1 YAML workflow. Paths in declared default values "
-                + "are relative to the run file; --var path overrides are relative to the caller.\n"
-                + "  --check                 Validate schema, parameters, graph, and commands without I/O\n"
-                + "  --var name=value        Override a declared typed parameter (repeatable)\n"
-                + "  --output, -o PATH       Override the YAML dump path, or write CSV if there is no dump\n"
-                + "  --show-plan STAGE       Print a selected stage plan without evaluating rows\n"
+                + "Execute a version-1 YAML workflow. If a load step omits paths, positional files "
+                + "after the config path are supplied to that step.\n"
+                + "  --check                 Parse and statically validate the run document without reading input data or writing output\n"
+                + "  --var name=value        Supply a value for a declared typed parameter (repeatable)\n"
+                + "  --output, -o PATH       CSV destination. If the YAML has a dump, this path replaces it; otherwise this is the dump path. Relative paths are from the run file directory. Existing files are rejected.\n"
+                + "  --show-plan STAGE       Print a selected process, join, or concat stage plan without evaluating rows or running finalizers. Dynamic branch stages are rejected.\n"
+                + "A parameter path default is relative to the run file; a --var path is relative to the caller.\n"
                 + "Parameter placeholders are whole YAML values: {\"$param\": name}; partial interpolation is rejected.\n",
         );
     }
