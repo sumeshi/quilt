@@ -1,8 +1,8 @@
 [package]
 name = "quilt"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2021"
-description = "A fast, flexible, and memory-efficient command-line tool written in Rust for processing CSV/TSV, JSONL/NDJSON, and Parquet structured records."
+description = "A Rust CLI for processing CSV/TSV, JSONL/NDJSON, and Parquet data with composable pipelines and streaming-capable execution."
 authors = ["sumeshi <sum3sh1@protonmail.com>"]
 license = "MIT"
 
