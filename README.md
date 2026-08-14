@@ -75,22 +75,19 @@ The `-` token (a single hyphen surrounded by spaces) is the command separator. A
 
 - To separate commands: `qlt load file.csv - select col1 - head 5`
 - If you need `-` as an option value, use an attached form such as `--separator=-` or `-s-`.
+- If a positional value begins with `-`, pass `--` first: `qlt load file.csv - grep -- -Info`.
 
 A standalone `-` positional value, including stdin-style usage, is not currently supported.
 
-**Note:** If no finalizer is explicitly specified, Quilt automatically uses the
-machine-readable `show` finalizer. This is deterministic across TTYs and build
-features:
+If no finalizer is specified, Quilt uses machine-readable `show`. This does not
+depend on TTY or build features. `showtable` is always a bounded preview and is
+never the implicit finalizer.
 
 ```bash
 $ qlt load data.csv - select col1,col2 - head 5
 # Equivalent to:
 $ qlt load data.csv - select col1,col2 - head 5 - show
 ```
-
-`showtable` is always available with the same renderer in default and
-`--no-default-features` builds; it is always a bounded preview and never the
-implicit finalizer.
 
 ## Command Reference
 
@@ -223,14 +220,14 @@ existing columns and generated paths fail before the frame is changed.
 $ qlt load events.jsonl - flatten - select user.name,process.command_line - show
 ```
 
-#### bucket
+#### `bucket`
 Floors a datetime column to a fixed positive interval and adds a new column.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | column | str | Datetime source column. Required. |
-| interval | str | Positive interval matching ^[1-9][0-9]*(s|m|h|d)$. |
-| --output | str | Output name; defaults to <column>_bucket. |
+| interval | str | Positive interval matching `^[1-9][0-9]*(s\|m\|h\|d)$`. |
+| `-o`, `--output` | str | Output name; defaults to `<column>_bucket`. |
 
 The source may be typed datetime or string. Typed input preserves source
 unit/timezone metadata and rejects datetime parsing options. String input uses
@@ -240,18 +237,19 @@ metadata. Flooring uses checked Euclidean division, so negative timestamps floor
 toward negative infinity; existing output names are rejected. Millisecond
 inputs require an interval divisible by 1ms.
 
-Examples:
+```bash
 $ qlt load data.csv - cast timestamp datetime - bucket timestamp 5m - show
 $ qlt load data.csv - cast timestamp datetime - bucket timestamp 1h --output hour - show
+```
 
-#### delta
+#### `delta`
 Calculates the current value minus the previous row without reordering or
 replacing the source column.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | column | str | Numeric or datetime source column. Required. |
-| --output | str | Output name; defaults to <column>_delta. |
+| `-o`, `--output` | str | Output name; defaults to `<column>_delta`. |
 
 Integral deltas use lossless Int64 differences (including descending unsigned
 values), using an internal Decimal128 subtraction before the final Int64 cast;
@@ -260,11 +258,12 @@ error at finalization. Float32 and Float64 retain their source precision.
 Datetime deltas use Duration[μs] with checked unit conversion. The first row
 and any pair involving a null produce null. Existing output names are rejected.
 
-Examples:
+```bash
 $ qlt load data.csv - delta count - show
 $ qlt load data.csv - cast timestamp datetime - delta timestamp --output elapsed - show
+```
 
-#### extract
+#### `extract`
 Extracts named Rust regex capture groups into new nullable String columns while
 preserving the source column.
 
@@ -277,7 +276,7 @@ Unmatched rows and absent optional groups become null. Existing output names,
 invalid regexes, and regexes without named groups are rejected. Quote the regex
 for your shell; this command does not add an expression language.
 
-Examples:
+```bash
 $ qlt load data.csv - extract message '(?P<user>[^@]+)@(?P<domain>.+)' - show
 $ qlt load data.csv - extract path '^(?P<dir>.*)/(?P<file>[^/]+)$' - show
 ```
@@ -508,7 +507,7 @@ $ qlt load data.csv - timeslice timestamp --start "2023-06-01" --end "2023-06-30
 $ qlt load access.log - timeslice timestamp --start "2023-01-01T10:00:00"
 ```
 
-Time bucketing and aggregation use the `bucket`, `count`, and `calc` commands. See the command reference in `GOAL.md`.
+Time bucketing and aggregation use `bucket`, `count`, and `calc`.
 
 ### Finalizers
 
@@ -602,12 +601,9 @@ $ qlt load data.csv - select col1 - showquery
 ```
 
 #### `show`
-Displays the resulting data as CSV to standard output. Header is included by default.
+Writes the result as CSV to standard output, including the header. This command
+takes no arguments. It is the implicit finalizer when a chain ends without one.
 
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-
-Example:
 ```bash
 $ qlt load data.csv - head 5 - show
 ```
@@ -623,15 +619,11 @@ Displays the resulting data in a formatted table to standard output. Shows table
 - Cell contents are limited to 40 characters and truncated with `…`
 
 This command does not take any arguments or options.
-> **Tip for large files:** Pipe through `head N` before `showtable`, or use `show` instead.
+> **Tip for large files:** Use `head` before `showtable`, or use `show` instead.
 
-Example:
 ```bash
 $ qlt load data.csv - select col1,col2 - head 3 - showtable
 # Output includes: shape: (3, 2) followed by formatted table
-
-$ qlt load large_data.csv - select col1,col2
-# Automatically calls machine-readable show if no finalizer is specified
 ```
 
 #### `dump`
@@ -721,36 +713,51 @@ contextual error at evaluation time.
 | `dump` | Any schema; writes CSV/TSV with header | Existing target rejected; staged atomic write cleans failures | Streaming-capable sink/finalizer; target is never overwritten |
 | `dumpcache` | Any schema including nested/timezone values; writes Snappy Parquet | Existing target rejected; extension normalized to `.parquet`; failures clean staging | Typed Parquet finalizer; evaluates and writes cache |
 
-### `run` YAML workflows
+### Automation
+
+#### `run`
 
 Quilt allows you to define complex data processing workflows in YAML configuration files. This is useful for automating repetitive tasks or creating reusable data processing pipelines.
 
-#### Usage
-The `run` command takes the path to a YAML configuration file. Input data sources and other parameters are typically defined within the YAML file.
+The `run` command takes the path to a YAML configuration file. Input data
+sources and other parameters are typically defined within the YAML file. If a
+`load` step omits `paths`, positional files after the config path are supplied
+to that step.
 
 ```bash
-$ qlt run <config_file_path.yaml> [options]
+$ qlt run <config_file_path.yaml> [files...] [options]
 ```
 | Parameter | Type | Description |
 |---|---|---|
 | config_file_path.yaml | str | Path to the YAML configuration file defining the pipeline stages. Required. |
+| files... | list | Optional input files used by `load` steps that omit `paths`. |
 | --check | flag | Parse and statically validate the run document without reading input data or writing output. |
 | --show-plan STAGE | str | Build the selected process, join, or concat stage and print its logical/optimized plan without evaluating rows or running finalizers. Dynamic branch stages are rejected. |
 | --var name=value | repeated | Supply a value for a declared typed parameter. |
-| -o, --output | str | Overrides the output path defined in the YAML config for the final dump operation (if any). |
+| -o, --output | str | CSV destination. If the YAML has a `dump`, this path replaces it. If not, this is the dump path. Relative paths are from the run file directory. Existing files are rejected. |
 
 
-#### Example: Running a `run` document
 ```bash
 $ qlt run rules/my_workflow.yaml
-$ qlt run rules/my_analysis.yaml -o custom_output.csv
+$ qlt run rules/my_workflow.yaml events.csv
+$ qlt run rules/my_analysis.yaml -o result.csv
 ```
 
-The `run` document (e.g., `rules/my_workflow.yaml`) defines the stages and steps. For example,
-the sample document below defines a pipeline that:
-1. Loads data (implicitly or explicitly via a `load` step in a `process` stage).
-2. Performs selections and a join operation across different stages.
-3. Displays the final result as a table.
+No `-o` uses the YAML `dump` path. With `-o`, the CLI path wins.
+
+```yaml
+version: 1
+stages:
+  - name: output
+    steps:
+      - load: {paths: [events.csv]}
+      - dump: {output: default.csv}
+```
+
+```bash
+$ qlt run workflow.yaml              # writes default.csv
+$ qlt run workflow.yaml -o result.csv  # writes result.csv only
+```
 
 #### Pipeline Operations in YAML
 Within a `run` document, stages can be different types to orchestrate the flow.
@@ -759,17 +766,17 @@ Within a `run` document, stages can be different types to orchestrate the flow.
 | -------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | `process`      | Executes a series of qlt operations on a dataset.          | `name` and a sequence-form `steps` (for example, `- grep: {pattern: ERROR}`). `from` (optional) names a prior stage. |
 | `concat`       | Concatenates multiple datasets (stages).                   | `name` and `concat: {inputs: [stage_a, stage_b], how: vertical}`. Horizontal concatenation is not yet implemented. |
-| `join`         | Joins datasets from multiple stages based on keys.         | `name` and `join: {inputs: [...], on: [column], how: inner}`. Use `left-on` and `right-on` for asymmetric keys; `cross` needs no key. |
-| `branch`       | Selects downstream target stages based on a row-count predicate. | `name` and `branch: {input: stage, when: {row-count: {greater-than: 10}}, then: [target]}` with optional `else: [target]`. |
+| `join`         | Joins datasets from multiple stages based on keys.         | `name` and `join: {inputs: [...], on: [column], how: inner}`. Use `left-on` and `right-on` for asymmetric keys; `cross` needs no key. Optional `coalesce`. |
+| `branch`       | Selects downstream target stages from a `row-count` or `parameter` predicate. | `name` and `branch: {input: stage, when: {row-count: {greater-than: 10}}, then: [target]}` with optional `else: [target]`. |
 
 Every run document must use `version: 1` and a sequence of named stages. The schema is
 strict: unknown document, stage, and step keys are rejected before any input is read.
 
 Parameters are declared at the document root with one of `path`, `string`, `int`, or
 `bool` types. Values are referenced as whole YAML values using `{"$param": name}`;
-partial string interpolation is not supported. CLI overrides take precedence over
-defaults. Default paths are relative to the run file, while CLI path overrides are
-relative to the caller's working directory. A parameter cannot be both `required` and
+partial string interpolation is not supported. CLI `--var` values take precedence
+over defaults. A parameter `path` default is relative to the run file; a `--var`
+path is relative to the caller's working directory. A parameter cannot be both `required` and
 have a `default`; secret values are redacted from diagnostics. Branch predicates support
 typed `row-count` and `parameter` comparisons; scalar-result predicates are deferred.
 
@@ -911,10 +918,10 @@ Not all commands stream. Before running a pipeline on a large file, check the me
 | Mode | Commands | Notes |
 |------|----------|-------|
 | **Streaming-capable** | `show`, `dump`, `dumpcache` | Prefer these sinks for large inputs; `show` uses bounded memory while its temporary CSV artifact consumes disk proportional to rendered output |
-| **Bounded / lazy** | `head`, `showtable`, `showquery` | `head` limits output; `showtable` previews a bounded number of rows; plans do not collect |
-| **Lazy / Polars-optimized** | `select`, `isin`, `contains`, `grep`, `sed`, `cast`, `parse-size`, `bucket`, `delta`, `extract`, `flatten` | Pushdown; usually safe |
-| **Global barriers** ⚠️ | `sort`, `uniq`, `count` | Polars may maintain input-proportional state to produce a global result |
-| **Aggregate finalizers** ⚠️ | `stats` | Materialize input-proportional state |
+| **Bounded / lazy** | `head`, `headers`, `showtable`, `showquery` | `head` limits output; `headers` inspects schema only; `showtable` previews a bounded number of rows; plans do not collect |
+| **Lazy / Polars-optimized** | `select`, `isin`, `contains`, `grep`, `sed`, `renamecol`, `cast`, `parse-size`, `bucket`, `delta`, `extract`, `flatten`, `changetz`, `timeslice` | Pushdown or per-chunk UDFs; usually safe |
+| **Global barriers** ⚠️ | `sort`, `uniq`, `count`, `tail` | Polars may maintain input-proportional state to produce a global result |
+| **Aggregate finalizers** ⚠️ | `stats`, `calc` | Materialize input-proportional state |
 | **Global / disk-backed finalizers** ⚠️ | `partition` | Scans the complete input through a schema-preserving Parquet spool and bounded batches; output directory is fully staged before publication |
 
 > **Warning:** Running a global barrier or aggregate finalizer on a multi-GB file may require substantial input-proportional state. `partition` bounds in-memory writer state but consumes disk proportional to the input and output. Use `head`, `timeslice`, or `isin` to reduce the dataset first.
