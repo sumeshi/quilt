@@ -1,6 +1,7 @@
 pub use super::model::{
     BranchNode, BranchPredicate, BranchStage, ConcatNode, ConcatStage, JoinNode, JoinStage,
-    MaterializePolicy, ParameterPredicate, ProcessStage, RowCountPredicate, RunDocument, StageConfig,
+    MaterializePolicy, ParameterPredicate, ProcessStage, RowCountPredicate, RunDocument,
+    StageConfig,
 };
 #[cfg(test)]
 use crate::controllers::command_model::CommandCategory;

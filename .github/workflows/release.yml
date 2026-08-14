@@ -1,105 +1,22 @@
 name: Release
 
+# Fires only when you publish a GitHub Release (you push, tag, and create the
+# release yourself). This workflow just builds the binaries and attaches them
+# to that release.
 on:
-  push:
-    branches: [ main ]
-    tags: [ 'v*' ]
-  pull_request:
-    branches: [ main ]
+  release:
+    types: [published]
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: Test Suite
-    runs-on: ubuntu-latest
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        components: rustfmt, clippy
-        
-    - name: Cache Rust dependencies
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/bin/
-          ~/.cargo/registry/index/
-          ~/.cargo/registry/cache/
-          ~/.cargo/git/db/
-          target/
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-        
-    - name: Install Python dependencies
-      run: |
-        python -m pip install --upgrade pip
-        
-    - name: Check Rust formatting
-      run: cargo fmt --all -- --check
-      
-    - name: Run Clippy
-      run: cargo clippy --all-targets --all-features
-      
-    - name: Build project
-      run: cargo build --verbose
-      
-    - name: Run Python test suite
-      run: python3 tests/run_tests.py
-      
-  auto-tag:
-    name: Auto Create Tag
-    needs: test
-    if: github.ref == 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    outputs:
-      should_release: ${{ steps.check_version.outputs.should_release }}
-      version: ${{ steps.check_version.outputs.version }}
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-      
-    - name: Check version and create tag
-      id: check_version
-      run: |
-        # Get version from Cargo.toml
-        VERSION=$(grep '^version = ' Cargo.toml | head -1 | cut -d '"' -f 2)
-        echo "Current version: $VERSION"
-        
-        # Check if tag already exists
-        if git rev-parse "v$VERSION" >/dev/null 2>&1; then
-          echo "Tag v$VERSION already exists"
-          echo "should_release=false" >> $GITHUB_OUTPUT
-        else
-          echo "Creating new tag v$VERSION"
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git tag "v$VERSION"
-          git push origin "v$VERSION"
-          echo "should_release=true" >> $GITHUB_OUTPUT
-          echo "version=v$VERSION" >> $GITHUB_OUTPUT
-        fi
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
   build:
-    name: Build Release Binaries
-    needs: [test, auto-tag]
-    if: |
-      (startsWith(github.ref, 'refs/tags/v') || 
-       (needs.auto-tag.outputs.should_release == 'true'))
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         include:
@@ -109,213 +26,36 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             name: quilt-windows-x64
-    
-    runs-on: ${{ matrix.os }}
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      
-    - name: Get version from tag
-      id: get_version
-      run: |
-        echo "=== Debug: Checking version sources ==="
-        echo "github.ref: ${{ github.ref }}"
-        echo "auto-tag.should_release: ${{ needs.auto-tag.outputs.should_release }}"
-        echo "auto-tag.version: ${{ needs.auto-tag.outputs.version }}"
-        
-        if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-          VERSION="${GITHUB_REF#refs/tags/}"
-          echo "Using tag version: $VERSION"
-        elif [[ "${{ needs.auto-tag.outputs.should_release }}" == "true" ]]; then
-          VERSION="${{ needs.auto-tag.outputs.version }}"
-          echo "Using auto-tag version: $VERSION"
-        else
-          echo "ERROR: No valid version found!"
-          exit 1
-        fi
-        
-        if [[ -z "$VERSION" ]]; then
-          echo "ERROR: VERSION is empty!"
-          exit 1
-        fi
-        
-        echo "Final VERSION: $VERSION"
-        echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-      shell: bash
-      
-    - name: Install musl tools (Linux)
-      if: matrix.target == 'x86_64-unknown-linux-musl'
-      run: sudo apt-get update && sudo apt-get install -y musl-tools
-        
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        targets: ${{ matrix.target }}
-        
-    - name: Cache Rust dependencies
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/bin/
-          ~/.cargo/registry/index/
-          ~/.cargo/registry/cache/
-          ~/.cargo/git/db/
-          target/
-        key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-        
-    - name: Build release binary
-      run: cargo build --release --target ${{ matrix.target }}
-      
-    - name: Prepare binary (Linux)
-      if: matrix.os != 'windows-latest'
-      run: |
-        cp target/${{ matrix.target }}/release/qlt ${{ matrix.name }}-${{ steps.get_version.outputs.VERSION }}
-        chmod +x ${{ matrix.name }}-${{ steps.get_version.outputs.VERSION }}
-        
-    - name: Prepare binary (Windows)
-      if: matrix.os == 'windows-latest'
-      run: |
-        $version = "${{ steps.get_version.outputs.VERSION }}"
-        $name = "${{ matrix.name }}"
-        $outputFile = "$name-$version.exe"
-        echo "Version: $version"
-        echo "Name: $name"
-        echo "Output file: $outputFile"
-        echo "Source file: target/${{ matrix.target }}/release/qlt.exe"
-        Get-ChildItem target/${{ matrix.target }}/release/
-        cp target/${{ matrix.target }}/release/qlt.exe $outputFile
-        echo "Created file:"
-        Get-ChildItem $outputFile | Format-List
-      shell: powershell
-        
-    - name: Upload binary artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ matrix.name }}-${{ steps.get_version.outputs.VERSION }}
-        path: ${{ matrix.name }}-${{ steps.get_version.outputs.VERSION }}*
 
-  release:
-    name: Create Release
-    needs: [test, auto-tag, build]
-    if: |
-      (startsWith(github.ref, 'refs/tags/v') || 
-       (needs.auto-tag.outputs.should_release == 'true'))
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      
-    - name: Download all artifacts
-      uses: actions/download-artifact@v4
-      with:
-        path: artifacts
-        
-    - name: Display structure of downloaded files
-      run: |
-        echo "=== Artifacts directory structure ==="
-        ls -la artifacts/
-        echo "=== Contents of each artifact directory ==="
-        for dir in artifacts/*/; do
-          echo "Directory: $dir"
-          ls -la "$dir"
-          echo "---"
-        done
-        echo "=== All files that match quilt pattern ==="
-        find artifacts -name "*quilt*" -type f
-        echo "=== All files in artifacts ==="
-        find artifacts -type f
-        
-    - name: Get version
-      id: get_version
-      run: |
-        echo "=== Debug: Checking version sources ==="
-        echo "github.ref: ${{ github.ref }}"
-        echo "auto-tag.should_release: ${{ needs.auto-tag.outputs.should_release }}"
-        echo "auto-tag.version: ${{ needs.auto-tag.outputs.version }}"
-        
-        if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-          VERSION="${GITHUB_REF#refs/tags/}"
-          echo "Using tag version: $VERSION"
-        elif [[ "${{ needs.auto-tag.outputs.should_release }}" == "true" ]]; then
-          VERSION="${{ needs.auto-tag.outputs.version }}"
-          echo "Using auto-tag version: $VERSION"
-        else
-          echo "ERROR: No valid version found!"
-          exit 1
-        fi
-        
-        if [[ -z "$VERSION" ]]; then
-          echo "ERROR: VERSION is empty!"
-          exit 1
-        fi
-        
-        echo "Final VERSION: $VERSION"
-        echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-      
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Generate release notes
-      id: release_notes
-      run: |
-        cat > release_notes.md << 'EOF'
-        ## Quilt ${{ steps.get_version.outputs.VERSION }}
-        
-        ### Features
-        - Pipeline-style command chaining: Chain multiple commands in a single line for fast and efficient data processing
-        - Flexible filtering and transformation: Perform operations like select, filter, sort, deduplicate, and timezone conversion
-        - YAML `run` workflows: Automate validated pipelines with joins, branches, and multiple outputs
-        
-        ### Supported Platforms
-        - Linux (x64) - Static binary with musl
-        - Windows (x64) - Native executable
-        
-        ### Installation
-        1. Download the appropriate binary for your platform
-        2. Make it executable (Unix systems): `chmod +x quilt-*`
-        3. Move to a directory in your PATH: `sudo mv quilt-* /usr/local/bin/qlt`
-        4. Verify installation: `qlt --help`
-        EOF
-        
-    - name: Create Release
-      uses: softprops/action-gh-release@v1
-      with:
-        tag_name: ${{ steps.get_version.outputs.VERSION }}
-        name: Quilt ${{ steps.get_version.outputs.VERSION }}
-        body_path: release_notes.md
-        draft: false
-        prerelease: false
-        files: |
-          artifacts/*/*
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install musl tools (Linux)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
-  continuous-deployment:
-    name: Continuous Deployment
-    needs: [test, auto-tag]
-    if: github.ref == 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/v') && needs.auto-tag.outputs.should_release == 'false'
-    runs-on: ubuntu-latest
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      
-    - name: Install musl tools
-      run: sudo apt-get update && sudo apt-get install -y musl-tools
-      
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        targets: x86_64-unknown-linux-musl
-      
-    - name: Build development binary
-      run: cargo build --release --target x86_64-unknown-linux-musl
-      
-    - name: Upload development artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: quilt-dev-linux
-        path: target/x86_64-unknown-linux-musl/release/qlt
-        retention-days: 7
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package binary
+        shell: bash
+        run: |
+          tag="${{ github.event.release.tag_name }}"
+          if [[ "${{ matrix.os }}" == windows-* ]]; then
+            cp "target/${{ matrix.target }}/release/qlt.exe" "${{ matrix.name }}-${tag}.exe"
+          else
+            cp "target/${{ matrix.target }}/release/qlt" "${{ matrix.name }}-${tag}"
+            chmod +x "${{ matrix.name }}-${tag}"
+          fi
+
+      - name: Upload binary to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: ${{ matrix.name }}-${{ github.event.release.tag_name }}*
