@@ -1,7 +1,6 @@
 pub use super::model::{
-    deserialize_optional_string_list, BranchNode, BranchPredicate, BranchStage, ConcatNode,
-    ConcatStage, JoinNode, JoinStage, MaterializePolicy, ParameterPredicate, ProcessStage,
-    RowCountPredicate, RunDocument, StageConfig,
+    BranchNode, BranchPredicate, BranchStage, ConcatNode, ConcatStage, JoinNode, JoinStage,
+    MaterializePolicy, ParameterPredicate, ProcessStage, RowCountPredicate, RunDocument, StageConfig,
 };
 #[cfg(test)]
 use crate::controllers::command_model::CommandCategory;

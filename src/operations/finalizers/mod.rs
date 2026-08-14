@@ -478,14 +478,6 @@ pub fn validate_destination(target: &Path, operation: &str) -> Result<(), QuiltE
     Ok(())
 }
 
-pub fn io_error(operation: &str, path: Option<&Path>, message: impl Into<String>) -> QuiltError {
-    QuiltError::io(
-        operation,
-        path.map(|value| value.display().to_string()),
-        message,
-    )
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteStatus {
     Complete,

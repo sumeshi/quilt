@@ -88,10 +88,8 @@ impl CommandExecutor {
                 // The implicit finalizer is deliberately stable across TTYs
                 // and build features: machine-readable `show` is the one
                 // automatic output contract.
-                if matches!(self.controller, PipelineState::Loaded(_)) {
-                    self.results
-                        .push(self.controller.loaded("show")?.show_result()?);
-                }
+                self.results
+                    .push(self.controller.loaded("show")?.show_result()?);
             }
         }
         Ok(result)

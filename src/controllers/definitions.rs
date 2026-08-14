@@ -495,10 +495,6 @@ pub fn automation_operations() -> impl Iterator<Item = &'static OperationDefinit
         .filter(|definition| definition.category == CommandCategory::Automation)
 }
 
-pub const fn option_count(definition: &OperationDefinition) -> usize {
-    definition.options.len()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

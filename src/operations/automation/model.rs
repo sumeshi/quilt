@@ -183,7 +183,7 @@ pub struct JoinNode {
     pub coalesce: Option<bool>,
 }
 
-pub fn deserialize_optional_string_list<'de, D>(
+fn deserialize_optional_string_list<'de, D>(
     deserializer: D,
 ) -> Result<Option<Vec<String>>, D::Error>
 where

@@ -20,14 +20,6 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
-#[derive(Debug)]
-pub(super) struct RunInvocation {
-    pub config_path: String,
-    pub cli_input_files: Option<Vec<PathBuf>>,
-    pub output_path: Option<String>,
-    pub variables: Vec<String>,
-    pub check_only: bool,
-}
 pub(super) fn run_impl(
     controller: &mut PipelineState,
     config_path_str: &str,
@@ -40,8 +32,6 @@ pub(super) fn run_impl(
     let mut finalizer_results = Vec::new();
     let result: Result<Vec<crate::operations::finalizers::FinalizerResult>, QuiltError> = (|| {
         let config_path = Path::new(config_path_str);
-        let diagnostic_context = diagnostics::DiagnosticsContext::for_config(config_path);
-        let _ = diagnostic_context.config_path();
         let raw_config_content = fs::read_to_string(config_path).map_err(|error| {
             QuiltError::automation(
                 "run",
@@ -330,20 +320,13 @@ pub fn run(
     variables: &[String],
     check_only: bool,
 ) -> Result<Vec<crate::operations::finalizers::FinalizerResult>, QuiltError> {
-    let invocation = RunInvocation {
-        config_path: config_path.to_owned(),
-        cli_input_files,
-        output_path: output_path.map(str::to_owned),
-        variables: variables.to_vec(),
-        check_only,
-    };
     run_impl(
         controller,
-        &invocation.config_path,
-        invocation.cli_input_files,
-        invocation.output_path.as_deref(),
-        &invocation.variables,
-        invocation.check_only,
+        config_path,
+        cli_input_files,
+        output_path,
+        variables,
+        check_only,
     )
 }
 
@@ -501,23 +484,4 @@ pub(super) fn build_plan_stage(
     visiting.remove(name);
     cache.insert(name.to_string(), frame.clone());
     Ok(frame)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::RunInvocation;
-
-    #[test]
-    fn invocation_owns_frontend_inputs() {
-        let invocation = RunInvocation {
-            config_path: "run.yaml".into(),
-            cli_input_files: None,
-            output_path: Some("out.csv".into()),
-            variables: vec!["limit=2".into()],
-            check_only: true,
-        };
-        assert_eq!(invocation.config_path, "run.yaml");
-        assert_eq!(invocation.output_path.as_deref(), Some("out.csv"));
-        assert!(invocation.check_only);
-    }
 }

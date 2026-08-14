@@ -1,30 +1,9 @@
-//! Per-invocation diagnostics context.
-//!
-//! This boundary intentionally owns no global state and accepts only typed
-//! invocation metadata. The existing redaction policy remains the compatibility
-//! implementation while callers migrate to this context.
+//! Per-invocation run diagnostics: secret discovery and the redaction policy
+//! that scrubs sensitive values out of errors before they reach the caller.
 
 use crate::error::QuiltError;
 use serde_yml::Value;
 use std::collections::HashSet;
-use std::path::Path;
-
-#[derive(Debug, Clone, Default)]
-pub(super) struct DiagnosticsContext {
-    config_path: Option<String>,
-}
-
-impl DiagnosticsContext {
-    pub(super) fn for_config(path: &Path) -> Self {
-        Self {
-            config_path: Some(path.display().to_string()),
-        }
-    }
-
-    pub(super) fn config_path(&self) -> Option<&str> {
-        self.config_path.as_deref()
-    }
-}
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct DiagnosticPolicy {
@@ -307,16 +286,4 @@ pub(super) fn discover_secrets(raw: &str, overrides: &[String]) -> DiagnosticPol
 
 pub(super) fn redact(error: QuiltError, policy: &DiagnosticPolicy) -> QuiltError {
     policy.sanitize_error(error)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::DiagnosticsContext;
-    use std::path::Path;
-
-    #[test]
-    fn context_keeps_only_operation_location_metadata() {
-        let context = DiagnosticsContext::for_config(Path::new("run.yaml"));
-        assert_eq!(context.config_path(), Some("run.yaml"));
-    }
 }

@@ -53,6 +53,8 @@ class TestRepositoryAudit(unittest.TestCase):
     def test_removed_modules_and_fixtures_are_not_present(self):
         removed = [
             self.root / "src/controllers/sigma_convert.rs",
+            self.root / "src/controllers/command.rs",
+            self.root / "src/controllers/batch.rs",
             self.root / "src/operations/quilters",
         ]
         removed.extend((self.root / "tests/fixtures").glob("q" + "uilt-*"))
@@ -100,21 +102,25 @@ class TestRepositoryAudit(unittest.TestCase):
         show = (source_root / "operations" / "finalizers" / "show.rs").read_text(
             encoding="utf-8"
         )
-        run = (source_root / "operations" / "automation" / "run.rs").read_text(
-            encoding="utf-8"
-        )
+        diagnostics = (
+            source_root / "operations" / "automation" / "diagnostics.rs"
+        ).read_text(encoding="utf-8")
+        orchestrator = (
+            source_root / "operations" / "automation" / "orchestrator.rs"
+        ).read_text(encoding="utf-8")
         pipeline = (source_root / "controllers" / "pipeline.rs").read_text(
             encoding="utf-8"
         )
 
         # Confidentiality: run diagnostics pass through the redaction policy,
         # and debug logging contains command/stage metadata rather than values.
-        self.assertIn("fn redact_error", run)
-        self.assertIn("DiagnosticPolicy", run)
+        self.assertIn("fn redact", diagnostics)
+        self.assertIn("DiagnosticPolicy", diagnostics)
+        self.assertIn("diagnostics::redact", orchestrator)
         for relative in [
-            Path("operations/automation/run.rs"),
+            Path("operations/automation/orchestrator.rs"),
+            Path("operations/automation/executor.rs"),
             Path("controllers/csv.rs"),
-            Path("controllers/batch.rs"),
         ]:
             log_source = (source_root / relative).read_text(encoding="utf-8")
             for line in log_source.splitlines():
@@ -191,7 +197,10 @@ class TestRepositoryAudit(unittest.TestCase):
         self.assertIn("pub use orchestrator::{run, run_show_plan};", run_source)
         self.assertNotIn("include!", run_source)
         self.assertIn("DocumentInput", run_source)
-        self.assertIn("planner::build", run_source)
+        orchestrator_source = (automation / "orchestrator.rs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("planner::build", orchestrator_source)
         self.assertIn("MaterializationPlan", (automation / "materialization.rs").read_text(encoding="utf-8"))
         self.assertIn("ProcessRequest", (automation / "executor.rs").read_text(encoding="utf-8"))
 
