@@ -85,17 +85,32 @@ pub(super) fn run_impl(
             run_document.stages.len()
         ));
         let mut stage_results: HashMap<String, LazyFrame> = HashMap::new();
+        let cli_output_path = output_path_str.map(|path_str| {
+            let path = Path::new(path_str);
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                config_path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join(path)
+            }
+        });
+        let extra_output_consumer =
+            cli_output_path.is_some() && !stage_configs.values().any(stage_has_dump);
         let materialization = materialization::MaterializationPlan::for_run(
             &execution_order,
             &stage_configs,
-            output_path_str.is_some(),
+            extra_output_consumer,
             Some(&parameters),
             config_path.parent().unwrap_or_else(|| Path::new(".")),
         )?;
         let mut last_processed_df: Option<LazyFrame> = None;
         let mut skipped_stages = HashSet::new();
+        let mut dump_overridden = false;
 
-        for stage_name in execution_order {
+        for (stage_index, stage_name) in execution_order.iter().enumerate() {
+            let stage_name = stage_name.clone();
             if skipped_stages.contains(&stage_name) {
                 continue;
             }
@@ -150,9 +165,29 @@ pub(super) fn run_impl(
 
             let mut stage_output_df = match stage_config {
                 StageConfig::Process(process) => {
+                    let mut overridden_steps;
+                    let steps = if let Some(path) = cli_output_path.as_ref() {
+                        if process_steps_have_dump(&process.steps)
+                            && !later_unskipped_stage_has_dump(
+                                &execution_order,
+                                stage_index,
+                                &skipped_stages,
+                                &stage_configs,
+                            )
+                        {
+                            overridden_steps = process.steps.clone();
+                            apply_cli_dump_override(&mut overridden_steps, &path.to_string_lossy());
+                            dump_overridden = true;
+                            &overridden_steps
+                        } else {
+                            &process.steps
+                        }
+                    } else {
+                        &process.steps
+                    };
                     executor::execute_process(executor::ProcessRequest {
                         stage_name: &stage_name,
-                        steps: &process.steps,
+                        steps,
                         input: current_stage_input_df.clone(),
                         context: &mut process_step_context,
                         materialize: materialization.should_materialize(&stage_name),
@@ -171,7 +206,7 @@ pub(super) fn run_impl(
                 StageConfig::Branch(branch) => {
                     // A branch node is routing metadata, not a user-visible
                     // output. Prevent an input frame from becoming an
-                    // unrelated top-level --output result when both routes
+                    // unrelated fallback --output result when both routes
                     // are empty.
                     last_processed_df = None;
                     let input_df = current_stage_input_df.ok_or_else(|| {
@@ -258,18 +293,9 @@ pub(super) fn run_impl(
         }
 
         LogController::info("Run document execution processing finished");
-        if let Some(path_str) = output_path_str {
+        if let Some(absolute_path) = cli_output_path.filter(|_| !dump_overridden) {
             if let Some(final_df_to_dump) = last_processed_df {
                 LogController::info("Saving final run output");
-                let final_output_path = Path::new(path_str);
-                let absolute_path = if final_output_path.is_absolute() {
-                    final_output_path.to_path_buf()
-                } else {
-                    config_path
-                        .parent()
-                        .unwrap_or_else(|| Path::new("."))
-                        .join(final_output_path)
-                };
                 if let Some(parent) = absolute_path.parent() {
                     if !parent.exists() {
                         std::fs::create_dir_all(parent).map_err(|error| {
@@ -299,7 +325,7 @@ pub(super) fn run_impl(
                     "No final DataFrame from run execution to save for --output CLI option.",
                 );
             }
-        } else {
+        } else if output_path_str.is_none() {
             if let Some(final_df_state) = last_processed_df {
                 controller.replace_with_frame(final_df_state);
             }
@@ -310,6 +336,58 @@ pub(super) fn run_impl(
         Ok(finalizer_results)
     })();
     result.map_err(|error| diagnostics::redact(error, &diagnostics))
+}
+
+fn step_command_name(step: &Value) -> Option<&str> {
+    step.as_mapping()?.keys().next()?.as_str()
+}
+
+fn process_steps_have_dump(steps: &[Value]) -> bool {
+    steps
+        .iter()
+        .any(|step| step_command_name(step) == Some("dump"))
+}
+
+fn stage_has_dump(stage: &StageConfig) -> bool {
+    match stage {
+        StageConfig::Process(process) => process_steps_have_dump(&process.steps),
+        _ => false,
+    }
+}
+
+fn later_unskipped_stage_has_dump(
+    execution_order: &[String],
+    current_index: usize,
+    skipped: &HashSet<String>,
+    configs: &HashMap<String, StageConfig>,
+) -> bool {
+    execution_order
+        .iter()
+        .skip(current_index + 1)
+        .filter(|name| !skipped.contains(*name))
+        .any(|name| configs.get(name).is_some_and(stage_has_dump))
+}
+
+fn apply_cli_dump_override(steps: &mut [Value], path: &str) {
+    for step in steps.iter_mut().rev() {
+        let Some(mapping) = step.as_mapping_mut() else {
+            continue;
+        };
+        let key = Value::String("dump".into());
+        let Some(args) = mapping.get_mut(&key) else {
+            continue;
+        };
+        let mut output = match args {
+            Value::Mapping(existing) => existing.clone(),
+            _ => serde_yml::Mapping::new(),
+        };
+        output.insert(
+            Value::String("output".into()),
+            Value::String(path.to_string()),
+        );
+        *args = Value::Mapping(output);
+        return;
+    }
 }
 
 pub fn run(

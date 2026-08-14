@@ -157,6 +157,33 @@ class TestRunOutputs(QuiltTestBase):
         self.assertTrue(Path(self.temp_dir, "first.csv").exists())
         self.assertTrue(Path(self.temp_dir, "second.parquet").exists())
 
+    def test_cli_output_overrides_yaml_dump_path(self):
+        source = self.get_fixture_path("sample-min.csv")
+        yaml_target = Path(self.temp_dir, "yaml.csv")
+        cli_target = Path(self.temp_dir, "cli.csv")
+        path = self.write_run_document(
+            "override.yaml",
+            f"""
+            version: 1
+            stages:
+              - name: input
+                steps:
+                  - load: {{paths: ["{source}"]}}
+                  - head: {{number: 1}}
+                  - dump: {{output: {yaml_target}}}
+            """,
+        )
+        without = self.run_run_document(path)
+        self.assertEqual(without.returncode, 0, without.stderr)
+        self.assertTrue(yaml_target.exists())
+        yaml_target.unlink()
+
+        result = self.run_cli(["run", path, "--output", str(cli_target)])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(cli_target.exists())
+        self.assertFalse(yaml_target.exists())
+        self.assertIn("RecordNumber", cli_target.read_text())
+
     def test_cli_output_is_relative_to_caller(self):
         source = self.get_fixture_path("sample-min.csv")
         path = self.write_run_document(

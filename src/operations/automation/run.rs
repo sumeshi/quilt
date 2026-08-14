@@ -729,6 +729,39 @@ stages:
     }
 
     #[test]
+    fn cli_output_overrides_yaml_dump_path() {
+        let dir = test_temp_dir("dump-override");
+        let input = dir.join("input.csv");
+        let config = dir.join("run.yaml");
+        let yaml_output = dir.join("yaml.csv");
+        let cli_output = dir.join("cli.csv");
+        std::fs::write(&input, "id\n1\n").unwrap();
+        std::fs::write(
+            &config,
+            format!(
+                "version: 1\nstages: [{{name: input, steps: [{{load: {{paths: [{}]}}}}, {{dump: {{output: {}}}}}]}}]\n",
+                input.display(),
+                yaml_output.display()
+            ),
+        )
+        .unwrap();
+        let mut controller = PipelineState::empty(ExecutionResources::new_in(dir.clone()));
+        run(
+            &mut controller,
+            config.to_str().unwrap(),
+            None,
+            Some(cli_output.to_str().unwrap()),
+            &[],
+            false,
+        )
+        .unwrap();
+        assert!(cli_output.exists());
+        assert!(!yaml_output.exists());
+        assert_eq!(std::fs::read_to_string(cli_output).unwrap(), "id\n1\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn yaml_show_plus_cli_output_reuses_one_source_evaluation() {
         let dir = test_temp_dir("output-reuse");
         let input = dir.join("input.csv");

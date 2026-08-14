@@ -47,7 +47,7 @@ pub fn render_command_help(name: &str) -> Option<String> {
                 + "are relative to the run file; --var path overrides are relative to the caller.\n"
                 + "  --check                 Validate schema, parameters, graph, and commands without I/O\n"
                 + "  --var name=value        Override a declared typed parameter (repeatable)\n"
-                + "  --output, -o PATH       Override the final output destination\n"
+                + "  --output, -o PATH       Override the YAML dump path, or write CSV if there is no dump\n"
                 + "  --show-plan STAGE       Print a selected stage plan without evaluating rows\n"
                 + "Parameter placeholders are whole YAML values: {\"$param\": name}; partial interpolation is rejected.\n",
         );
