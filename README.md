@@ -21,16 +21,14 @@ Stage schema example:
 ```yaml
 version: 1
 stages:
-  - name: prepared
-    materialize: auto # auto | always | never
+  - name: errors
     steps:
-      - load: {paths: [input.csv]}
+      - load: {paths: [events.csv]}
+      - grep: {pattern: ERROR}
+      - dump: {output: errors.csv}
 ```
 
-`auto` keeps serial pipelines lazy and materializes once for reusable fan-out,
-reused global barriers, or multiple row-evaluating outputs. `always` forces one managed
-Parquet artifact; `never` allows recomputation. Artifacts are cleaned up after
-success or failure, while `--check` and `--show-plan` create none.
+Workflows can branch, join datasets, reuse intermediate stages, and write multiple outputs.
 
 ## Usage
 ![](https://gist.githubusercontent.com/sumeshi/644af27c8960a9b6be6c7470fe4dca59/raw/2a19fafd4f4075723c731e4a8c8d21c174cf0ffb/qlt.svg)
