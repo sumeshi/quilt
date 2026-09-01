@@ -35,7 +35,8 @@ Workflows can branch, join datasets, reuse intermediate stages, and write multip
 
 ### Getting Help
 
-To see available commands and options, run `qlt` without any arguments:
+To see available commands and basic usage, run `qlt` without arguments or with
+`-h`. For command-specific usage, run `qlt <command> --help`.
 
 ```bash
 $ qlt -h
@@ -145,7 +146,7 @@ Select columns by name, numeric index, or range notation.
 - **Range notation (hyphen)**: `col1-col3` - Select range using hyphen
 - **Range notation (colon)**: `col1:col3` - Select range using colon
 - **Numeric range**: `2:4` - Select 2nd through 4th columns (e.g., col1, col2, col3)
-- **Quoted colon notation**: `"col:1":"col:3"` - For column names containing colons
+- **Quoted colon notation**: `"col:1":"col:3"` - For column names containing colons (preserve the inner quotes when invoking from a shell)
 - **Mixed formats**: `1,col2,4:6` - Combine different selection methods
 
 **Disambiguation rule:** If an exact column name matching `col1-col3` exists, it is selected as-is. Range expansion only occurs when no exact match is found.
@@ -158,7 +159,7 @@ $ qlt load data.csv - select col1:col3                      # Select range using
 $ qlt load data.csv - select 1                              # Select 1st column (datetime)
 $ qlt load data.csv - select 2:4                            # Select 2nd-4th columns (col1, col2, col3)
 $ qlt load data.csv - select 2,4                            # Select 2nd and 4th columns (col1, col3)
-$ qlt load data.csv - select "col:1":"col:3"                # For columns with colons in names
+$ qlt load data.csv - select '"col:1":"col:3"'              # For columns with colons in names
 $ qlt load data.csv - select 1,datetime,3:5                 # Mixed selection methods
 ```
 
@@ -289,6 +290,9 @@ Filter rows where a column matches any of the given values.
 | colname   | str    |         | Column name to filter. Required.                                                     |
 | values    | list   |         | Comma-separated values. Filters rows where the column matches any of these values (OR condition). Required. |
 
+Values are parsed using the selected column's numeric or boolean type. Invalid
+typed values are rejected instead of being silently compared as strings.
+
 ```bash
 $ qlt load data.csv - isin col1 1
 $ qlt load data.csv - isin col1 1,4
@@ -405,6 +409,9 @@ Count duplicate rows, grouping by all columns by default. Results are automatica
 |---|---|---|---|
 | columns   | str | (all columns) | Optional positional column list. Use `col1` or `col1,col2` to group by specific columns only. |
 
+The output column is named `count`; an input grouping column with that name is
+rejected to avoid an ambiguous output schema.
+
 ```bash
 $ qlt load Security.csv - count EventID          # Count by one column
 $ qlt load proxy.csv - count src_ip,dst_ip       # Count by multiple columns
@@ -511,7 +518,9 @@ Time bucketing and aggregation use `bucket`, `count`, and `calc`.
 
 ### Finalizers
 
-Finalizers are used to output or summarize the processed data. They are typically the last command in a chain.
+Finalizers are used to output or summarize the processed data. Once a finalizer
+is reached, only additional finalizers may follow; record-processing commands
+cannot resume afterward. A pipeline may contain only one initializer, first.
 
 #### `partition`
 Splits data into separate CSV files based on unique values in a specified column. Each unique value creates its own file.
@@ -522,6 +531,7 @@ Splits data into separate CSV files based on unique values in a specified column
 | output_directory | str | `./partitions/` | Directory to save partitioned files. Optional - if not specified, creates a `./partitions/` directory. |
 
 The output directory is created if it does not exist and must not already exist.
+Its parent directory must already exist.
 Unsafe filename characters and path separators become `_`; null
 uses `_null`, empty values use `_empty`, reserved names are prefixed with `_`,
 and sanitization collisions receive deterministic `-2`, `-3`, ... suffixes.
@@ -556,7 +566,8 @@ $ qlt load data.csv - calc score --std
 ```
 
 #### `headers`
-Displays the column headers of the current dataset.
+Displays the column headers of the current dataset. The formatted table numbers
+columns from 1, matching numeric indices accepted by `select`.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -576,8 +587,8 @@ Displays summary statistics for each column in the dataset (e.g., count, null_co
 may use memory proportional to the input. Numeric columns report count,
 null_count, mean, sample standard deviation (`ddof=1`), min, linear-interpolated
 25/50/75% quantiles, and max. Strings report min/max; other supported Polars
-dtypes show `-` for unsupported measures. Empty and all-null columns report
-`null`/`-` rather than panicking.
+dtypes show `-` for unsupported or unavailable measures. Empty and all-null
+columns use `-` for unavailable statistics rather than panicking.
 
 This command does not take any arguments or options.
 
@@ -685,14 +696,14 @@ contextual error at evaluation time.
 |---|---|---|---|
 | `load` | CSV/TSV/gzip CSV, same-family JSONL/NDJSON, or Parquet; outputs inferred/preserved columns | Missing files, mixed families, malformed records, and incompatible schemas fail before/at scan | Lazy scan; bounded NDJSON inference (1000 rows by default), `full` scans all records |
 | `select` | Existing names, 1-based indices, and ranges; output contains selected columns in requested order | Missing names, invalid/out-of-range/oversized ranges fail with usage/schema error | Lazy projection; schema-only validation |
-| `isin` | Any column; output preserves schema and matching rows | Nulls do not match string values; empty values produce an empty frame; missing column errors | Lazy filter; schema-only validation |
-| `contains` | String/coercible column plus literal substring; output preserves schema and matching rows | Nulls do not match; missing/non-string columns and invalid options error | Lazy filter; schema-only validation |
+| `isin` | Any column; output preserves schema and matching rows | Numeric/boolean values are parsed to the column type; nulls do not match; empty values produce an empty frame; invalid typed values and missing columns error | Lazy filter; schema-only validation |
+| `contains` | String/coercible column plus literal substring; output preserves schema and matching rows | Values are string-coerced; nulls do not match; missing columns and invalid options error | Lazy filter; schema-only validation |
 | `grep` | Regex over all or named columns; output preserves schema and matching rows | Nulls stringify as non-matches; invalid regex/columns error | Lazy filter; schema-only validation |
 | `sed` | Regex replacement over all or one column; output keeps names (all-column mode may stringify values) | Nulls remain null; invalid regex/column errors | Lazy expression; schema-only validation |
 | `head` | Any dtype; output keeps schema and at most N first rows | N must be non-negative; nulls unchanged | Lazy limit; bounded output evaluation |
 | `tail` | Any dtype; output keeps schema and at most N last rows | N must be non-negative; nulls unchanged | Lazy tail barrier; upstream must be consumed to find final rows |
 | `sort` | Existing sortable columns; output preserves schema and row values | Missing columns error; null order follows Polars | Lazy sort barrier; Polars may maintain input-proportional state |
-| `count` | Optional grouping columns of any supported dtype; output is group columns plus `count` | Nulls form groups; missing columns error | Lazy grouped barrier; Polars observes the complete input |
+| `count` | Optional grouping columns of any supported dtype; output is group columns plus `count` | Nulls form groups; missing columns and a grouping-column name collision with `count` error | Lazy grouped barrier; Polars observes the complete input |
 | `uniq` | Any schema; output removes duplicate rows | Nulls compare using Polars equality semantics | Lazy distinct barrier; Polars may maintain global state |
 | `changetz` | Datetime or parseable string source; output preserves source column after timezone rendering | Nulls remain null; invalid timezone/DST/row values error lazily | Lazy chunk UDF; parsing is per execution chunk |
 | `renamecol` | Existing source name to a new unique name; schema changes only the name | Missing source or destination collision errors | Lazy projection/schema operation |

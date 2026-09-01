@@ -10,7 +10,7 @@ pub fn dumpcache(
     let requested = output_path_opt.map(PathBuf::from).unwrap_or_else(|| {
         PathBuf::from(format!(
             "cache_{}.parquet",
-            chrono::Local::now().format("%Y%m%d_%H%M%S")
+            chrono::Local::now().format("%Y%m%d_%H%M%S_%9f")
         ))
     });
     if requested.as_os_str() == "-" {

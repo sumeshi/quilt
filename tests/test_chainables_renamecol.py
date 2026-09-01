@@ -16,6 +16,11 @@ class TestRenamecol(QuiltTestBase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Error:", result.stderr)
 
+    def test_renamecol_rejects_destination_collision(self):
+        result = self.run_pipeline(['load', str(self.get_fixture_path(self.fixture)), '-', 'renamecol', 'EventId', 'Level', '-', 'show'])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("destination column already exists", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

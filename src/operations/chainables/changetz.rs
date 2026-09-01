@@ -99,6 +99,7 @@ pub fn changetz_with_config(
     let diagnostics = ParserDiagnostics::new();
     Ok(df.clone().with_column(
         col(colname)
+            .cast(DataType::String)
             .map(
                 move |series| {
                     let values = series.str()?.into_iter().enumerate();

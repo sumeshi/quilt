@@ -54,5 +54,12 @@ class TestTimeslice(QuiltTestBase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("+09:00", result.stdout)
 
+    def test_timeslice_preserves_column_matching_temporary_name(self):
+        result = self.run_pipeline(
+            ['load', str(self.get_fixture_path(self.fixture)), '-', 'renamecol', 'TimeCreated', '_qlt_timeslice', '-', 'timeslice', '_qlt_timeslice', '--start', '2016-01-01', '-', 'head', '1', '-', 'select', '_qlt_timeslice', '-', 'show']
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("2016-10-06 01:47:07.5095046", result.stdout)
+
 if __name__ == "__main__":
     unittest.main()

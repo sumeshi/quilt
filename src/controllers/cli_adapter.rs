@@ -5,7 +5,6 @@ use crate::operations::datetime::{
     parse_ambiguous_policy, parse_epoch_unit, parse_nonexistent_policy, AmbiguousPolicy,
     DateTimeConfig, NonexistentPolicy,
 };
-use regex::Regex;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -76,9 +75,18 @@ pub fn parse_typed_commands(argv: &[String]) -> Result<Vec<TypedCommand>, QuiltE
                 .strip_prefix("--")
                 .or_else(|| token.strip_prefix('-').filter(|x| !x.is_empty()))
             {
-                let (key, inline) = flag
-                    .split_once('=')
-                    .map_or((flag, None), |(k, v)| (k, Some(v)));
+                let (key, inline) = if let Some((key, value)) = flag.split_once('=') {
+                    (key, Some(value))
+                } else if !token.starts_with("--") && flag.len() > 1 {
+                    let (short, attached) = flag.split_at(1);
+                    if opt(s, short).is_some_and(|option| option.takes_value) {
+                        (short, Some(attached))
+                    } else {
+                        (flag, None)
+                    }
+                } else {
+                    (flag, None)
+                };
                 if let Some(o) = opt(s, key) {
                     let value = if o.takes_value {
                         if let Some(v) = inline {
@@ -235,45 +243,7 @@ fn split_values(value: &str) -> Result<Vec<String>, QuiltError> {
     }
 }
 pub(crate) fn select_columns_from_input(input: &str) -> Result<Vec<String>, QuiltError> {
-    let re = Regex::new(
-        r"^(?P<p1>[A-Za-z_][A-Za-z_0-9]*)(?P<n1>\d+)(?P<sep>[:-])(?:(?P<p2>[A-Za-z_][A-Za-z_0-9]*)(?P<n2>\d+)|(?P<n3>\d+))$",
-    )
-    .map_err(|e| QuiltError::operation("select parser", e.to_string()))?;
-    let mut columns = Vec::new();
-    for part in input.split(',').map(str::trim).filter(|p| !p.is_empty()) {
-        if let Some(c) = re.captures(part) {
-            let p1 = c.name("p1").map(|x| x.as_str()).unwrap_or("");
-            if let Some(p2) = c.name("p2") {
-                if p1 != p2.as_str() {
-                    return Err(QuiltError::usage(format!(
-                        "Error: Mismatched prefixes in range '{part}'."
-                    )));
-                }
-            }
-            let n1: usize = c
-                .name("n1")
-                .and_then(|x| x.as_str().parse().ok())
-                .ok_or_else(|| QuiltError::usage("Error: Invalid range"))?;
-            let n2: usize = c
-                .name("n2")
-                .or_else(|| c.name("n3"))
-                .and_then(|x| x.as_str().parse().ok())
-                .ok_or_else(|| QuiltError::usage("Error: Invalid range"))?;
-            if n1 > n2 {
-                return Err(QuiltError::usage(format!(
-                    "Error: Invalid range '{part}'. Start number must be <= end number."
-                )));
-            }
-            if c.name("sep").is_some_and(|sep| sep.as_str() == ":") {
-                for number in n1..=n2 {
-                    columns.push(format!("{p1}{number}"));
-                }
-                continue;
-            }
-        }
-        columns.push(part.to_string());
-    }
-    Ok(columns)
+    split_values(input)
 }
 
 fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
@@ -405,22 +375,28 @@ fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
                 columns: val(&raw, "column").map(|v| split_values(&v)).transpose()?,
             }))
         }
-        OperationId::Head => Ok(TypedCommand::Head(NumberArgs {
-            number: val(&raw, "number")
-                .or_else(|| a.first().cloned())
-                .map(|v| v.parse())
-                .transpose()
-                .map_err(|_| QuiltError::usage("Error: head requires a valid number"))?
-                .unwrap_or(5),
-        })),
-        OperationId::Tail => Ok(TypedCommand::Tail(NumberArgs {
-            number: val(&raw, "number")
-                .or_else(|| a.first().cloned())
-                .map(|v| v.parse())
-                .transpose()
-                .map_err(|_| QuiltError::usage("Error: tail requires a valid number"))?
-                .unwrap_or(5),
-        })),
+        OperationId::Head => {
+            args(&raw, 0, Some(1), "head [number]")?;
+            Ok(TypedCommand::Head(NumberArgs {
+                number: val(&raw, "number")
+                    .or_else(|| a.first().cloned())
+                    .map(|v| v.parse())
+                    .transpose()
+                    .map_err(|_| QuiltError::usage("Error: head requires a valid number"))?
+                    .unwrap_or(5),
+            }))
+        }
+        OperationId::Tail => {
+            args(&raw, 0, Some(1), "tail [number]")?;
+            Ok(TypedCommand::Tail(NumberArgs {
+                number: val(&raw, "number")
+                    .or_else(|| a.first().cloned())
+                    .map(|v| v.parse())
+                    .transpose()
+                    .map_err(|_| QuiltError::usage("Error: tail requires a valid number"))?
+                    .unwrap_or(5),
+            }))
+        }
         OperationId::Sort => {
             args(&raw, 1, Some(1), "sort <columns>")?;
             Ok(TypedCommand::Sort(SortArgs {
@@ -428,14 +404,17 @@ fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
                 descending: flag(&raw, "desc"),
             }))
         }
-        OperationId::Count => Ok(TypedCommand::Count(CountArgs {
-            columns: a
-                .iter()
-                .flat_map(|v| v.split(','))
-                .filter(|v| !v.trim().is_empty())
-                .map(|v| v.trim().into())
-                .collect(),
-        })),
+        OperationId::Count => {
+            args(&raw, 0, Some(1), "count [columns]")?;
+            Ok(TypedCommand::Count(CountArgs {
+                columns: a
+                    .iter()
+                    .flat_map(|v| v.split(','))
+                    .filter(|v| !v.trim().is_empty())
+                    .map(|v| v.trim().into())
+                    .collect(),
+            }))
+        }
         OperationId::Uniq => {
             args(&raw, 0, Some(0), "uniq")?;
             Ok(TypedCommand::Uniq(UnitArgs))

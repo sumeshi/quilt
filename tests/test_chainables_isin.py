@@ -27,6 +27,15 @@ class TestIsin(QuiltTestBase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(len(result.stdout.strip().splitlines()), 1)
 
+    def test_isin_uint_and_float_values(self):
+        fixture = str(self.get_fixture_path('cast.csv'))
+        uint_result = self.run_pipeline(['load', fixture, '-', 'cast', 'number', 'uint', '-', 'isin', 'number', '2', '-', 'show'])
+        float_result = self.run_pipeline(['load', fixture, '-', 'cast', 'number', 'float', '-', 'isin', 'number', '2', '-', 'show'])
+        self.assertEqual(uint_result.returncode, 0, uint_result.stderr)
+        self.assertEqual(float_result.returncode, 0, float_result.stderr)
+        self.assertEqual(len(uint_result.stdout.strip().splitlines()), 2)
+        self.assertEqual(len(float_result.stdout.strip().splitlines()), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

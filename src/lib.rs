@@ -311,12 +311,7 @@ mod tests {
         assert!(matches!(
             &commands[0],
             TypedCommand::Select(SelectArgs { columns })
-                if *columns
-                    == vec![
-                        String::from("col1"),
-                        String::from("col2"),
-                        String::from("col3"),
-                    ]
+                if *columns == vec![String::from("col1:col3")]
         ));
         assert!(matches!(
             &commands[1],
@@ -419,14 +414,12 @@ mod tests {
             parse_typed_commands(&["head".into(), "--number=-1".into()]),
             Err(QuiltError::Usage { .. })
         ));
-        assert!(matches!(
-            parse_typed_commands(&["select".into(), "col3:col1".into()]),
-            Err(QuiltError::Usage { .. })
-        ));
-        assert!(matches!(
-            parse_typed_commands(&["select".into(), "col1:other2".into()]),
-            Err(QuiltError::Usage { .. })
-        ));
+        for range in ["col3:col1", "col1:other2"] {
+            assert!(matches!(
+                &parse_typed_commands(&["select".into(), range.into()]).unwrap()[0],
+                TypedCommand::Select(SelectArgs { columns }) if columns == &[range]
+            ));
+        }
     }
 
     #[test]

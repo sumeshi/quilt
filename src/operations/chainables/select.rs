@@ -29,7 +29,7 @@ pub fn select(df: &LazyFrame, colnames: &[String]) -> Result<LazyFrame, QuiltErr
             expanded_colnames.extend(range_cols);
         } else if colname.starts_with('"') && colname.contains(':') && colname.ends_with('"') {
             let inner = &colname[1..colname.len() - 1];
-            if let Some((start_col, end_col)) = inner.split_once(':') {
+            if let Some((start_col, end_col)) = inner.split_once("\":\"") {
                 expanded_colnames.extend(parse_quoted_colon_range(
                     start_col,
                     end_col,
@@ -91,7 +91,9 @@ pub fn parse_hyphen_range(
         .as_str()
         .parse()
         .map_err(|_| {
-            QuiltError::usage(format!("Error: Range number is too large in '{range_str}'"))
+            QuiltError::usage(format!(
+                "Error: Invalid range '{range_str}': number is too large"
+            ))
         })?;
     let (prefix2, num2) = if let Some(p2) = captures.name("p2") {
         (
@@ -102,7 +104,9 @@ pub fn parse_hyphen_range(
                 .as_str()
                 .parse()
                 .map_err(|_| {
-                    QuiltError::usage(format!("Error: Range number is too large in '{range_str}'"))
+                    QuiltError::usage(format!(
+                        "Error: Invalid range '{range_str}': number is too large"
+                    ))
                 })?,
         )
     } else {
@@ -114,7 +118,9 @@ pub fn parse_hyphen_range(
                 .as_str()
                 .parse()
                 .map_err(|_| {
-                    QuiltError::usage(format!("Error: Range number is too large in '{range_str}'"))
+                    QuiltError::usage(format!(
+                        "Error: Invalid range '{range_str}': number is too large"
+                    ))
                 })?,
         )
     };
@@ -186,8 +192,14 @@ pub fn parse_colon_range(
     let (start_col, end_col) = range_str
         .split_once(':')
         .ok_or_else(|| QuiltError::usage(format!("Error: Invalid range '{range_str}'")))?;
-    let start_col = start_col.trim();
-    let end_col = end_col.trim();
+    parse_named_range(start_col.trim(), end_col.trim(), available_columns)
+}
+
+fn parse_named_range(
+    start_col: &str,
+    end_col: &str,
+    available_columns: &[String],
+) -> Result<Vec<String>, QuiltError> {
     let start_idx = available_columns.iter().position(|c| c == start_col);
     let end_idx = available_columns.iter().position(|c| c == end_col);
     match (start_idx, end_idx) {
@@ -215,5 +227,28 @@ pub fn parse_quoted_colon_range(
     end_col: &str,
     available_columns: &[String],
 ) -> Result<Vec<String>, QuiltError> {
-    parse_colon_range(&format!("{start_col}:{end_col}"), available_columns)
+    parse_named_range(start_col, end_col, available_columns)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quoted_colon_range_preserves_colons_in_column_names() {
+        let frame = df!(
+            "col:1" => &["a"],
+            "middle" => &["b"],
+            "col:3" => &["c"],
+        )
+        .unwrap()
+        .lazy();
+
+        let selected = select(&frame, &[r#""col:1":"col:3""#.to_string()])
+            .unwrap()
+            .collect()
+            .unwrap();
+
+        assert_eq!(selected.get_column_names(), &["col:1", "middle", "col:3"]);
+    }
 }

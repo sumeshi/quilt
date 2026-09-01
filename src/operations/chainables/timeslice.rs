@@ -39,6 +39,11 @@ pub fn timeslice(
 
     // Start with the original dataframe
     let mut result_df = df.clone();
+    let mut temporary_column = "_qlt_timeslice".to_string();
+    while schema.get(&temporary_column).is_some() {
+        temporary_column.push('_');
+    }
+    let temporary_output_name = temporary_column.clone();
     let time_column_name = time_column.to_string();
     let time_col_expr = col(time_column)
         .cast(DataType::String)
@@ -68,7 +73,7 @@ pub fn timeslice(
                         .collect::<PolarsResult<Vec<_>>>()?;
                     Ok(Some(
                         StringChunked::from_iter_options(
-                            "_temp_datetime".into(),
+                            temporary_output_name.clone().into(),
                             converted.into_iter(),
                         )
                         .into_series()
@@ -78,7 +83,7 @@ pub fn timeslice(
             },
             GetOutput::from_type(DataType::String),
         )
-        .alias("_temp_datetime");
+        .alias(&temporary_column);
 
     // Add the converted datetime column temporarily
     result_df = result_df.with_columns([time_col_expr]);
@@ -104,7 +109,7 @@ pub fn timeslice(
                 )
             })?;
 
-        let start_filter = col("_temp_datetime").gt_eq(lit(start_datetime));
+        let start_filter = col(&temporary_column).gt_eq(lit(start_datetime));
         result_df = result_df.filter(start_filter);
     }
 
@@ -129,7 +134,7 @@ pub fn timeslice(
                 )
             })?;
 
-        let end_filter = col("_temp_datetime").lt_eq(lit(end_datetime));
+        let end_filter = col(&temporary_column).lt_eq(lit(end_datetime));
         result_df = result_df.filter(end_filter);
     }
 

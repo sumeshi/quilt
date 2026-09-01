@@ -20,7 +20,10 @@ pub fn headers(df: &LazyFrame, plain: bool) -> Result<FinalizerResult, QuiltErro
         table.load_preset(UTF8_FULL);
         table.set_header(vec!["#", "Column Name"]);
         for (index, name) in names.iter().enumerate() {
-            table.add_row(vec![Cell::new(format!("{:02}", index + 1)), Cell::new(name)]);
+            table.add_row(vec![
+                Cell::new(format!("{:02}", index + 1)),
+                Cell::new(name),
+            ]);
         }
         Ok(FinalizerResult::Stdout(format!("{table}\n")))
     }

@@ -57,6 +57,18 @@ class TestCommandSurface(QuiltTestBase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Unknown option", result.stderr)
 
+    def test_pipeline_rejects_record_commands_after_finalizer(self):
+        fixture = str(self.get_fixture_path('sample-min.csv'))
+        result = self.run_pipeline(['load', fixture, '-', 'headers', '-', 'head', '1'])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot follow a finalizer", result.stderr)
+
+    def test_pipeline_rejects_second_initializer(self):
+        fixture = str(self.get_fixture_path('sample-min.csv'))
+        result = self.run_pipeline(['load', fixture, '-', 'load', fixture, '-', 'show'])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must be the first", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

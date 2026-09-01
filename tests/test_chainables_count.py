@@ -29,6 +29,16 @@ class TestCount(QuiltTestBase):
         self.assertEqual(lines[0], "EventId,Level,count")
         self.assertEqual(set(lines[1:]), {"4688,LogAlways,14", "4689,LogAlways,14", "1102,Info,1"})
 
+    def test_count_rejects_extra_positional_argument(self):
+        result = self.run_pipeline(['load', str(self.get_fixture_path(self.fixture)), '-', 'count', 'EventId', 'Level', '-', 'show'])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("too many arguments", result.stderr)
+
+    def test_count_rejects_output_name_collision(self):
+        result = self.run_pipeline(['load', str(self.get_fixture_path(self.fixture)), '-', 'renamecol', 'EventId', 'count', '-', 'count', 'count', '-', 'show'])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("conflicts with output column", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

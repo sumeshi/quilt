@@ -74,6 +74,28 @@ impl CommandExecutor {
     }
 
     pub fn execute_plan(&mut self, commands: &[TypedCommand]) -> Result<CommandResult, QuiltError> {
+        let mut finalizer_seen = false;
+        for (index, command) in commands.iter().enumerate() {
+            if command.category() == CommandCategory::Automation && commands.len() != 1 {
+                return Err(QuiltError::usage(
+                    "Error: automation command 'run' cannot be combined with pipeline commands",
+                ));
+            }
+            if index > 0 && command.category() == CommandCategory::Initializer {
+                return Err(QuiltError::usage(format!(
+                    "Error: initializer '{}' must be the first pipeline command",
+                    command.name()
+                )));
+            }
+            if finalizer_seen && command.category() != CommandCategory::Finalizer {
+                return Err(QuiltError::usage(format!(
+                    "Error: command '{}' cannot follow a finalizer",
+                    command.name()
+                )));
+            }
+            finalizer_seen |= command.category() == CommandCategory::Finalizer;
+        }
+
         let mut result = CommandResult::None;
         for command in commands {
             result = self.execute(command)?;

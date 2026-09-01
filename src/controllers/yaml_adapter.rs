@@ -59,7 +59,13 @@ struct YLoad {
     #[serde(rename = "chunk-size")]
     chunk_size: Option<usize>,
     #[serde(rename = "infer-schema-length")]
-    infer_schema_length: Option<String>,
+    infer_schema_length: Option<YInferSchemaLength>,
+}
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum YInferSchemaLength {
+    Number(usize),
+    Text(String),
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -335,12 +341,20 @@ pub fn parse_automation_step(
         OperationId::Load => {
             let a: YLoad = yaml_args(value, name)?;
             let paths = a.paths.map(YamlStrings::into_vec).unwrap_or_default();
-            let infer = match a.infer_schema_length.as_deref() {
+            let infer = match a.infer_schema_length {
                 None => {
                     Some(crate::operations::initializers::load::DEFAULT_NDJSON_INFER_SCHEMA_LENGTH)
                 }
-                Some("full") => None,
-                Some(v) => {
+                Some(YInferSchemaLength::Text(v)) if v.eq_ignore_ascii_case("full") => None,
+                Some(YInferSchemaLength::Number(n)) => {
+                    if n == 0 {
+                        return Err(QuiltError::usage(
+                            "Error: infer-schema-length must be positive",
+                        ));
+                    }
+                    Some(n)
+                }
+                Some(YInferSchemaLength::Text(v)) => {
                     let n = v
                         .parse()
                         .map_err(|_| QuiltError::usage("Error: invalid infer-schema-length"))?;

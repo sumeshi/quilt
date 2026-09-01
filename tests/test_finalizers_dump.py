@@ -116,6 +116,23 @@ class TestDump(QuiltTestBase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("destination directory does not exist", result.stderr)
 
+    def test_dump_accepts_attached_short_option_values(self):
+        output_file = os.path.join(self.temp_dir, "attached.csv")
+        result = self.run_pipeline(
+            ['load', str(self.get_fixture_path(self.fixture)), '-', 'head', '1', '-', 'dump', '-s;', f'-o{output_file}']
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(output_file, "r", encoding="utf-8") as output:
+            self.assertIn(";", output.readline())
+
+    def test_default_output_names_do_not_collide_within_one_second(self):
+        args = ['load', str(self.get_fixture_path(self.fixture)), '-', 'head', '1', '-', 'dump']
+        first = self.run_pipeline(args, cwd=self.temp_dir)
+        second = self.run_pipeline(args, cwd=self.temp_dir)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(len(list(Path(self.temp_dir).glob('dump_*.csv'))), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

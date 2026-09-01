@@ -32,29 +32,40 @@ pub fn isin(df: &LazyFrame, colname: &str, values: &[String]) -> Result<LazyFram
         )
     })?;
 
-    // Build filter expression efficiently using fold instead of manual iteration
-    let filter_expr = if matches!(
-        col_dtype,
-        DataType::Int64 | DataType::Int32 | DataType::Float64 | DataType::Float32
-    ) {
-        // For numeric columns, convert to string and compare
-        values
-            .iter()
-            .map(|val_str| {
-                col(colname)
-                    .cast(DataType::String)
-                    .eq(lit(val_str.as_str()))
+    let comparisons = values
+        .iter()
+        .map(|value| {
+            match col_dtype {
+                DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => value
+                    .parse::<i64>()
+                    .map_err(|_| ())
+                    .map(|parsed| col(colname).cast(DataType::Int64).eq(lit(parsed))),
+                DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => value
+                    .parse::<u64>()
+                    .map_err(|_| ())
+                    .map(|parsed| col(colname).cast(DataType::UInt64).eq(lit(parsed))),
+                DataType::Float32 | DataType::Float64 => value
+                    .parse::<f64>()
+                    .map_err(|_| ())
+                    .map(|parsed| col(colname).cast(DataType::Float64).eq(lit(parsed))),
+                DataType::Boolean => value
+                    .parse::<bool>()
+                    .map_err(|_| ())
+                    .map(|parsed| col(colname).eq(lit(parsed))),
+                DataType::String => Ok(col(colname).eq(lit(value.as_str()))),
+                _ => Ok(col(colname).cast(DataType::String).eq(lit(value.as_str()))),
+            }
+            .map_err(|_| {
+                QuiltError::usage(format!(
+                "Error: Value '{value}' is invalid for column '{colname}' with type {col_dtype}"
+            ))
             })
-            .reduce(|acc, expr| acc.or(expr))
-            .unwrap_or_else(|| lit(false))
-    } else {
-        // For string and other types, use direct comparison
-        values
-            .iter()
-            .map(|val_str| col(colname).eq(lit(val_str.as_str())))
-            .reduce(|acc, expr| acc.or(expr))
-            .unwrap_or_else(|| lit(false))
-    };
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let filter_expr = comparisons
+        .into_iter()
+        .reduce(|acc, expr| acc.or(expr))
+        .unwrap_or_else(|| lit(false));
 
     Ok(df.clone().filter(filter_expr))
 }

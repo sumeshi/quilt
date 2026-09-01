@@ -19,6 +19,13 @@ pub fn renamecol(
             "column not found",
         ));
     }
+    if old_colname != new_colname && schema.iter_names().any(|s| s == new_colname) {
+        return Err(QuiltError::schema(
+            "renamecol",
+            Some(new_colname),
+            "destination column already exists",
+        ));
+    }
 
     LogController::debug("Renaming column");
 

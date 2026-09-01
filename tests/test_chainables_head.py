@@ -30,6 +30,16 @@ class TestHead(QuiltTestBase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(len(result.stdout.strip().splitlines()), 30)
 
+    def test_head_large_value_does_not_wrap(self):
+        result = self.run_pipeline(['load', str(self.get_fixture_path(self.fixture)), '-', 'head', '4294967297', '-', 'show'])
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(len(result.stdout.strip().splitlines()), 30)
+
+    def test_head_rejects_extra_argument(self):
+        result = self.run_pipeline(['load', str(self.get_fixture_path(self.fixture)), '-', 'head', '1', '2', '-', 'show'])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("too many arguments", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

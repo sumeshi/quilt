@@ -27,6 +27,13 @@ pub fn count(df: &LazyFrame, columns: &[String]) -> Result<LazyFrame, QuiltError
         }
         columns.to_vec()
     };
+    if group_colnames.iter().any(|column| column == "count") {
+        return Err(QuiltError::schema(
+            "count",
+            Some("count"),
+            "grouping column conflicts with output column 'count'",
+        ));
+    }
 
     Ok(df
         .clone()

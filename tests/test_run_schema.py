@@ -88,6 +88,21 @@ class TestRunSchema(QuiltTestBase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(__import__("os").path.exists(output))
 
+    def test_infer_schema_length_accepts_yaml_integer(self):
+        path = self.write_run_document(
+            "numeric-inference.yaml",
+            """
+            version: 1
+            stages:
+              - name: input
+                steps:
+                  - load: {paths: [missing.ndjson], infer-schema-length: 25}
+                  - headers: {plain: true}
+            """,
+        )
+        result = self.run_cli(["run", "--check", path])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
