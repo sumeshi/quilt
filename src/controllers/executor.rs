@@ -46,8 +46,12 @@ impl CommandExecutor {
         frame: polars::prelude::LazyFrame,
         resources: ExecutionResources,
     ) -> Self {
+        Self::from_pipeline(Pipeline::new(frame, resources))
+    }
+
+    pub fn from_pipeline(pipeline: Pipeline) -> Self {
         Self {
-            controller: PipelineState::Loaded(Box::new(Pipeline::new(frame, resources))),
+            controller: PipelineState::Loaded(Box::new(pipeline)),
             results: Vec::new(),
         }
     }
@@ -128,6 +132,7 @@ impl CommandExecutor {
                     args.no_headers,
                     args.chunk_size,
                     args.infer_schema_length,
+                    args.source_column.as_deref(),
                     resources,
                 )?;
                 self.controller = PipelineState::Loaded(Box::new(loaded));
@@ -211,6 +216,11 @@ impl CommandExecutor {
             }
             TypedCommand::Count(args) => {
                 self.controller.loaded_mut("count")?.count(&args.columns)?;
+            }
+            TypedCommand::TimeInfo(args) => {
+                self.controller
+                    .loaded_mut("timeinfo")?
+                    .timeinfo(&args.column, &args.by)?;
             }
             TypedCommand::Uniq(_) => {
                 self.controller.loaded_mut("uniq")?.uniq()?;
@@ -316,6 +326,8 @@ impl CommandExecutor {
                         .push(operations::automation::run::run_show_plan(
                             &args.config.to_string_lossy(),
                             stage,
+                            Some(args.input_files.clone()),
+                            &args.vars,
                         )?);
                     let result = self.results.last().cloned().ok_or_else(|| {
                         QuiltError::operation(
@@ -336,6 +348,7 @@ impl CommandExecutor {
                     args.output.as_deref(),
                     &args.vars,
                     args.check,
+                    args.stage.as_deref(),
                 )?;
                 if args.check {
                     return Ok(CommandResult::CheckValid {
@@ -390,6 +403,7 @@ mod tests {
             no_headers: false,
             chunk_size: None,
             infer_schema_length: Some(1_000),
+            source_column: None,
         })
     }
 
@@ -472,6 +486,7 @@ mod tests {
                 no_headers: false,
                 chunk_size: None,
                 infer_schema_length: Some(1000),
+                source_column: None,
             }))
             .unwrap_err();
         assert!(matches!(error, QuiltError::Io { .. }));
@@ -586,6 +601,7 @@ mod tests {
                 no_headers: false,
                 chunk_size: None,
                 infer_schema_length: Some(1_000),
+                source_column: None,
             }),
         );
         assert!(result.is_err());

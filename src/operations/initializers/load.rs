@@ -19,7 +19,7 @@ fn has_glob_pattern(path: &Path) -> bool {
     path_str.contains('*') || path_str.contains('?') || path_str.contains('[')
 }
 
-fn expand_input_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>, QuiltError> {
+pub(crate) fn expand_input_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>, QuiltError> {
     let mut expanded_paths = Vec::new();
 
     for path in paths {
@@ -77,12 +77,14 @@ pub fn load(
         no_headers,
         chunk_size,
         Some(DEFAULT_NDJSON_INFER_SCHEMA_LENGTH),
+        None,
         resources,
     )
 }
 
 /// Load input files while retaining a bounded NDJSON schema inference policy.
 /// `infer_schema_length == None` requests Polars' full inference mode.
+#[allow(clippy::too_many_arguments)]
 pub fn load_with_ndjson_inference_with_resources(
     paths: &[PathBuf],
     separator: &str,
@@ -90,12 +92,16 @@ pub fn load_with_ndjson_inference_with_resources(
     no_headers: bool,
     chunk_size: Option<usize>,
     infer_schema_length: Option<usize>,
+    source_column: Option<&str>,
     resources: &ExecutionResources,
 ) -> Result<LazyFrame, QuiltError> {
     if infer_schema_length == Some(0) {
         return Err(QuiltError::usage(
             "NDJSON inference length must be positive or omitted for full inference",
         ));
+    }
+    if source_column.is_some_and(|name| name.trim().is_empty()) {
+        return Err(QuiltError::usage("source column name must not be empty"));
     }
     let expanded_paths = expand_input_paths(paths)?;
 
@@ -131,9 +137,9 @@ pub fn load_with_ndjson_inference_with_resources(
         ));
     }
     if has_parquet {
-        load_parquet_files(&expanded_paths, resources)
+        load_parquet_files(&expanded_paths, source_column, resources)
     } else if has_ndjson {
-        load_ndjson_files(&expanded_paths, infer_schema_length)
+        load_ndjson_files(&expanded_paths, infer_schema_length, source_column)
     } else {
         load_csv_files(
             &expanded_paths,
@@ -141,6 +147,7 @@ pub fn load_with_ndjson_inference_with_resources(
             low_memory,
             no_headers,
             chunk_size,
+            source_column,
             resources,
         )
     }
@@ -149,11 +156,27 @@ pub fn load_with_ndjson_inference_with_resources(
 fn load_ndjson_files(
     paths: &[PathBuf],
     infer_schema_length: Option<usize>,
+    source_column: Option<&str>,
 ) -> Result<LazyFrame, QuiltError> {
     // Polars infers each file without materializing its rows. We merge those metadata
     // schemas so sparse columns present only in later files are retained.
+    let empty_files = paths
+        .iter()
+        .map(|path| {
+            std::fs::metadata(path)
+                .map(|metadata| metadata.is_file() && metadata.len() == 0)
+                .map_err(|error| QuiltError::Io {
+                    operation: "inspect NDJSON".into(),
+                    path: Some(path.display().to_string()),
+                    message: error.to_string(),
+                })
+        })
+        .collect::<Result<Vec<_>, QuiltError>>()?;
     let mut merged_schema = Schema::default();
-    for path in paths {
+    for (path, empty) in paths.iter().zip(&empty_files) {
+        if *empty {
+            continue;
+        }
         let file_schema = LazyJsonLineReader::new(path)
             .with_infer_schema_length(infer_schema_length.and_then(NonZeroUsize::new))
             .finish()
@@ -179,10 +202,26 @@ fn load_ndjson_files(
         }
     }
 
+    if merged_schema.is_empty() {
+        return Err(QuiltError::schema(
+            "load",
+            None::<String>,
+            "cannot infer NDJSON schema from empty inputs",
+        ));
+    }
+
     let schema = Arc::new(merged_schema);
     let frames = paths
         .iter()
-        .map(|path| {
+        .zip(&empty_files)
+        .map(|(path, empty)| {
+            if *empty {
+                return add_source_column(
+                    DataFrame::empty_with_schema(schema.as_ref()).lazy(),
+                    path,
+                    source_column,
+                );
+            }
             LazyJsonLineReader::new(path)
                 .with_schema(Some(schema.clone()))
                 .with_rechunk(true)
@@ -192,6 +231,7 @@ fn load_ndjson_files(
                     path: Some(path.display().to_string()),
                     message: error.to_string(),
                 })
+                .and_then(|frame| add_source_column(frame, path, source_column))
         })
         .collect::<Result<Vec<_>, QuiltError>>()?;
 
@@ -254,16 +294,18 @@ fn merge_ndjson_dtype(left: &DataType, right: &DataType) -> PolarsResult<DataTyp
 
 fn load_parquet_files(
     paths: &[PathBuf],
+    source_column: Option<&str>,
     resources: &ExecutionResources,
 ) -> Result<LazyFrame, QuiltError> {
     if paths.len() == 1 {
         LazyFrame::scan_parquet(&paths[0], ScanArgsParquet::default())
-            .map(|frame| crate::controllers::resources::instrument_evaluation(frame, resources))
             .map_err(|e| QuiltError::Io {
                 operation: "read parquet".into(),
                 path: Some(paths[0].display().to_string()),
                 message: e.to_string(),
             })
+            .and_then(|frame| add_source_column(frame, &paths[0], source_column))
+            .map(|frame| crate::controllers::resources::instrument_evaluation(frame, resources))
     } else {
         let mut dataframes = Vec::new();
         for path in paths {
@@ -275,7 +317,8 @@ fn load_parquet_files(
                 }
             })?;
             dataframes.push(crate::controllers::resources::instrument_evaluation(
-                df, resources,
+                add_source_column(df, path, source_column)?,
+                resources,
             ));
         }
         concat(
@@ -296,8 +339,51 @@ fn load_csv_files(
     low_memory: bool,
     no_headers: bool,
     chunk_size: Option<usize>,
+    source_column: Option<&str>,
     resources: &ExecutionResources,
 ) -> Result<LazyFrame, QuiltError> {
+    if source_column.is_some() {
+        let frames = paths
+            .iter()
+            .map(|path| {
+                let frame = CsvController::new(std::slice::from_ref(path))
+                    .get_dataframe_with_resources(
+                        separator, low_memory, no_headers, chunk_size, resources,
+                    )?;
+                add_source_column(frame, path, source_column)
+            })
+            .collect::<Result<Vec<_>, QuiltError>>()?;
+        return concat(
+            frames,
+            UnionArgs {
+                parallel: true,
+                rechunk: true,
+                ..Default::default()
+            },
+        )
+        .map_err(|error| QuiltError::operation("concatenate CSV files", error.to_string()));
+    }
     CsvController::new(paths)
         .get_dataframe_with_resources(separator, low_memory, no_headers, chunk_size, resources)
+}
+
+fn add_source_column(
+    mut frame: LazyFrame,
+    path: &Path,
+    source_column: Option<&str>,
+) -> Result<LazyFrame, QuiltError> {
+    if let Some(name) = source_column {
+        let schema = frame
+            .collect_schema()
+            .map_err(|error| QuiltError::schema("load", None::<String>, error.to_string()))?;
+        if schema.get(name).is_some() {
+            return Err(QuiltError::schema(
+                "load",
+                Some(name),
+                "source column already exists in input",
+            ));
+        }
+        frame = frame.with_column(lit(path.to_string_lossy().into_owned()).alias(name));
+    }
+    Ok(frame)
 }

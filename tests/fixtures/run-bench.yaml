@@ -1,15 +1,26 @@
 title: Quilt benchmark fixture
-description: Feature-agnostic Quilt pipeline for benchmark_baseline.sh
+description: Shared input reused by summary and file outputs
 version: 1
-author: Codex
+parameters:
+  output:
+    type: path
+    required: true
 stages:
-- name: bench
+- name: input
   steps:
-  - load:
-      paths:
-      - sample.csv
+  - load: {}
   - select:
       columns: EventId,Level
+- name: counts
+  from: input
+  steps:
+  - count:
+      columns: EventId
+  - show: {}
+- name: sample
+  from: input
+  steps:
   - head:
       number: 10
-  - show: {}
+  - dump:
+      output: {"$param": output}

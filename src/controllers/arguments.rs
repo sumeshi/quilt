@@ -19,6 +19,7 @@ pub struct LoadArgs {
     pub no_headers: bool,
     pub chunk_size: Option<usize>,
     pub infer_schema_length: Option<usize>,
+    pub source_column: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectArgs {
@@ -109,6 +110,11 @@ pub struct CountArgs {
     pub columns: Vec<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimeInfoArgs {
+    pub column: String,
+    pub by: Vec<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangeTzArgs {
     pub column: String,
     pub from_tz: String,
@@ -152,4 +158,5 @@ pub struct RunArgs {
     pub vars: Vec<String>,
     pub check: bool,
     pub show_plan: Option<String>,
+    pub stage: Option<String>,
 }

@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Clone)]
 pub struct ExecutionResources {
     registry: Arc<Mutex<Vec<Arc<ManagedTempFile>>>>,
+    _dependencies: Arc<Vec<ExecutionResources>>,
     directory: PathBuf,
     allow_temp_files: bool,
     #[cfg(test)]
@@ -30,10 +31,23 @@ impl ExecutionResources {
     pub fn new_in(directory: PathBuf) -> Self {
         Self {
             registry: Arc::new(Mutex::new(Vec::new())),
+            _dependencies: Arc::new(Vec::new()),
             directory,
             allow_temp_files: true,
             #[cfg(test)]
             evaluation_probe: None,
+        }
+    }
+
+    /// Give a lazy stage its own artifacts while retaining the inputs it still scans.
+    pub(crate) fn fork(&self, dependencies: Vec<Self>) -> Self {
+        Self {
+            registry: Arc::new(Mutex::new(Vec::new())),
+            _dependencies: Arc::new(dependencies),
+            directory: self.directory.clone(),
+            allow_temp_files: self.allow_temp_files,
+            #[cfg(test)]
+            evaluation_probe: self.evaluation_probe.clone(),
         }
     }
 
@@ -230,6 +244,21 @@ mod tests {
         assert!(path_exists(&path));
         drop(clone);
         assert!(!path_exists(&path));
+    }
+
+    #[test]
+    fn lazy_stage_keeps_its_input_files_until_its_last_owner() {
+        let parent = ExecutionResources::new();
+        let reservation = parent.reserve_temp_file("qlt-parent", "tmp").unwrap();
+        let path = reservation.path().to_path_buf();
+        parent.retain_temp_file(reservation).unwrap();
+        let child = parent.fork(vec![parent.clone()]);
+        let clone = child.clone();
+        drop(parent);
+        drop(child);
+        assert!(path.exists());
+        drop(clone);
+        assert!(!path.exists());
     }
 
     #[test]

@@ -127,6 +127,12 @@ const BUCKET: &[OptionSpec] = &[
 ];
 const LOAD: &[OptionSpec] = &[
     OptionSpec {
+        name: "source-column",
+        short: None,
+        takes_value: true,
+        repeated: false,
+    },
+    OptionSpec {
         name: "separator",
         short: Some("s"),
         takes_value: true,
@@ -160,6 +166,12 @@ const LOAD: &[OptionSpec] = &[
 const OUTPUT: &[OptionSpec] = &[OptionSpec {
     name: "output",
     short: Some("o"),
+    takes_value: true,
+    repeated: false,
+}];
+const TIMEINFO: &[OptionSpec] = &[OptionSpec {
+    name: "by",
+    short: None,
     takes_value: true,
     repeated: false,
 }];
@@ -381,6 +393,12 @@ const CALC: &[OptionSpec] = &[
 ];
 const RUN: &[OptionSpec] = &[
     OptionSpec {
+        name: "stage",
+        short: None,
+        takes_value: true,
+        repeated: false,
+    },
+    OptionSpec {
         name: "check",
         short: None,
         takes_value: false,
@@ -451,6 +469,7 @@ define_operations! {
     Tail(NumberArgs) => { name: "tail", category: Chainable, min_args: 0, max_args: Some(1), options: NUMBER, help: "tail [number]" },
     Sort(SortArgs) => { name: "sort", category: Chainable, min_args: 1, max_args: Some(1), options: DESC, help: "sort <columns>" },
     Count(CountArgs) => { name: "count", category: Chainable, min_args: 0, max_args: Some(1), options: NONE, help: "count [columns]" },
+    TimeInfo(TimeInfoArgs) => { name: "timeinfo", category: Chainable, min_args: 1, max_args: Some(1), options: TIMEINFO, help: "timeinfo <datetime-column> [--by columns]" },
     Uniq(UnitArgs) => { name: "uniq", category: Chainable, min_args: 0, max_args: Some(0), options: NONE, help: "uniq" },
     ChangeTz(ChangeTzArgs) => { name: "changetz", category: Chainable, min_args: 1, max_args: Some(1), options: TZ, help: "changetz <column> --from-tz <tz> --to-tz <tz>" },
     RenameCol(RenameColArgs) => { name: "renamecol", category: Chainable, min_args: 2, max_args: Some(2), options: NONE, help: "renamecol <old> <new>" },

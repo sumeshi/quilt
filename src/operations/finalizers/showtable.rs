@@ -109,10 +109,6 @@ fn format_anyvalue(val: &AnyValue) -> String {
         AnyValue::UInt64(i) => i.to_string(),
         AnyValue::Float32(f) => f.to_string(),
         AnyValue::Float64(f) => f.to_string(),
-        AnyValue::Date(d) => d.to_string(),
-        AnyValue::Datetime(dt, _, _) => dt.to_string(),
-        AnyValue::Time(t) => t.to_string(),
-        AnyValue::Duration(d, _) => d.to_string(),
         _ => format!("{val}"),
     }
 }
@@ -127,4 +123,23 @@ fn truncate_display(value: &str) -> String {
         .collect::<String>();
     truncated.push('…');
     truncated
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn temporal_cells_use_human_units() {
+        assert_eq!(format_anyvalue(&AnyValue::Date(0)), "1970-01-01");
+        assert_eq!(
+            format_anyvalue(&AnyValue::Time(3_600_000_000_000)),
+            "01:00:00"
+        );
+        assert_eq!(
+            format_anyvalue(&AnyValue::Duration(60_000_000, TimeUnit::Microseconds)),
+            "1m"
+        );
+        assert_eq!(format_anyvalue(&AnyValue::Null), "null");
+    }
 }

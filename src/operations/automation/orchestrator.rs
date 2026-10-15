@@ -11,7 +11,8 @@ use super::planner;
 use crate::controllers::command_model::{DumpArgs, TypedCommand};
 use crate::controllers::executor::CommandExecutor;
 use crate::controllers::log::LogController;
-use crate::controllers::pipeline::PipelineState;
+use crate::controllers::pipeline::{Pipeline, PipelineState};
+use crate::controllers::resources::ExecutionResources;
 use crate::error::QuiltError;
 use polars::prelude::LazyFrame;
 use serde_yml::Value;
@@ -27,11 +28,23 @@ pub(super) fn run_impl(
     output_path_str: Option<&str>,
     run_vars: &[String],
     check_only: bool,
+    selected_stage: Option<&str>,
 ) -> Result<Vec<crate::operations::finalizers::FinalizerResult>, QuiltError> {
+    let started = std::time::Instant::now();
     let mut diagnostics = DiagnosticPolicy::default();
     let mut finalizer_results = Vec::new();
     let result: Result<Vec<crate::operations::finalizers::FinalizerResult>, QuiltError> = (|| {
-        let config_path = Path::new(config_path_str);
+        let config_path_buf = absolute_path(Path::new(config_path_str))?;
+        let config_path = config_path_buf.as_path();
+        let cli_input_files = cli_input_files
+            .as_ref()
+            .map(|files| {
+                files
+                    .iter()
+                    .map(|path| absolute_path(path))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
         let raw_config_content = fs::read_to_string(config_path).map_err(|error| {
             QuiltError::automation(
                 "run",
@@ -44,60 +57,59 @@ pub(super) fn run_impl(
         })?;
 
         diagnostics = diagnostics::discover_secrets(&raw_config_content, run_vars);
-        let prepared = match document::prepare(document::DocumentInput {
-            raw: &raw_config_content,
-            path: config_path,
-            overrides: run_vars,
-        }) {
-            Ok(prepared) => prepared,
-            Err(parameter_error) => {
-                // A missing/invalid parameter must not hide independent static
-                // stage diagnostics when the raw document remains structurally
-                // deserializable.
-                if let Ok(raw_document) = serde_yml::from_str::<RunDocument>(&raw_config_content) {
-                    if let Err(stage_error) =
-                        document::preflight(&raw_document, &HashMap::new(), config_path)
-                    {
-                        return Err(QuiltError::validation(vec![
-                            parameter_error.to_string(),
-                            stage_error.to_string(),
-                        ]));
-                    }
-                }
-                return Err(parameter_error);
-            }
-        };
+        let prepared = prepare_document(&raw_config_content, config_path, run_vars)?;
         diagnostics = prepared.diagnostics;
         let parameters = prepared.parameters;
         let run_document = prepared.document;
-        document::schema_version(&run_document)?;
+        document::schema_version(&run_document).map_err(|error| {
+            diagnostics
+                .sanitize_step_error(error, diagnostics.sensitive_locations.contains("version"))
+        })?;
         document::preflight(&run_document, &parameters, config_path)
             .map_err(|error| diagnostics.sanitize_preflight_error(error))?;
-        let plan = planner::build(&run_document)?;
+        let mut plan = planner::build(&run_document)?;
+        if let Some(stage) = selected_stage {
+            planner::select(&mut plan, stage)?;
+        }
+        diagnostics.propagate(&plan.order, &plan.stages);
         let execution_order = plan.order;
         let stage_configs = plan.stages;
-        if check_only {
-            return Ok(Vec::new());
-        }
-
         LogController::info(&format!(
             "Executing run document with {} stage entries",
             run_document.stages.len()
         ));
         let mut stage_results: HashMap<String, LazyFrame> = HashMap::new();
-        let cli_output_path = output_path_str.map(|path_str| {
-            let path = Path::new(path_str);
-            if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                config_path
-                    .parent()
-                    .unwrap_or_else(|| Path::new("."))
-                    .join(path)
-            }
-        });
-        let extra_output_consumer =
-            cli_output_path.is_some() && !stage_configs.values().any(stage_has_dump);
+        let mut resources_by_stage = HashMap::<String, ExecutionResources>::new();
+        let mut source_inventories =
+            HashMap::<String, crate::controllers::pipeline::SourceInventory>::new();
+        if output_path_str == Some("-") {
+            return Err(QuiltError::usage(
+                "run --output requires a file path; use a show step for stdout",
+            ));
+        }
+        let cli_output_path = output_path_str
+            .map(|path| absolute_path(Path::new(path)))
+            .transpose()?;
+        let output_stage = if cli_output_path.is_some() {
+            Some(output_stage(
+                &execution_order,
+                &stage_configs,
+                selected_stage,
+            )?)
+        } else {
+            selected_stage.map(str::to_string)
+        };
+        let dump_count = output_stage
+            .as_ref()
+            .and_then(|name| stage_configs.get(name))
+            .map(stage_dump_count)
+            .unwrap_or(0);
+        if cli_output_path.is_some() && dump_count > 1 {
+            return Err(QuiltError::usage(
+                "run --output requires one dump in the output stage; remove extra dumps",
+            ));
+        }
+        let extra_output_consumer = cli_output_path.is_some() && dump_count == 0;
         let materialization = materialization::MaterializationPlan::for_run(
             &execution_order,
             &stage_configs,
@@ -105,13 +117,43 @@ pub(super) fn run_impl(
             Some(&parameters),
             config_path.parent().unwrap_or_else(|| Path::new(".")),
         )?;
-        let mut last_processed_df: Option<LazyFrame> = None;
+        if check_only {
+            return Ok(Vec::new());
+        }
+        let selected = execution_order
+            .iter()
+            .map(|name| diagnostics.sanitize_stage_name(name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let disk = execution_order
+            .iter()
+            .filter(|name| materialization.should_materialize(name))
+            .map(|name| diagnostics.sanitize_stage_name(name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!("run: stages [{selected}]; disk intermediates [{disk}]");
+        let mut last_processed_df: Option<(LazyFrame, ExecutionResources)> = None;
+        let mut last_source_inventory = None;
+        let mut remaining_consumers = HashMap::<String, usize>::new();
+        for stage in stage_configs.values() {
+            for dependency in stage.dependencies() {
+                *remaining_consumers.entry(dependency).or_default() += 1;
+            }
+        }
+        let mut executed = 0usize;
         let mut skipped_stages = HashSet::new();
         let mut dump_overridden = false;
 
-        for (stage_index, stage_name) in execution_order.iter().enumerate() {
+        for stage_name in &execution_order {
             let stage_name = stage_name.clone();
             if skipped_stages.contains(&stage_name) {
+                release_dependencies(
+                    &stage_configs[&stage_name],
+                    &mut remaining_consumers,
+                    &mut stage_results,
+                    &mut resources_by_stage,
+                    &mut source_inventories,
+                );
                 continue;
             }
             let stage_config = match stage_configs.get(&stage_name) {
@@ -145,6 +187,13 @@ pub(super) fn run_impl(
                         skipped_stages.insert(target.clone());
                     }
                 }
+                release_dependencies(
+                    stage_config,
+                    &mut remaining_consumers,
+                    &mut stage_results,
+                    &mut resources_by_stage,
+                    &mut source_inventories,
+                );
                 continue;
             }
 
@@ -160,21 +209,25 @@ pub(super) fn run_impl(
                 cli_input_files: cli_input_files.as_ref(),
                 results: &mut finalizer_results,
                 diagnostics: &diagnostics,
-                resources: controller.resources(),
+                resources: controller.resources().fork(
+                    stage_config
+                        .dependencies()
+                        .iter()
+                        .filter_map(|dependency| resources_by_stage.get(dependency).cloned())
+                        .collect(),
+                ),
+                source_inventory: stage_config
+                    .dependencies()
+                    .first()
+                    .and_then(|source| source_inventories.get(source))
+                    .cloned(),
             };
 
             let mut stage_output_df = match stage_config {
                 StageConfig::Process(process) => {
                     let mut overridden_steps;
                     let steps = if let Some(path) = cli_output_path.as_ref() {
-                        if process_steps_have_dump(&process.steps)
-                            && !later_unskipped_stage_has_dump(
-                                &execution_order,
-                                stage_index,
-                                &skipped_stages,
-                                &stage_configs,
-                            )
-                        {
+                        if output_stage.as_deref() == Some(stage_name.as_str()) && dump_count == 1 {
                             overridden_steps = process.steps.clone();
                             apply_cli_dump_override(&mut overridden_steps, &path.to_string_lossy());
                             dump_overridden = true;
@@ -196,12 +249,22 @@ pub(super) fn run_impl(
                 StageConfig::Join(join) => {
                     executor::execute_join_stage(&stage_name, join, &stage_results)
                         .map(Some)
-                        .map_err(|error| QuiltError::automation(&stage_name, None, error))?
+                        .map_err(|error| {
+                            diagnostics.sanitize_step_error(
+                                QuiltError::automation(&stage_name, None, error),
+                                diagnostics.frame_is_sensitive(&stage_name),
+                            )
+                        })?
                 }
                 StageConfig::Concat(concat) => {
                     executor::execute_concat_stage(&stage_name, concat, &stage_results)
                         .map(Some)
-                        .map_err(|error| QuiltError::automation(&stage_name, None, error))?
+                        .map_err(|error| {
+                            diagnostics.sanitize_step_error(
+                                QuiltError::automation(&stage_name, None, error),
+                                diagnostics.frame_is_sensitive(&stage_name),
+                            )
+                        })?
                 }
                 StageConfig::Branch(branch) => {
                     // A branch node is routing metadata, not a user-visible
@@ -223,7 +286,14 @@ pub(super) fn run_impl(
                                 .select([polars::prelude::len().alias("__qlt_row_count")])
                                 .collect()
                                 .map_err(|error| {
-                                    QuiltError::automation(&stage_name, None, error.to_string())
+                                    diagnostics.sanitize_step_error(
+                                        QuiltError::automation(
+                                            &stage_name,
+                                            None,
+                                            error.to_string(),
+                                        ),
+                                        diagnostics.frame_is_sensitive(&stage_name),
+                                    )
                                 })?
                                 .column("__qlt_row_count")
                                 .and_then(|column| column.u32())
@@ -251,7 +321,7 @@ pub(super) fn run_impl(
                     }
                     .map_err(|error| {
                         let error = QuiltError::automation(&stage_name, None, error);
-                        if diagnostics.stage_is_sensitive(&stage_name) {
+                        if diagnostics.frame_is_sensitive(&stage_name) {
                             diagnostics.sanitize_sensitive_error(error)
                         } else {
                             diagnostics.sanitize_error(error)
@@ -271,30 +341,69 @@ pub(super) fn run_impl(
                 }
             };
 
+            if matches!(
+                stage_config,
+                StageConfig::Process(_) | StageConfig::Branch(_)
+            ) {
+                if let Some(inventory) = process_step_context.source_inventory.take() {
+                    source_inventories.insert(stage_name.clone(), inventory);
+                }
+            }
+            let mut stage_resources = process_step_context.resources.clone();
+            drop(process_step_context);
+
             if materialization.should_materialize(&stage_name)
                 && !matches!(stage_config, StageConfig::Process(_))
             {
                 if let Some(frame) = stage_output_df.take() {
-                    stage_output_df = Some(materialization::materialize_frame(
+                    let (frame, resources) = materialization::materialize_frame(
                         frame,
-                        &controller.resources(),
-                    )?);
+                        &stage_resources,
+                    )
+                    .map_err(|error| {
+                        diagnostics
+                            .sanitize_step_error(error, diagnostics.frame_is_sensitive(&stage_name))
+                    })?;
+                    stage_output_df = Some(frame);
+                    stage_resources = resources;
                 }
             }
             if let Some(df_to_store) = &stage_output_df {
                 stage_results.insert(stage_name.clone(), df_to_store.clone());
-                if !matches!(stage_config, StageConfig::Branch(_)) {
-                    last_processed_df = Some(df_to_store.clone());
+                resources_by_stage.insert(stage_name.clone(), stage_resources.clone());
+                if !matches!(stage_config, StageConfig::Branch(_))
+                    && output_stage.as_ref().is_none_or(|name| name == &stage_name)
+                {
+                    last_processed_df = Some((df_to_store.clone(), stage_resources.clone()));
+                    last_source_inventory = source_inventories.get(&stage_name).cloned();
                 }
                 LogController::debug("Finished processing stage; result stored");
             } else {
                 LogController::warn("Stage did not produce a DataFrame");
             }
+            executed += 1;
+            release_dependencies(
+                stage_config,
+                &mut remaining_consumers,
+                &mut stage_results,
+                &mut resources_by_stage,
+                &mut source_inventories,
+            );
+            if remaining_consumers
+                .get(&stage_name)
+                .copied()
+                .unwrap_or_default()
+                == 0
+            {
+                stage_results.remove(&stage_name);
+                resources_by_stage.remove(&stage_name);
+                source_inventories.remove(&stage_name);
+            }
         }
 
         LogController::info("Run document execution processing finished");
         if let Some(absolute_path) = cli_output_path.filter(|_| !dump_overridden) {
-            if let Some(final_df_to_dump) = last_processed_df {
+            if let Some((final_df_to_dump, resources)) = last_processed_df {
                 LogController::info("Saving final run output");
                 if let Some(parent) = absolute_path.parent() {
                     if !parent.exists() {
@@ -307,17 +416,20 @@ pub(super) fn run_impl(
                         })?;
                     }
                 }
-                let mut output_executor = CommandExecutor::from_frame_with_resources(
-                    final_df_to_dump,
-                    controller.resources(),
-                );
+                let mut output_executor =
+                    CommandExecutor::from_frame_with_resources(final_df_to_dump, resources);
                 output_executor
                     .execute(&TypedCommand::Dump(DumpArgs {
                         output: Some(absolute_path.to_string_lossy().into_owned()),
                         separator: ',',
                     }))
                     .map_err(|error| {
-                        QuiltError::automation_with_source("run", Some("output".into()), error)
+                        diagnostics.sanitize_step_error(
+                            QuiltError::automation_with_source("run", Some("output".into()), error),
+                            output_stage
+                                .as_ref()
+                                .is_some_and(|name| diagnostics.frame_is_sensitive(name)),
+                        )
                     })?;
                 finalizer_results.extend(output_executor.finalizer_results().iter().cloned());
             } else {
@@ -326,46 +438,191 @@ pub(super) fn run_impl(
                 );
             }
         } else if output_path_str.is_none() {
-            if let Some(final_df_state) = last_processed_df {
-                controller.replace_with_frame(final_df_state);
+            if let Some((final_df_state, resources)) = last_processed_df {
+                *controller = PipelineState::Loaded(Box::new(
+                    Pipeline::new(final_df_state, resources)
+                        .with_source_inventory(last_source_inventory),
+                ));
             }
             LogController::debug(
             "Run document finished. Output handled by YAML finalizer steps or by main CLI flow if no explicit output/show in YAML.",
         );
         }
-        Ok(finalizer_results)
+        eprintln!(
+            "run: completed {executed} stages in {:.3}s; {} results",
+            started.elapsed().as_secs_f64(),
+            finalizer_results.len()
+        );
+        report_completed_files(&finalizer_results, &diagnostics);
+        Ok(finalizer_results.clone())
     })();
-    result.map_err(|error| diagnostics::redact(error, &diagnostics))
+    result.map_err(|error| {
+        report_completed_files(&finalizer_results, &diagnostics);
+        diagnostics::redact(error, &diagnostics)
+    })
+}
+
+fn release_dependencies(
+    stage: &StageConfig,
+    remaining: &mut HashMap<String, usize>,
+    frames: &mut HashMap<String, LazyFrame>,
+    resources: &mut HashMap<String, ExecutionResources>,
+    inventories: &mut HashMap<String, crate::controllers::pipeline::SourceInventory>,
+) {
+    for dependency in stage.dependencies() {
+        if let Some(count) = remaining.get_mut(&dependency) {
+            *count -= 1;
+            if *count == 0 {
+                frames.remove(&dependency);
+                resources.remove(&dependency);
+                inventories.remove(&dependency);
+            }
+        }
+    }
 }
 
 fn step_command_name(step: &Value) -> Option<&str> {
     step.as_mapping()?.keys().next()?.as_str()
 }
 
-fn process_steps_have_dump(steps: &[Value]) -> bool {
-    steps
-        .iter()
-        .any(|step| step_command_name(step) == Some("dump"))
+pub(super) fn is_finalizer(step: &Value) -> bool {
+    step_command_name(step)
+        .and_then(|name| {
+            crate::controllers::command_model::command_specs()
+                .iter()
+                .find(|spec| spec.name == name)
+        })
+        .is_some_and(|spec| {
+            spec.category == crate::controllers::command_model::CommandCategory::Finalizer
+        })
 }
 
-fn stage_has_dump(stage: &StageConfig) -> bool {
+fn stage_dump_count(stage: &StageConfig) -> usize {
     match stage {
-        StageConfig::Process(process) => process_steps_have_dump(&process.steps),
-        _ => false,
+        StageConfig::Process(process) => process
+            .steps
+            .iter()
+            .filter(|step| step_command_name(step) == Some("dump"))
+            .count(),
+        _ => 0,
     }
 }
 
-fn later_unskipped_stage_has_dump(
-    execution_order: &[String],
-    current_index: usize,
-    skipped: &HashSet<String>,
-    configs: &HashMap<String, StageConfig>,
-) -> bool {
-    execution_order
+fn output_stage(
+    order: &[String],
+    stages: &HashMap<String, StageConfig>,
+    selected: Option<&str>,
+) -> Result<String, QuiltError> {
+    if let Some(selected) = selected {
+        return Ok(selected.to_string());
+    }
+    let consumed = stages
+        .values()
+        .flat_map(StageConfig::dependencies)
+        .collect::<HashSet<_>>();
+    let sinks = order
         .iter()
-        .skip(current_index + 1)
-        .filter(|name| !skipped.contains(*name))
-        .any(|name| configs.get(name).is_some_and(stage_has_dump))
+        .filter(|name| {
+            !consumed.contains(*name) && !matches!(stages[*name], StageConfig::Branch(_))
+        })
+        .collect::<Vec<_>>();
+    if sinks.len() != 1 {
+        return Err(QuiltError::usage(
+            "run --output requires one sink stage; select a result with --stage NAME",
+        ));
+    }
+    Ok(sinks[0].clone())
+}
+
+fn absolute_path(path: &Path) -> Result<PathBuf, QuiltError> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(path))
+        .map_err(|error| QuiltError::io("run current directory", None::<String>, error.to_string()))
+}
+
+fn prepare_document(
+    raw: &str,
+    path: &Path,
+    vars: &[String],
+) -> Result<document::PreparedRunDocument, QuiltError> {
+    match document::prepare(document::DocumentInput {
+        raw,
+        path,
+        overrides: vars,
+    }) {
+        Ok(prepared) => Ok(prepared),
+        Err(parameter_error) => {
+            if let Ok(raw_document) = serde_yml::from_str::<RunDocument>(raw) {
+                if let Err(stage_error) = document::preflight(&raw_document, &HashMap::new(), path)
+                {
+                    let mut diagnostics = match parameter_error {
+                        QuiltError::Validation { diagnostics } => diagnostics,
+                        other => vec![other.to_string()],
+                    };
+                    match stage_error {
+                        QuiltError::Validation {
+                            diagnostics: stage_diagnostics,
+                        } => diagnostics.extend(stage_diagnostics),
+                        other => diagnostics.push(other.to_string()),
+                    }
+                    return Err(QuiltError::validation(diagnostics));
+                }
+            }
+            Err(parameter_error)
+        }
+    }
+}
+
+fn report_completed_files(
+    results: &[crate::operations::finalizers::FinalizerResult],
+    diagnostics: &DiagnosticPolicy,
+) {
+    use crate::operations::finalizers::FinalizerResult;
+    for result in results {
+        let paths = match result {
+            FinalizerResult::File(path) => std::slice::from_ref(path),
+            FinalizerResult::Files(paths) => paths.as_slice(),
+            _ => continue,
+        };
+        for path in paths {
+            eprintln!(
+                "run: completed file {}",
+                if diagnostics.has_sensitive_output() {
+                    "<redacted>".to_string()
+                } else {
+                    diagnostics.sanitize(path.display().to_string())
+                }
+            );
+        }
+    }
+}
+
+fn stage_io_summary(stage: &StageConfig, name: &str, diagnostics: &DiagnosticPolicy) -> String {
+    if diagnostics.frame_is_sensitive(name) {
+        return "I/O=<redacted>".into();
+    }
+    let StageConfig::Process(process) = stage else {
+        return "I/O=[]".into();
+    };
+    process
+        .steps
+        .iter()
+        .filter_map(|step| {
+            let command = step_command_name(step)?;
+            if !matches!(command, "load" | "dump" | "dumpcache" | "partition") {
+                return None;
+            }
+            let value = step.as_mapping()?.values().next()?;
+            Some(format!(
+                "{command}={}",
+                serde_yml::to_string(value).unwrap_or_default().trim()
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn apply_cli_dump_override(steps: &mut [Value], path: &str) {
@@ -397,6 +654,7 @@ pub fn run(
     output_path: Option<&str>,
     variables: &[String],
     check_only: bool,
+    selected_stage: Option<&str>,
 ) -> Result<Vec<crate::operations::finalizers::FinalizerResult>, QuiltError> {
     run_impl(
         controller,
@@ -405,77 +663,113 @@ pub fn run(
         output_path,
         variables,
         check_only,
+        selected_stage,
     )
 }
 
 pub fn run_show_plan(
     config_path: &str,
     stage_name: &str,
+    cli_input_files: Option<Vec<PathBuf>>,
+    variables: &[String],
 ) -> Result<crate::operations::finalizers::FinalizerResult, QuiltError> {
-    run_show_plan_impl(config_path, stage_name)
+    run_show_plan_impl(config_path, stage_name, cli_input_files, variables)
 }
 
 pub(super) fn run_show_plan_impl(
     config_path_str: &str,
     stage_name: &str,
+    cli_input_files: Option<Vec<PathBuf>>,
+    variables: &[String],
 ) -> Result<crate::operations::finalizers::FinalizerResult, QuiltError> {
-    let config_path = Path::new(config_path_str);
-    let raw = fs::read_to_string(config_path)
-        .map_err(|error| QuiltError::automation("run", None, error.to_string()))?;
-    let prepared = document::prepare(document::DocumentInput {
-        raw: &raw,
-        path: config_path,
-        overrides: &[],
-    })?;
-    document::schema_version(&prepared.document)?;
-    document::preflight(&prepared.document, &prepared.parameters, config_path)?;
-    let (stage_order, stages) = planner::collect_stage_configs(&prepared.document.stages)
+    let mut diagnostics = DiagnosticPolicy::default();
+    let result = (|| {
+        let config_path = absolute_path(Path::new(config_path_str))?;
+        let raw = fs::read_to_string(&config_path)
+            .map_err(|error| QuiltError::automation("run", None, error.to_string()))?;
+        diagnostics = diagnostics::discover_secrets(&raw, variables);
+        let prepared = prepare_document(&raw, &config_path, variables)?;
+        diagnostics = prepared.diagnostics;
+        document::schema_version(&prepared.document).map_err(|error| {
+            diagnostics
+                .sanitize_step_error(error, diagnostics.sensitive_locations.contains("version"))
+        })?;
+        document::preflight(&prepared.document, &prepared.parameters, &config_path)
+            .map_err(|error| diagnostics.sanitize_preflight_error(error))?;
+        let mut plan = planner::build(&prepared.document)?;
+        planner::select(&mut plan, stage_name)?;
+        diagnostics.propagate(&plan.order, &plan.stages);
+        let cli_input_files = cli_input_files
+            .as_ref()
+            .map(|files| {
+                files
+                    .iter()
+                    .map(|path| absolute_path(path))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
+        let mut context = executor::ExecuteStepContext {
+            config_path: &config_path,
+            cli_input_files: cli_input_files.as_ref(),
+            results: &mut Vec::new(),
+            diagnostics: &diagnostics,
+            resources: crate::controllers::resources::ExecutionResources::new_plan(),
+            source_inventory: None,
+        };
+        let frame = build_plan_stage(
+            stage_name,
+            &plan.stages,
+            &mut HashMap::new(),
+            &mut HashSet::new(),
+            &mut context,
+        )?;
+        let text =
+            match crate::operations::finalizers::showquery::showquery(&frame).map_err(|error| {
+                diagnostics.sanitize_step_error(error, diagnostics.frame_is_sensitive(stage_name))
+            })? {
+                crate::operations::finalizers::FinalizerResult::PlanTable(text) => text,
+                _ => {
+                    return Err(QuiltError::operation(
+                        "run show-plan",
+                        "expected a query plan",
+                    ))
+                }
+            };
+        let decisions = materialization::materialization_decisions_with_output(
+            &plan.order,
+            &plan.stages,
+            false,
+            Some(&prepared.parameters),
+            config_path.parent().unwrap_or_else(|| Path::new(".")),
+        )
         .map_err(|error| QuiltError::automation("run", None, error))?;
-    if !stages.contains_key(stage_name) {
-        return Err(QuiltError::usage(format!(
-            "run stage '{stage_name}' not found"
-        )));
-    }
-    let mut cache = HashMap::new();
-    let mut visiting = HashSet::new();
-    let mut ignored_results = Vec::new();
-    let frame = build_plan_stage(
-        stage_name,
-        &stages,
-        &mut cache,
-        &mut visiting,
-        config_path,
-        &mut ignored_results,
-    )?;
-    let plan = crate::operations::finalizers::showquery::showquery(&frame)?;
-    let decisions = materialization::materialization_decisions_with_output(
-        &stage_order,
-        &stages,
-        false,
-        Some(&prepared.parameters),
-        config_path.parent().unwrap_or_else(|| Path::new(".")),
-    )
-    .map_err(|error| QuiltError::automation("run", None, error))?;
-    match plan {
-        crate::operations::finalizers::FinalizerResult::PlanTable(text) => {
-            let decision = stage_order
-                .iter()
-                .filter_map(|name| decisions.get(name).map(|decision| (name, decision)))
-                .map(|(name, decision)| {
-                    format!(
-                        "{name}: materialize={} ({})",
-                        if decision.materialize { "disk" } else { "lazy" },
-                        decision.reason
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            Ok(crate::operations::finalizers::FinalizerResult::PlanTable(
-                format!("Materialization decisions:\n{decision}\n\n{text}"),
-            ))
-        }
-        other => Ok(other),
-    }
+        let decision = plan
+            .order
+            .iter()
+            .filter_map(|name| decisions.get(name).map(|decision| (name, decision)))
+            .map(|(name, decision)| {
+                format!(
+                    "{}: materialize={} ({}); dependencies=[{}]; {}",
+                    diagnostics.sanitize_stage_name(name),
+                    if decision.materialize { "disk" } else { "lazy" },
+                    decision.reason,
+                    plan.stages[name]
+                        .dependencies()
+                        .iter()
+                        .map(|dependency| diagnostics.sanitize_stage_name(dependency))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    stage_io_summary(&plan.stages[name], name, &diagnostics)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = diagnostics.sanitize_plan(text, stage_name);
+        Ok(crate::operations::finalizers::FinalizerResult::PlanTable(
+            format!("Materialization decisions:\n{decision}\n\n{text}"),
+        ))
+    })();
+    result.map_err(|error| diagnostics::redact(error, &diagnostics))
 }
 
 pub(super) fn build_plan_stage(
@@ -483,8 +777,7 @@ pub(super) fn build_plan_stage(
     stages: &HashMap<String, StageConfig>,
     cache: &mut HashMap<String, LazyFrame>,
     visiting: &mut HashSet<String>,
-    config_path: &Path,
-    results: &mut Vec<crate::operations::finalizers::FinalizerResult>,
+    context: &mut executor::ExecuteStepContext<'_>,
 ) -> Result<LazyFrame, QuiltError> {
     if let Some(frame) = cache.get(name) {
         return Ok(frame.clone());
@@ -504,7 +797,7 @@ pub(super) fn build_plan_stage(
     for dependency in &dependencies {
         inputs.insert(
             dependency.clone(),
-            build_plan_stage(dependency, stages, cache, visiting, config_path, results)?,
+            build_plan_stage(dependency, stages, cache, visiting, context)?,
         );
     }
     let frame = match stage {
@@ -528,31 +821,34 @@ pub(super) fn build_plan_stage(
                 })
                 .cloned()
                 .collect::<Vec<_>>();
-            let diagnostics = DiagnosticPolicy::default();
-            let mut context = executor::ExecuteStepContext {
-                config_path,
-                cli_input_files: None,
-                results,
-                diagnostics: &diagnostics,
-                resources: crate::controllers::resources::ExecutionResources::new_plan(),
-            };
             executor::execute_steps(
                 name,
                 &Value::Sequence(filtered),
                 dependencies
                     .first()
                     .and_then(|dependency| inputs.get(dependency).cloned()),
-                &mut context,
+                context,
                 false,
             )?
             .ok_or_else(|| {
                 QuiltError::usage(format!("run stage '{name}' did not produce a frame"))
             })?
         }
-        StageConfig::Join(join) => executor::execute_join_stage(name, join, &inputs)
-            .map_err(|error| QuiltError::automation(name, None, error))?,
+        StageConfig::Join(join) => {
+            executor::execute_join_stage(name, join, &inputs).map_err(|error| {
+                context.diagnostics.sanitize_step_error(
+                    QuiltError::automation(name, None, error),
+                    context.diagnostics.frame_is_sensitive(name),
+                )
+            })?
+        }
         StageConfig::Concat(concat) => executor::execute_concat_stage(name, concat, &inputs)
-            .map_err(|error| QuiltError::automation(name, None, error))?,
+            .map_err(|error| {
+                context.diagnostics.sanitize_step_error(
+                    QuiltError::automation(name, None, error),
+                    context.diagnostics.frame_is_sensitive(name),
+                )
+            })?,
         StageConfig::Branch(_) => {
             return Err(QuiltError::usage(format!(
                 "run --show-plan cannot inspect dynamic branch stage '{name}'"

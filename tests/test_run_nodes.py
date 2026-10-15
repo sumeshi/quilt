@@ -38,21 +38,26 @@ class TestRunNodes(QuiltTestBase):
         self.assertNotIn("__qlt_run_cross_join_key", result.stdout)
 
     def test_concat_schema_mismatch_fails(self):
+        source = self.get_fixture_path("sample-min.csv")
         run_file = self.write_run_document(
             "concat-error.yaml",
-            """
+            f"""
             version: 1
             stages:
               - name: left
-                steps: [{load: {paths: [tests/fixtures/sample-min.csv]}}]
+                steps: [{{load: {{paths: ["{source}"]}}}}]
               - name: right
-                steps: [{load: {paths: [tests/fixtures/sample-min.tsv]}}]
+                steps: [{{load: {{paths: ["{source}"]}}}}, {{select: {{columns: [EventId]}}}}]
               - name: merged
-                concat: {inputs: [left, right], how: vertical}
+                concat: {{inputs: [left, right], how: vertical}}
+              - name: output
+                from: merged
+                steps: [{{show: null}}]
             """,
         )
         result = self.run_run_document(run_file)
         self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("Error reading", result.stderr)
         self.assertNotIn("panicked", result.stderr.lower())
 
 

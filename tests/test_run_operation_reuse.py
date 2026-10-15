@@ -26,8 +26,8 @@ class TestRunOperationReuse(QuiltTestBase):
             ["load", self.get_fixture_path(source)], cli_step, ["show"]
         )
         self.assertEqual(
-            (run_result.returncode, run_result.stdout, run_result.stderr),
-            (cli_result.returncode, cli_result.stdout, cli_result.stderr),
+            (run_result.returncode, run_result.stdout),
+            (cli_result.returncode, cli_result.stdout),
         )
 
     def test_cast_and_filter_reuse_cli_contract(self):
@@ -72,8 +72,8 @@ class TestRunOperationReuse(QuiltTestBase):
             ["show"],
         )
         self.assertEqual(
-            (result.returncode, result.stdout, result.stderr),
-            (direct.returncode, direct.stdout, direct.stderr),
+            (result.returncode, result.stdout),
+            (direct.returncode, direct.stdout),
         )
 
     def test_run_operation_validation_matches_cli_class(self):

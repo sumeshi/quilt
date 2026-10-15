@@ -2,11 +2,54 @@ import unittest
 import subprocess
 import os
 import json
+import csv
+import gzip
+import io
 import tempfile
+from pathlib import Path
 from test_base import QuiltTestBase
 
 
 class TestLoad(QuiltTestBase):
+    def test_concatenated_gzip_reads_all_members_and_rejects_corrupt_later_member(self):
+        path = Path(self.temp_dir) / "members.csv.gz"
+        path.write_bytes(gzip.compress(b"id\n1\n") + gzip.compress(b"2\n"))
+        result = self.run_pipeline(["load", path], ["show"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["id", "1", "2"])
+        path.write_bytes(gzip.compress(b"id\n1\n") + gzip.compress(b"2\n")[:-5])
+        result = self.run_pipeline(["load", path], ["show"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+
+    def test_source_column_keeps_original_paths_for_supported_inputs(self):
+        root = Path(self.temp_dir)
+        for suffix, contents in (("csv", b"id\n1\n"), ("csv.gz", gzip.compress(b"id\n1\n")), ("jsonl", b'{"id":1}\n')):
+            with self.subTest(suffix=suffix):
+                path = root / f"input.{suffix}"
+                path.write_bytes(contents)
+                result = self.run_pipeline(["load", path, "--source-column", "source"], ["show"])
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(list(csv.DictReader(io.StringIO(result.stdout)))[0]["source"], str(path))
+        parquet = root / "input.parquet"
+        cached = self.run_pipeline(["load", root / "input.csv"], ["dumpcache", "--output", root / "input"])
+        self.assertEqual(cached.returncode, 0, cached.stderr)
+        result = self.run_pipeline(["load", parquet, "--source-column", "source"], ["show"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(list(csv.DictReader(io.StringIO(result.stdout)))[0]["source"], str(parquet))
+
+    def test_source_column_glob_and_collision(self):
+        root = Path(self.temp_dir)
+        (root / "a.csv").write_text("id\n1\n")
+        (root / "b.csv").write_text("id\n2\n")
+        result = self.run_pipeline(["load", root / "*.csv", "--source-column", "source"], ["show"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual({row["source"] for row in csv.DictReader(io.StringIO(result.stdout))}, {str(root / "a.csv"), str(root / "b.csv")})
+        (root / "b.csv").write_text("id,source\n2,original\n")
+        result = self.run_pipeline(["load", root / "*.csv", "--source-column", "source"], ["show"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("source", result.stderr)
+
     def test_load_single_file(self):
         result = self.run_pipeline(['load', str(self.get_fixture_path('sample-min.csv')), '-', 'show'])
         self.assertEqual(result.returncode, 0)

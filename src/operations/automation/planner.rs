@@ -23,6 +23,36 @@ pub(super) fn build(document: &RunDocument) -> Result<ExecutionPlan, QuiltError>
     Ok(ExecutionPlan { order, stages })
 }
 
+/// Keep the selected stage's data and routing ancestors, preserving execution order.
+pub(super) fn select(plan: &mut ExecutionPlan, selected: &str) -> Result<(), QuiltError> {
+    if !plan.stages.contains_key(selected) {
+        return Err(QuiltError::usage(format!(
+            "run stage '{selected}' not found"
+        )));
+    }
+    let dependencies = stage_order_dependencies(&plan.order, &plan.stages)
+        .map_err(|error| QuiltError::automation("run", None, error))?;
+    let mut required = HashSet::new();
+    let mut pending = vec![selected.to_string()];
+    while let Some(name) = pending.pop() {
+        if required.insert(name.clone()) {
+            pending.extend(dependencies[&name].iter().cloned());
+        }
+    }
+    plan.order.retain(|name| required.contains(name));
+    plan.stages.retain(|name, _| required.contains(name));
+    for (name, stage) in &mut plan.stages {
+        if name != selected {
+            if let StageConfig::Process(process) = stage {
+                process
+                    .steps
+                    .retain(|step| !super::orchestrator::is_finalizer(step));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn collect_stage_configs(
     stages: &[StageConfig],
 ) -> Result<(Vec<String>, HashMap<String, StageConfig>), String> {

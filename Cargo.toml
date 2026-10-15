@@ -1,6 +1,6 @@
 [package]
 name = "quilt"
-version = "0.8.1"
+version = "0.9.0"
 edition = "2021"
 description = "A Rust CLI for processing CSV/TSV, JSONL/NDJSON, and Parquet data with composable pipelines and streaming-capable execution."
 authors = ["sumeshi <sum3sh1@protonmail.com>"]
@@ -9,9 +9,7 @@ license = "MIT"
 [[bin]]
 name = "qlt"
 path = "src/main.rs"
-
-[features]
-default = []
+test = false
 
 [dependencies]
 comfy-table = { version = "7.1" }
@@ -41,6 +39,10 @@ rustix = { version = "1.0.7", features = ["fs"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
+
+[profile.dev]
+debug = 0
+incremental = false
 
 [profile.release]
 # Optimize for speed with some size reduction

@@ -261,6 +261,7 @@ fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
             }
             Ok(TypedCommand::Load(LoadArgs {
                 paths: a.iter().map(PathBuf::from).collect(),
+                source_column: val(&raw, "source_column"),
                 separator: separator.chars().next().unwrap_or(','),
                 low_memory: flag(&raw, "low_memory"),
                 no_headers: flag(&raw, "no_headers"),
@@ -415,6 +416,21 @@ fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
                     .collect(),
             }))
         }
+        OperationId::TimeInfo => {
+            args(
+                &raw,
+                1,
+                Some(1),
+                "timeinfo <datetime-column> [--by columns]",
+            )?;
+            Ok(TypedCommand::TimeInfo(TimeInfoArgs {
+                column: a[0].clone(),
+                by: val(&raw, "by")
+                    .map(|value| split_values(&value))
+                    .transpose()?
+                    .unwrap_or_default(),
+            }))
+        }
         OperationId::Uniq => {
             args(&raw, 0, Some(0), "uniq")?;
             Ok(TypedCommand::Uniq(UnitArgs))
@@ -563,6 +579,16 @@ fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
         }
         OperationId::Run => {
             args(&raw, 1, None, "run <config> [files...]")?;
+            if val(&raw, "stage").is_some() && val(&raw, "show_plan").is_some() {
+                return Err(QuiltError::usage(
+                    "run --stage and --show-plan cannot be combined",
+                ));
+            }
+            if flag(&raw, "check") && val(&raw, "show_plan").is_some() {
+                return Err(QuiltError::usage(
+                    "run --check and --show-plan cannot be combined",
+                ));
+            }
             Ok(TypedCommand::Run(RunArgs {
                 config: PathBuf::from(&a[0]),
                 input_files: a[1..].iter().map(PathBuf::from).collect(),
@@ -570,6 +596,7 @@ fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
                 vars: raw.repeated.remove("var").unwrap_or_default(),
                 check: flag(&raw, "check"),
                 show_plan: val(&raw, "show_plan"),
+                stage: val(&raw, "stage"),
             }))
         }
     }

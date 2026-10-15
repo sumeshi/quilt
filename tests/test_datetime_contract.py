@@ -318,7 +318,7 @@ class TestDatetimeContract(QuiltTestBase):
                 "version: 1\nstages:\n"
                 f"- name: first\n  steps:\n  - load:\n      paths: [{data}]\n"
                 "  - cast:\n      column: when\n      type: datetime\n"
-                "  - show: {}\n"
+                "  - dump: {output: first.csv}\n"
                 f"- name: second\n  steps:\n  - load:\n      paths: [{data}]\n"
                 "  - cast:\n      column: when\n      type: datetime\n      input-format: '%d/%b/%Y:%H:%M:%S'\n"
                 "  - show: {}\n"

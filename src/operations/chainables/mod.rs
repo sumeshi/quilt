@@ -15,5 +15,6 @@ pub mod sed;
 pub mod select;
 pub mod sort;
 pub mod tail;
+pub mod timeinfo;
 pub mod timeslice;
 pub mod uniq;

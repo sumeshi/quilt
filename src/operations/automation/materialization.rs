@@ -25,8 +25,9 @@ pub(super) struct MaterializationPlan {
 pub(super) fn materialize_frame(
     frame: LazyFrame,
     resources: &ExecutionResources,
-) -> Result<LazyFrame, QuiltError> {
-    let mut reservation = resources
+) -> Result<(LazyFrame, ExecutionResources), QuiltError> {
+    let owned = resources.fork(Vec::new());
+    let mut reservation = owned
         .reserve_temp_file("qlt-stage-materialized", "parquet")
         .map_err(|error| {
             QuiltError::io(
@@ -50,20 +51,21 @@ pub(super) fn materialize_frame(
         .map_err(|error| QuiltError::operation("materialize stage", error.to_string()))?;
     polars::prelude::collect_all([sink])
         .map_err(|error| QuiltError::operation("materialize stage", error.to_string()))?;
-    resources.retain_temp_file(reservation).map_err(|error| {
+    owned.retain_temp_file(reservation).map_err(|error| {
         QuiltError::io(
             "retain stage materialization",
             Some(path.display().to_string()),
             error.to_string(),
         )
     })?;
-    LazyFrame::scan_parquet(&path, ScanArgsParquet::default()).map_err(|error| {
+    let frame = LazyFrame::scan_parquet(&path, ScanArgsParquet::default()).map_err(|error| {
         QuiltError::io(
             "scan stage materialization",
             Some(path.display().to_string()),
             error.to_string(),
         )
-    })
+    })?;
+    Ok((frame, owned))
 }
 
 fn stage_materialize_policy(stage: &StageConfig) -> MaterializePolicy {
@@ -73,18 +75,6 @@ fn stage_materialize_policy(stage: &StageConfig) -> MaterializePolicy {
         StageConfig::Concat(stage) => stage.materialize,
         StageConfig::Branch(stage) => stage.materialize,
     }
-}
-
-fn stage_has_global_barrier(stage: &StageConfig) -> bool {
-    let StageConfig::Process(process) = stage else {
-        return false;
-    };
-    process.steps.iter().any(|step| {
-        step.as_mapping()
-            .and_then(|mapping| mapping.keys().next())
-            .and_then(Value::as_str)
-            .is_some_and(|name| matches!(name, "sort" | "uniq" | "count" | "stats" | "tail"))
-    })
 }
 
 #[cfg(test)]
@@ -178,18 +168,14 @@ pub(super) fn materialization_decisions_with_output(
                 StageConfig::Process(process) => process
                     .steps
                     .iter()
-                    .filter_map(|step| step.as_mapping()?.keys().next()?.as_str())
-                    .filter(|name| {
-                        matches!(
-                            *name,
-                            "show"
-                                | "showtable"
-                                | "stats"
-                                | "dump"
-                                | "dumpcache"
-                                | "partition"
-                                | "calc"
-                        )
+                    .filter(|step| {
+                        super::orchestrator::is_finalizer(step)
+                            && !matches!(
+                                step.as_mapping()
+                                    .and_then(|mapping| mapping.keys().next())
+                                    .and_then(Value::as_str),
+                                Some("headers" | "showquery")
+                            )
                     })
                     .count(),
                 _ => 0,
@@ -200,15 +186,14 @@ pub(super) fn materialization_decisions_with_output(
                 && !matches!(stage, StageConfig::Branch(_));
             let effective_consumers = downstream_count + finalizer_count + usize::from(has_output);
             let has_reuse = effective_consumers > 1;
-            let auto_reason = if has_reuse && stage_has_global_barrier(stage) {
-                "auto:global-barrier"
-            } else if downstream_count > 1 || (downstream_count > 0 && finalizer_count > 0) {
-                "auto:fan-out"
-            } else if finalizer_count > 1 {
-                "auto:multiple-finalizers"
-            } else {
-                "auto:serial-lazy"
-            };
+            let auto_reason =
+                if downstream_count > 1 || (downstream_count > 0 && finalizer_count > 0) {
+                    "auto:fan-out"
+                } else if has_reuse {
+                    "auto:multiple-finalizers"
+                } else {
+                    "auto:serial-lazy"
+                };
             let (materialize, reason) = match policy {
                 MaterializePolicy::Always => (true, "policy=always"),
                 MaterializePolicy::Never => (false, "policy=never"),

@@ -8,6 +8,7 @@ use std::collections::HashSet;
 #[derive(Debug, Clone, Default)]
 pub(super) struct DiagnosticPolicy {
     forms: Vec<String>,
+    sensitive_frames: HashSet<String>,
     pub(super) sensitive_steps: HashSet<(String, usize)>,
     pub(super) sensitive_stages: HashSet<String>,
     pub(super) sensitive_stage_indices: HashSet<usize>,
@@ -39,11 +40,52 @@ impl DiagnosticPolicy {
         forms.dedup();
         Self {
             forms,
+            sensitive_frames: HashSet::new(),
             sensitive_steps: HashSet::new(),
             sensitive_stages: HashSet::new(),
             sensitive_stage_indices: HashSet::new(),
             sensitive_locations: HashSet::new(),
         }
+    }
+    pub(super) fn propagate(
+        &mut self,
+        order: &[String],
+        stages: &std::collections::HashMap<
+            String,
+            crate::operations::automation::model::StageConfig,
+        >,
+    ) {
+        for name in order {
+            if self.stage_is_sensitive(name)
+                || self.sensitive_steps.iter().any(|(stage, _)| stage == name)
+                || stages[name]
+                    .dependencies()
+                    .iter()
+                    .any(|dependency| self.frame_is_sensitive(dependency))
+            {
+                self.sensitive_frames.insert(name.clone());
+            }
+        }
+    }
+    pub(super) fn frame_is_sensitive(&self, stage: &str) -> bool {
+        self.sensitive_frames.contains(stage) || self.stage_is_sensitive(stage)
+    }
+    pub(super) fn sanitize_stage_name(&self, stage: &str) -> String {
+        if self.stage_is_sensitive(stage) {
+            "<redacted>".into()
+        } else {
+            self.sanitize(stage.to_string())
+        }
+    }
+    pub(super) fn sanitize_plan(&self, text: String, stage: &str) -> String {
+        if self.frame_is_sensitive(stage) {
+            "<redacted query plan>".into()
+        } else {
+            self.sanitize(text)
+        }
+    }
+    pub(super) fn has_sensitive_output(&self) -> bool {
+        !self.sensitive_locations.is_empty()
     }
     pub(super) fn sanitize(&self, mut text: String) -> String {
         for form in &self.forms {
@@ -66,14 +108,14 @@ impl DiagnosticPolicy {
                 operation, column, ..
             } => QuiltError::Schema {
                 operation,
-                column,
+                column: column.map(|_| "<redacted>".into()),
                 message: "<redacted diagnostic>".into(),
             },
             QuiltError::Conversion {
                 operation, column, ..
             } => QuiltError::Conversion {
                 operation,
-                column,
+                column: column.map(|_| "<redacted>".into()),
                 message: "<redacted diagnostic>".into(),
             },
             QuiltError::Io { operation, .. } => QuiltError::Io {
@@ -95,7 +137,7 @@ impl DiagnosticPolicy {
                 source,
                 ..
             } => QuiltError::Automation {
-                stage,
+                stage: self.sanitize_stage_name(&stage),
                 step,
                 message: "<redacted diagnostic>".into(),
                 source: source.map(|source| Box::new(self.sanitize_sensitive_error(*source))),
@@ -170,7 +212,7 @@ impl DiagnosticPolicy {
         }
     }
     pub(super) fn step_is_sensitive(&self, stage: &str, index: usize) -> bool {
-        self.sensitive_steps.contains(&(stage.to_string(), index))
+        self.frame_is_sensitive(stage) || self.sensitive_steps.contains(&(stage.to_string(), index))
     }
     pub(super) fn stage_is_sensitive(&self, stage: &str) -> bool {
         self.sensitive_stages.contains(stage)
@@ -253,6 +295,7 @@ pub(super) fn discover_secrets(raw: &str, overrides: &[String]) -> DiagnosticPol
         return DiagnosticPolicy::default();
     };
     let mut secrets = Vec::new();
+    let mut locations = HashSet::new();
     for (raw_name, raw_declaration) in raw_parameters {
         let Some(name) = raw_name.as_str() else {
             continue;
@@ -267,6 +310,7 @@ pub(super) fn discover_secrets(raw: &str, overrides: &[String]) -> DiagnosticPol
         {
             continue;
         }
+        locations.insert(format!("parameters.{name}"));
         if let Some(default) = mapping
             .get(Value::String("default".into()))
             .and_then(Value::as_str)
@@ -281,9 +325,11 @@ pub(super) fn discover_secrets(raw: &str, overrides: &[String]) -> DiagnosticPol
             }
         }
     }
-    DiagnosticPolicy::from_values(secrets)
+    let mut policy = DiagnosticPolicy::from_values(secrets);
+    policy.sensitive_locations = locations;
+    policy
 }
 
 pub(super) fn redact(error: QuiltError, policy: &DiagnosticPolicy) -> QuiltError {
-    policy.sanitize_error(error)
+    policy.sanitize_preflight_error(error)
 }

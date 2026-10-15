@@ -1,0 +1,35 @@
+version: 1
+parameters:
+  input:
+    type: path
+    required: true
+  time-column:
+    type: string
+    default: TimeCreated
+  start:
+    type: string
+    required: true
+  end:
+    type: string
+    required: true
+  output:
+    type: path
+    required: true
+stages:
+  - name: events
+    steps:
+      - load:
+          paths: [{"$param": input}]
+      - cast:
+          column: {"$param": time-column}
+          type: datetime
+          strict: true
+      - timeslice:
+          column: {"$param": time-column}
+          start: {"$param": start}
+          end: {"$param": end}
+  - name: output
+    from: events
+    steps:
+      - dump:
+          output: {"$param": output}

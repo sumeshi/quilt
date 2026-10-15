@@ -1,9 +1,18 @@
 import unittest
+from pathlib import Path
 from test_base import QuiltTestBase
 
 
 class TestStats(QuiltTestBase):
     fixture = "sample-min.csv"
+
+    def test_datetime_min_max_remain_human_readable(self):
+        path = Path(self.temp_dir) / "times.csv"
+        path.write_text("when\n2026-10-15T12:34:56Z\n2026-10-14T01:02:03Z\n")
+        result = self.run_pipeline(["load", path], ["cast", "when", "datetime", "--timezone", "UTC"], ["stats"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("2026-10-14 01:02:03 UTC", result.stdout)
+        self.assertIn("2026-10-15 12:34:56 UTC", result.stdout)
 
     def test_stats_basic(self):
         result = self.run_pipeline(['load', str(self.get_fixture_path(self.fixture)), '-', 'stats'])

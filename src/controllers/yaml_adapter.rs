@@ -51,6 +51,8 @@ impl YamlValues {
 #[serde(deny_unknown_fields)]
 struct YLoad {
     paths: Option<YamlStrings>,
+    #[serde(rename = "source-column")]
+    source_column: Option<String>,
     separator: Option<String>,
     #[serde(rename = "low-memory", default)]
     low_memory: bool,
@@ -368,6 +370,7 @@ pub fn parse_automation_step(
             };
             Ok(TypedCommand::Load(LoadArgs {
                 paths: paths.into_iter().map(PathBuf::from).collect(),
+                source_column: a.source_column,
                 separator: separator(a.separator)?,
                 low_memory: a.low_memory,
                 no_headers: a.no_headers,
@@ -399,6 +402,27 @@ pub fn parse_automation_step(
             let a: X = yaml_args(value, name)?;
             Ok(TypedCommand::Count(CountArgs {
                 columns: a.columns.map(YamlStrings::into_vec).unwrap_or_default(),
+            }))
+        }
+        OperationId::TimeInfo => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct X {
+                column: String,
+                by: Option<YamlStrings>,
+            }
+            let a: X = yaml_args(value, name)?;
+            Ok(TypedCommand::TimeInfo(TimeInfoArgs {
+                column: a.column,
+                by: a
+                    .by
+                    .map(|value| {
+                        crate::controllers::cli_adapter::select_columns_from_input(
+                            &value.into_vec().join(","),
+                        )
+                    })
+                    .transpose()?
+                    .unwrap_or_default(),
             }))
         }
         OperationId::Cast => {

@@ -192,7 +192,7 @@ impl CsvController {
         chunk_size: Option<usize>,
         resources: &ExecutionResources,
     ) -> Result<LazyFrame, QuiltError> {
-        use flate2::read::GzDecoder;
+        use flate2::read::MultiGzDecoder;
         use std::io::{BufReader, BufWriter, Read};
 
         if !resources.temp_files_enabled() {
@@ -217,7 +217,7 @@ impl CsvController {
                 message: e.to_string(),
             })?;
 
-        let mut gz_decoder = GzDecoder::new(BufReader::new(source));
+        let mut gz_decoder = MultiGzDecoder::new(BufReader::new(source));
         let temp_path = reservation.path().to_path_buf();
         let Some(spool_file) = reservation.file_mut() else {
             return Err(QuiltError::Io {

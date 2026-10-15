@@ -30,12 +30,13 @@ class TestRunSecretDiagnostics(QuiltTestBase):
                 steps: [{{load: {{paths: [{{"$param": input}}]}}}}]
             """,
         )
-        result = self.run_cli(
-            ["run", path, "--var", f"input={secret}"], env=self.debug_env()
-        )
-        self.assertNotEqual(result.returncode, 0)
-        self.assert_clean(result, secret)
-        self.assertIn("load", result.stderr.lower())
+        for options in ([], ["--show-plan", "input"]):
+            result = self.run_cli(
+                ["run", path, "--var", f"input={secret}"] + options, env=self.debug_env()
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assert_clean(result, secret)
+            self.assertIn("load", result.stderr.lower())
 
     def test_secret_string_is_absent_from_filter_and_sed_debug_logs(self):
         secret = "private-pattern-encoded-quoted"
@@ -297,6 +298,99 @@ class TestRunSecretDiagnostics(QuiltTestBase):
             "ignorecase=true",
         ):
             self.assertNotIn(representation, combined)
+
+    def test_plans_redact_short_secret_scalars_and_downstream_errors(self):
+        source = Path(self.temp_dir, "plan.csv")
+        source.write_text("value\nx\n")
+        for secret in ("s", "private-query-literal"):
+            with self.subTest(secret=secret):
+                path = self.write_run_document(
+                    "secret-plan.yaml",
+                    f"""
+                    version: 1
+                    parameters:
+                      replacement: {{type: string, required: true, secret: true}}
+                    stages:
+                      - name: input
+                        steps:
+                          - load: {{paths: ["{source}"]}}
+                          - sed: {{column: value, pattern: x, replacement: {{"$param": replacement}}}}
+                      - name: query
+                        from: input
+                        steps: [{{showquery: null}}]
+                    """,
+                )
+                for options in (["--show-plan", "input"], []):
+                    result = self.run_cli(["run", path, "--var", f"replacement={secret}"] + options)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("<redacted query plan>", result.stdout)
+                    self.assertNotIn(f'"{secret}"', result.stdout)
+                    if len(secret) > 1:
+                        self.assert_clean(result, secret)
+
+    def test_integer_and_boolean_secret_provenance_redacts_plans(self):
+        source = self.get_fixture_path("sample-min.csv")
+        path = self.write_run_document(
+            "secret-scalar-plan.yaml",
+            f"""
+            version: 1
+            parameters:
+              limit: {{type: int, required: true, secret: true}}
+              insensitive: {{type: bool, required: true, secret: true}}
+            stages:
+              - name: input
+                steps:
+                  - load: {{paths: ["{source}"]}}
+                  - head: {{number: {{"$param": limit}}}}
+                  - contains: {{column: Level, pattern: info, ignore-case: {{"$param": insensitive}}}}
+                  - showquery: null
+            """,
+        )
+        for options in ([], ["--show-plan", "input"]):
+            result = self.run_cli(["run", path, "--var", "limit=1", "--var", "insensitive=true"] + options)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("<redacted query plan>", result.stdout)
+            self.assertNotIn("true", result.stdout)
+            self.assertNotIn("SLICE", result.stdout.upper())
+
+    def test_short_secret_invalid_default_is_redacted_in_multiple_errors(self):
+        path = self.write_run_document(
+            "secret-invalid-default.yaml",
+            """
+            version: 1
+            parameters:
+              a: {type: int, default: s, secret: true}
+              z: {type: int, required: true}
+            stages:
+              - name: input
+                steps: [{head: {number: nope}}]
+            """,
+        )
+        for options in (["--check"], ["--show-plan", "input"]):
+            result = self.run_cli(["run", path] + options)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn('String("s")', result.stderr)
+            self.assertIn("<redacted diagnostic>", result.stderr)
+            self.assertIn("Missing required parameter 'z'", result.stderr)
+            self.assertIn("valid number", result.stderr)
+
+    def test_show_plan_preparation_errors_redact_secret_values(self):
+        secret = "private-plan-secret"
+        path = self.write_run_document(
+            "secret-invalid-plan.yaml",
+            """
+            version: 1
+            parameters:
+              name: {type: string, required: true, secret: true}
+            stages:
+              - name: {"$param": name}
+                from: missing
+                steps: []
+            """,
+        )
+        result = self.run_cli(["run", path, "--show-plan", secret, "--var", f"name={secret}"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assert_clean(result, secret)
 
     def test_secret_stage_name_is_redacted_in_runtime_error_context(self):
         secret_stage = "stage-name-secret-unique"

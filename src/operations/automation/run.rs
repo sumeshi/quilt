@@ -10,7 +10,7 @@ use crate::controllers::pipeline::PipelineState;
 #[cfg(test)]
 use crate::error::QuiltError;
 #[cfg(test)]
-use polars::prelude::LazyFrame;
+use polars::prelude::{IntoLazy, LazyFrame};
 #[cfg(test)]
 use serde_yml::Value;
 #[cfg(test)]
@@ -498,6 +498,7 @@ stages:
                 None,
                 &[],
                 false,
+                None,
             )
             .unwrap_err();
             let rendered = error.to_string();
@@ -596,6 +597,7 @@ stages:
             None,
             &[],
             false,
+            None,
         )
         .unwrap();
         assert_eq!(probe.load(Ordering::SeqCst), 1);
@@ -605,8 +607,8 @@ stages:
         std::fs::write(
             &config,
             format!(
-                "version: 1\nstages:\n  - name: input\n    materialize: never\n    steps: [{{load: {{paths: [{}]}}}}]\n  - name: left\n    from: input\n    steps: [{{select: {{columns: [id]}}}}, {{show: {{}}}}]\n  - name: right\n    from: input\n    steps: [{{select: {{columns: [value]}}}}, {{show: {{}}}}]\n",
-                input.display()
+                "version: 1\nstages:\n  - name: input\n    materialize: never\n    steps: [{{load: {{paths: [{}]}}}}]\n  - name: left\n    from: input\n    steps: [{{select: {{columns: [id]}}}}, {{dump: {{output: {}}}}}]\n  - name: right\n    from: input\n    steps: [{{select: {{columns: [value]}}}}, {{dump: {{output: {}}}}}]\n",
+                input.display(), dir.join("left-never.csv").display(), dir.join("right-never.csv").display()
             ),
         )
         .unwrap();
@@ -621,6 +623,7 @@ stages:
             None,
             &[],
             false,
+            None,
         )
         .unwrap();
         assert_eq!(probe.load(Ordering::SeqCst), 2);
@@ -654,9 +657,11 @@ stages:
             None,
             &[],
             false,
+            None,
         )
         .unwrap();
-        assert_eq!(always_probe.tracked_count(), 1);
+        assert_eq!(always_probe.tracked_count(), 0);
+        assert_eq!(controller.resources().tracked_count(), 1);
         write_config("auto");
         let auto_resources = ExecutionResources::new_in(dir.clone());
         let auto_probe = auto_resources.clone();
@@ -668,6 +673,7 @@ stages:
             None,
             &[],
             false,
+            None,
         )
         .unwrap();
         assert_eq!(auto_probe.tracked_count(), 0);
@@ -700,19 +706,38 @@ stages:
             Some(output.to_str().unwrap()),
             &[],
             false,
+            Some("selected"),
         )
         .unwrap();
         assert_eq!(probe.load(Ordering::SeqCst), 1);
         assert_eq!(std::fs::read_to_string(&output).unwrap(), "id\n1\n2\n");
-        let resources = controller.resources();
-        assert_eq!(
-            resources
-                .tracked_paths()
-                .iter()
-                .filter(|path| path.to_string_lossy().contains("qlt-stage-materialized"))
-                .count(),
-            2
-        );
+        assert!(!std::fs::read_dir(&dir).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("qlt-stage-materialized")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn completed_materialization_releases_its_input_owner() {
+        let dir = test_temp_dir("detached-materialization");
+        let base = ExecutionResources::new_in(dir.clone());
+        let (first, first_resources) = materialization::materialize_frame(
+            polars::df!("id" => &[1i64, 2]).unwrap().lazy(),
+            &base,
+        )
+        .unwrap();
+        let first_path = first_resources.tracked_paths()[0].clone();
+        let (second, second_resources) =
+            materialization::materialize_frame(first, &first_resources).unwrap();
+        drop(first_resources);
+        assert!(!first_path.exists());
+        assert_eq!(second.collect().unwrap().height(), 2);
+        let second_path = second_resources.tracked_paths()[0].clone();
+        assert!(second_path.exists());
+        drop(second_resources);
+        assert!(!second_path.exists());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -753,6 +778,7 @@ stages:
             Some(cli_output.to_str().unwrap()),
             &[],
             false,
+            None,
         )
         .unwrap();
         assert!(cli_output.exists());
@@ -787,6 +813,7 @@ stages:
             Some(output.to_str().unwrap()),
             &[],
             false,
+            None,
         )
         .unwrap();
         assert_eq!(probe.load(Ordering::SeqCst), 1);
@@ -843,10 +870,11 @@ stages:
             None,
             &[],
             true,
+            None,
         )
         .unwrap();
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
-        run_show_plan(config.to_str().unwrap(), "input").unwrap();
+        run_show_plan(config.to_str().unwrap(), "input", None, &[]).unwrap();
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
         let _ = std::fs::remove_dir_all(dir);
     }

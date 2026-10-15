@@ -21,18 +21,19 @@ pub(super) struct ExecuteStepContext<'a> {
     pub(super) results: &'a mut Vec<crate::operations::finalizers::FinalizerResult>,
     pub(super) diagnostics: &'a DiagnosticPolicy,
     pub(super) resources: ExecutionResources,
+    pub(super) source_inventory: Option<crate::controllers::pipeline::SourceInventory>,
 }
 
-pub(super) struct ProcessRequest<'a, 'context> {
-    pub stage_name: &'a str,
-    pub steps: &'a [Value],
+pub(super) struct ProcessRequest<'steps, 'a, 'context> {
+    pub stage_name: &'steps str,
+    pub steps: &'steps [Value],
     pub input: Option<LazyFrame>,
     pub context: &'context mut ExecuteStepContext<'a>,
     pub materialize: bool,
 }
 
 pub(super) fn execute_process(
-    request: ProcessRequest<'_, '_>,
+    request: ProcessRequest<'_, '_, '_>,
 ) -> Result<Option<LazyFrame>, QuiltError> {
     execute_steps(
         request.stage_name,
@@ -57,6 +58,17 @@ pub(crate) fn step_error(
             error,
         ),
     }
+}
+
+fn is_stdout_result(result: &crate::operations::finalizers::FinalizerResult) -> bool {
+    use crate::operations::finalizers::FinalizerResult;
+    matches!(
+        result,
+        FinalizerResult::Stdout(_)
+            | FinalizerResult::Scalar(_)
+            | FinalizerResult::PlanTable(_)
+            | FinalizerResult::Artifact(_)
+    )
 }
 
 pub(super) fn execute_steps(
@@ -137,10 +149,16 @@ pub(super) fn execute_steps(
         if materialize && !materialized && matches!(command.category(), CommandCategory::Finalizer)
         {
             if let Some(frame) = stage_output_df.take() {
-                stage_output_df = Some(materialization::materialize_frame(
-                    frame,
-                    &step_context.resources,
-                )?);
+                let (frame, resources) =
+                    materialization::materialize_frame(frame, &step_context.resources).map_err(
+                        |error| {
+                            step_context
+                                .diagnostics
+                                .sanitize_step_error(error, sensitive_step)
+                        },
+                    )?;
+                stage_output_df = Some(frame);
+                step_context.resources = resources;
                 materialized = true;
             }
         }
@@ -176,7 +194,7 @@ pub(super) fn execute_steps(
         }) = &mut command
         {
             let path_buf = PathBuf::from(&*path);
-            if path_buf.is_relative() {
+            if path_buf.is_relative() && path_buf != Path::new("-") {
                 *path = step_context
                     .config_path
                     .parent()
@@ -191,7 +209,7 @@ pub(super) fn execute_steps(
         }) = &mut command
         {
             let path_buf = PathBuf::from(&*path);
-            if path_buf.is_relative() {
+            if path_buf.is_relative() && path_buf != Path::new("-") {
                 *path = step_context
                     .config_path
                     .parent()
@@ -233,7 +251,10 @@ pub(super) fn execute_steps(
         }
 
         let mut executor = if let Some(frame) = stage_output_df.take() {
-            CommandExecutor::from_frame_with_resources(frame, step_context.resources.clone())
+            CommandExecutor::from_pipeline(
+                crate::controllers::pipeline::Pipeline::new(frame, step_context.resources.clone())
+                    .with_source_inventory(step_context.source_inventory.clone()),
+            )
         } else {
             CommandExecutor::new_with_resources(step_context.resources.clone())
         };
@@ -247,20 +268,49 @@ pub(super) fn execute_steps(
                 sensitive_step,
             ));
         }
-        step_context
+        let results = executor
+            .finalizer_results()
+            .iter()
+            .cloned()
+            .map(|result| match result {
+                crate::operations::finalizers::FinalizerResult::PlanTable(text) => {
+                    crate::operations::finalizers::FinalizerResult::PlanTable(
+                        step_context.diagnostics.sanitize_plan(text, stage_name),
+                    )
+                }
+                other => other,
+            })
+            .collect::<Vec<_>>();
+        if step_context
             .results
-            .extend(executor.finalizer_results().iter().cloned());
-        stage_output_df = executor
-            .into_pipeline()
-            .map(|pipeline| pipeline.into_parts().0);
+            .iter()
+            .chain(&results)
+            .filter(|result| is_stdout_result(result))
+            .count()
+            > 1
+        {
+            return Err(QuiltError::usage("run produces multiple stdout results; select one stage with --stage NAME or use file outputs"));
+        }
+        step_context.results.extend(results);
+        stage_output_df = executor.into_pipeline().map(|pipeline| {
+            step_context.source_inventory = pipeline.source_inventory();
+            pipeline.into_parts().0
+        });
     }
 
     if materialize && !materialized {
         if let Some(frame) = stage_output_df.take() {
-            stage_output_df = Some(materialization::materialize_frame(
-                frame,
-                &step_context.resources,
-            )?);
+            let (frame, resources) =
+                materialization::materialize_frame(frame, &step_context.resources).map_err(
+                    |error| {
+                        step_context.diagnostics.sanitize_step_error(
+                            error,
+                            step_context.diagnostics.frame_is_sensitive(stage_name),
+                        )
+                    },
+                )?;
+            stage_output_df = Some(frame);
+            step_context.resources = resources;
         }
     }
     Ok(stage_output_df)
@@ -458,19 +508,11 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn process_boundary_has_explicit_request_context() {
-        assert!(std::mem::size_of::<super::ProcessRequest<'static, 'static>>() > 0);
-    }
-
-    #[test]
-    fn process_preserves_finalizer_order_and_resource_ownership() {
+    fn process_preserves_artifact_resource_ownership() {
         let resources = ExecutionResources::new();
         let mut results = Vec::new();
         let diagnostics = DiagnosticPolicy::default();
-        let steps = vec![
-            serde_yml::from_str::<Value>("{headers: {plain: true}}").unwrap(),
-            serde_yml::from_str::<Value>("{show: {debug: false}}").unwrap(),
-        ];
+        let steps = vec![serde_yml::from_str::<Value>("{show: {debug: false}}").unwrap()];
 
         let output = {
             let mut context = ExecuteStepContext {
@@ -479,6 +521,7 @@ mod tests {
                 results: &mut results,
                 diagnostics: &diagnostics,
                 resources: resources.clone(),
+                source_inventory: None,
             };
             let output = execute_process(ProcessRequest {
                 stage_name: "input",
@@ -496,17 +539,12 @@ mod tests {
             output.is_some(),
             "process must retain the frame after finalizers"
         );
-        assert_eq!(results.len(), 2);
-        assert!(matches!(
-            &results[0],
-            crate::operations::finalizers::FinalizerResult::Stdout(text)
-                if text == "value\n"
-        ));
-        let artifact_path = match &results[1] {
+        assert_eq!(results.len(), 1);
+        let artifact_path = match &results[0] {
             crate::operations::finalizers::FinalizerResult::Artifact(artifact) => {
                 artifact.path().to_path_buf()
             }
-            other => panic!("second finalizer must produce an artifact, got {other:?}"),
+            other => panic!("show must produce an artifact, got {other:?}"),
         };
         assert!(artifact_path.exists());
 

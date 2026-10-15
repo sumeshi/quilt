@@ -127,9 +127,11 @@ pub(super) fn resolve_parameterized_value(
                     .and_then(Value::as_str)
                     .ok_or_else(|| "$param must name a string parameter".to_string())?;
                 if values.get(name).is_some_and(|parameter| parameter.secret) {
-                    if let Some(location) = sensitive_location(path) {
-                        diagnostics.sensitive_locations.insert(location);
-                    }
+                    diagnostics.sensitive_locations.insert(
+                        sensitive_location(path).unwrap_or_else(|| {
+                            path.strip_prefix("run.").unwrap_or(path).to_string()
+                        }),
+                    );
                     if let Some((stage_index, step_index)) = parse_step_location(path) {
                         if let Some(stage) = stage_names.get(&stage_index) {
                             diagnostics
@@ -695,11 +697,12 @@ pub(super) fn prepare(input: DocumentInput<'_>) -> Result<PreparedRunDocument, Q
         }
     }
     let document: RunDocument = serde_yml::from_value(root).map_err(|e| {
-        QuiltError::automation(
+        let error = QuiltError::automation(
             "run",
             None,
             format!("Error parsing run document {}: {e}", config_path.display()),
-        )
+        );
+        diagnostics.sanitize_step_error(error, !diagnostics.sensitive_locations.is_empty())
     })?;
     for stage_index in diagnostics.sensitive_stage_indices.iter().copied() {
         if let Some(stage) = document.stages.get(stage_index) {

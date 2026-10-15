@@ -92,7 +92,7 @@ fn calculate_stats_lazy(
 
         if is_numeric_dtype(dtype) {
             numeric_cols.push(col_name.as_str());
-        } else if dtype == &DataType::String {
+        } else if dtype == &DataType::String || matches!(dtype, DataType::Datetime(_, _)) {
             string_cols.push(col_name.as_str());
         }
     }
@@ -188,7 +188,7 @@ fn calculate_stats_lazy(
             stats_data.p75s.push(format_numeric_stat(
                 stats_df.column(&format!("p75_{col_name}"))?.get(0)?,
             ));
-        } else if dtype == &DataType::String {
+        } else if dtype == &DataType::String || matches!(dtype, DataType::Datetime(_, _)) {
             // Extract string statistics
             stats_data.means.push("-".to_string());
             stats_data.stds.push("-".to_string());

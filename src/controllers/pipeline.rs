@@ -2,7 +2,7 @@ use crate::controllers::resources::ExecutionResources;
 use crate::error::QuiltError;
 use crate::operations::chainables::{
     bucket, cast, changetz, contains, count, delta, extract, flatten, grep, head, isin, parse_size,
-    renamecol, sed, select, sort, tail, timeslice, uniq,
+    renamecol, sed, select, sort, tail, timeinfo, timeslice, uniq,
 };
 use crate::operations::finalizers::{
     calc, dump, dumpcache, headers, partition, show, showquery, showtable, stats,
@@ -17,7 +17,10 @@ use std::path::PathBuf;
 pub struct Pipeline {
     frame: LazyFrame,
     resources: ExecutionResources,
+    source_inventory: Option<SourceInventory>,
 }
+
+pub type SourceInventory = (String, Vec<String>);
 
 pub enum PipelineState {
     Empty(ExecutionResources),
@@ -64,7 +67,11 @@ impl PipelineState {
 
 impl Pipeline {
     pub fn new(frame: LazyFrame, resources: ExecutionResources) -> Self {
-        Self { frame, resources }
+        Self {
+            frame,
+            resources,
+            source_inventory: None,
+        }
     }
     pub fn frame(&self) -> &LazyFrame {
         &self.frame
@@ -72,9 +79,20 @@ impl Pipeline {
     pub fn resources(&self) -> ExecutionResources {
         self.resources.clone()
     }
+    pub fn source_inventory(&self) -> Option<SourceInventory> {
+        self.source_inventory.clone()
+    }
+    pub fn with_source_inventory(mut self, inventory: Option<SourceInventory>) -> Self {
+        self.source_inventory = inventory;
+        self
+    }
+    pub fn set_source_inventory(&mut self, inventory: Option<SourceInventory>) {
+        self.source_inventory = inventory;
+    }
     pub fn into_parts(self) -> (LazyFrame, ExecutionResources) {
         (self.frame, self.resources)
     }
+    #[allow(clippy::too_many_arguments)]
     pub fn load(
         paths: &[PathBuf],
         separator: &str,
@@ -82,6 +100,7 @@ impl Pipeline {
         no_headers: bool,
         chunk_size: Option<usize>,
         infer_schema_length: Option<usize>,
+        source_column: Option<&str>,
         resources: ExecutionResources,
     ) -> Result<Self, QuiltError> {
         let frame = load::load_with_ndjson_inference_with_resources(
@@ -91,9 +110,23 @@ impl Pipeline {
             no_headers,
             chunk_size,
             infer_schema_length,
+            source_column,
             &resources,
         )?;
-        Ok(Self::new(frame, resources))
+        let inventory = source_column
+            .map(|name| {
+                load::expand_input_paths(paths).map(|paths| {
+                    (
+                        name.to_owned(),
+                        paths
+                            .iter()
+                            .map(|path| path.to_string_lossy().into_owned())
+                            .collect(),
+                    )
+                })
+            })
+            .transpose()?;
+        Ok(Self::new(frame, resources).with_source_inventory(inventory))
     }
 
     pub fn cast(
@@ -103,11 +136,13 @@ impl Pipeline {
         datetime: &crate::operations::datetime::DateTimeConfig,
     ) -> Result<&mut Self, QuiltError> {
         self.frame = cast::cast_with_config(&self.frame, colname, target, datetime)?;
+        self.clear_modified_source(Some(colname));
         Ok(self)
     }
 
     pub fn parse_size(&mut self, colname: &str) -> Result<&mut Self, QuiltError> {
         self.frame = parse_size::parse_size_column(&self.frame, colname)?;
+        self.clear_modified_source(Some(colname));
         Ok(self)
     }
 
@@ -139,6 +174,7 @@ impl Pipeline {
 
     pub fn select(&mut self, colnames: &[String]) -> Result<&mut Self, QuiltError> {
         self.frame = select::select(&self.frame, colnames)?;
+        self.clear_missing_source("select")?;
         Ok(self)
     }
     pub fn isin(&mut self, colname: &str, values: &[String]) -> Result<&mut Self, QuiltError> {
@@ -162,6 +198,7 @@ impl Pipeline {
         ignorecase: bool,
     ) -> Result<&mut Self, QuiltError> {
         self.frame = sed::sed(&self.frame, colname, pattern, replacement, ignorecase)?;
+        self.clear_modified_source(colname);
         Ok(self)
     }
     pub fn grep(
@@ -188,6 +225,35 @@ impl Pipeline {
     }
     pub fn count(&mut self, columns: &[String]) -> Result<&mut Self, QuiltError> {
         self.frame = count::count(&self.frame, columns)?;
+        self.clear_missing_source("count")?;
+        Ok(self)
+    }
+    pub fn timeinfo(&mut self, column: &str, by: &[String]) -> Result<&mut Self, QuiltError> {
+        let mut summary = timeinfo::timeinfo(&self.frame, column, by)?;
+        if let Some((name, paths)) = &self.source_inventory {
+            if by == std::slice::from_ref(name) {
+                let mut paths = paths.clone();
+                paths.sort();
+                paths.dedup();
+                let inventory =
+                    DataFrame::new(vec![Series::new(name.clone().into(), paths).into()])
+                        .map_err(|error| QuiltError::operation("timeinfo", error.to_string()))?
+                        .lazy();
+                summary = inventory
+                    .join(
+                        summary,
+                        [col(name)],
+                        [col(name)],
+                        JoinArgs::new(JoinType::Left),
+                    )
+                    .with_columns(
+                        ["rows", "valid_times", "null_times"]
+                            .map(|name| col(name).fill_null(lit(0u32))),
+                    );
+            }
+        }
+        self.frame = summary;
+        self.source_inventory = None;
         Ok(self)
     }
     pub fn uniq(&mut self) -> Result<&mut Self, QuiltError> {
@@ -210,11 +276,37 @@ impl Pipeline {
             output_format,
             datetime,
         )?;
+        self.clear_modified_source(Some(colname));
         Ok(self)
     }
     pub fn renamecol(&mut self, old_name: &str, new_name: &str) -> Result<&mut Self, QuiltError> {
         self.frame = renamecol::renamecol(&self.frame, old_name, new_name)?;
+        if let Some((name, _)) = &mut self.source_inventory {
+            if name == old_name {
+                *name = new_name.to_owned();
+            }
+        }
         Ok(self)
+    }
+    fn clear_modified_source(&mut self, column: Option<&str>) {
+        if self
+            .source_inventory
+            .as_ref()
+            .is_some_and(|(name, _)| column.is_none_or(|column| column == name))
+        {
+            self.source_inventory = None;
+        }
+    }
+    fn clear_missing_source(&mut self, operation: &str) -> Result<(), QuiltError> {
+        if let Some((name, _)) = &self.source_inventory {
+            let schema = self.frame.clone().collect_schema().map_err(|error| {
+                QuiltError::schema(operation, None::<String>, error.to_string())
+            })?;
+            if schema.get(name).is_none() {
+                self.source_inventory = None;
+            }
+        }
+        Ok(())
     }
     pub fn timeslice(
         &mut self,

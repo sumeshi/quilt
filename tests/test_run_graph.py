@@ -90,10 +90,12 @@ class TestRunGraph(QuiltTestBase):
                 steps: [{{select: {{columns: [Level]}}}}, {{show: null}}]
             """,
         )
-        result = self.run_cli(["run", run_file])
+        result = self.run_cli(["run", run_file, "--stage", "first"])
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("EventId", result.stdout)
-        self.assertIn("Level", result.stdout)
+        self.assertEqual(result.stdout.strip(), "EventId\n1102")
+        result = self.run_cli(["run", run_file, "--stage", "second"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "Level\nInfo")
 
 
 if __name__ == "__main__":

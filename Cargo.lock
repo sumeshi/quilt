@@ -2098,7 +2098,7 @@ dependencies = [
 
 [[package]]
 name = "quilt"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "chrono",
  "chrono-tz",

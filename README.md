@@ -51,6 +51,7 @@ $ qlt load Security.csv - isin 'Event ID' 4624 - sort 'Date and Time' - head 3 -
 ```
 
 This command:
+
 1. Loads `Security.csv`
 2. Filters rows where `Event ID` is 4624
 3. Sorts by `Date and Time`
@@ -72,13 +73,20 @@ $ qlt <INITIALIZER> <args> - <CHAINABLE> <args> - <FINALIZER> <args>
 
 ### Command Separator `-`
 
-The `-` token (a single hyphen surrounded by spaces) is the command separator. A standalone `-` is never treated as data.
+A standalone `-` separates commands. The chain is a single lazy query; it does not
+serialize intermediate CSV between commands. Quote arguments containing spaces and
+quoted globs you want Quilt to expand.
 
-- To separate commands: `qlt load file.csv - select col1 - head 5`
-- If you need `-` as an option value, use an attached form such as `--separator=-` or `-s-`.
-- If a positional value begins with `-`, pass `--` first: `qlt load file.csv - grep -- -Info`.
+- Separate commands with `-`: `qlt load file.csv - select col1 - head 5`.
+- Pass an option value beginning with `-` in attached form, such as `--separator=-`.
+- Use `--` to stop option parsing for the current command before a positional value:
+  `qlt load file.csv - grep -- -Info`.
+- For a fixed-arity command, `-` after `--` can fill a required positional argument.
+  Once those arguments are filled, the next `-` separates commands:
+  `qlt load file.csv - grep -- - - show` searches for a literal hyphen.
 
-A standalone `-` positional value, including stdin-style usage, is not currently supported.
+`-` does not select stdin or stdout as an input/output path. Use an explicit input
+file and `show` for stdout. Unknown or duplicate options are errors.
 
 If no finalizer is specified, Quilt uses machine-readable `show`. This does not
 depend on TTY or build features. `showtable` is always a bounded preview and is
@@ -111,6 +119,20 @@ Load one or more CSV, JSONL/NDJSON, or Parquet files.
 | --no-headers  | flag    | `false` | Treat the first row as data, not headers (CSV files only). When enabled, columns will be named automatically (`column_1`, `column_2`, etc.). |
 | --chunk-size  | int     | (auto)  | Number of rows to read per chunk (CSV files only). Controls memory usage during file processing. |
 | --infer-schema-length | int or `full` | `1000` | Number of NDJSON records inspected per file for schema inference. Use `full` when sparse fields require a complete scan. |
+| --source-column | str | none | Add each input's expanded path as a String column. Available for all input formats; an existing column with this name is an error. |
+
+CSV separators must be one ASCII character; TSV requires an explicit tab separator.
+Concatenated gzip members are all read, and corruption in a later member fails the load.
+Gzip input is expanded to temporary disk before the lazy scan.
+
+NDJSON schema inference is bounded per file. Late fields may require
+`--infer-schema-length full`; this performs a full inference scan before execution.
+Zero-byte NDJSON files can accompany nonempty files and borrow their inferred schema.
+If every NDJSON file is empty, there is no schema to infer and loading fails.
+CSV files loaded together must have compatible inferred column types. In particular,
+a header-only CSV infers String columns and can conflict with numeric columns in a
+nonempty sibling. This currently fails with a schema error; `--source-column` does
+not resolve that mismatch.
 
 **Environment Variables:**
 - `QLT_CHUNK_SIZE`: Positive default chunk size for CSV processing. An explicit `--chunk-size` takes precedence and bypasses this variable; malformed, zero, or overflowing environment values are errors.
@@ -173,11 +195,21 @@ Strictly converts one column in place while preserving its position and name.
 
 Nulls remain null and invalid non-null values fail at finalization. Datetime
 parsing is shared with `changetz`, `timeslice`, and string-input `bucket` and
-stores `Datetime[μs]` values. Canonical options are `--strict`,
-`--input-format FORMAT`, `--epoch-unit s|ms|us|ns`, `--timezone ZONE`,
-`--ambiguous error|earliest|latest`, and
-`--nonexistent error|shift-forward|shift-backward`. Defaults are fuzzy mode,
-no explicit format/epoch/timezone, and `error` for both DST policies.
+stores `Datetime[μs]` values. For datetime conversion, these options apply:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--strict` | off | Disable fuzzy parsing; invalid non-null values still fail when this flag is omitted. |
+| `--input-format FORMAT` | none | Parse with an explicit Chrono/strftime format. |
+| `--epoch-unit s\|ms\|us\|ns` | none | Interpret numeric values using this unit; units are never guessed. |
+| `--timezone ZONE` | none | Localize values without an offset to this timezone. |
+| `--ambiguous error\|earliest\|latest` | `error` | Resolve repeated local times during DST fall-back. |
+| `--nonexistent error\|shift-forward\|shift-backward` | `error` | Resolve nonexistent local times during DST spring-forward. |
+
+Explicit input offsets determine the instant. Without an offset or `--timezone`, values
+use a UTC-naive timeline; the investigation machine's local timezone is not assumed.
+Datetime parsing options are rejected for non-datetime casts. They are also rejected
+by `bucket` and `timeslice` when their input is already typed datetime.
 
 Precedence is explicit format, strict RFC3339/ISO and known formats, explicit
 epoch unit, then bounded fuzzy forms. Strict disables fuzzy parsing; ambiguous
@@ -190,6 +222,8 @@ normalize to microseconds; nanoseconds below one microsecond are rejected.
 ```bash
 $ qlt load data.csv - cast EventId int - show
 $ qlt load data.csv - cast timestamp datetime - show
+$ qlt load data.csv - cast timestamp datetime --input-format '%Y-%m-%d %H:%M:%S' --timezone UTC - show
+$ qlt load data.csv - cast epoch datetime --epoch-unit ms - show
 ```
 
 #### `parse-size`
@@ -252,10 +286,9 @@ replacing the source column.
 | column | str | Numeric or datetime source column. Required. |
 | `-o`, `--output` | str | Output name; defaults to `<column>_delta`. |
 
-Integral deltas use lossless Int64 differences (including descending unsigned
-values), using an internal Decimal128 subtraction before the final Int64 cast;
-UInt64 values or differences outside i64::MAX return a contextual conversion
-error at finalization. Float32 and Float64 retain their source precision.
+Integral deltas use lossless Int64 differences, including descending unsigned
+values. UInt64 source values above i64::MAX and differences outside the Int64
+range return a contextual conversion error at finalization. Float32 and Float64 retain their source precision.
 Datetime deltas use Duration[μs] with checked unit conversion. The first row
 and any pair involving a null produce null. Existing output names are rejected.
 
@@ -433,7 +466,9 @@ $ qlt load data.csv - uniq
 ```
 
 #### `changetz`
-Changes the timezone of a datetime column.
+Converts timestamps to a requested timezone and replaces the source column with
+formatted String values. Use `cast ... datetime` when subsequent operations need
+a typed datetime column.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -456,9 +491,11 @@ include operation/column/row context without echoing raw values.
 
 **Understanding `--ambiguous` option:**
 
-During Daylight Saving Time (DST) transitions in autumn, clocks "fall back" creating duplicate hours. For example, 2:30 AM occurs twice:
-- First time: 2:30 AM DST (before transition)  
-- Second time: 2:30 AM Standard Time (after transition)
+During a DST fall-back, some local times occur twice. For example, 01:30 in
+`America/New_York` can refer to either occurrence on the transition date:
+
+- First occurrence: daylight time, before the transition.
+- Second occurrence: standard time, after the transition.
 
 When encountering such ambiguous times:
 - `earliest`: Uses the first occurrence (DST time)
@@ -504,17 +541,55 @@ Filters data based on time ranges, extracting records within specified time boun
 | --start | str | | Start time (inclusive). Optional. |
 | --end | str | | End time (inclusive). Optional. |
 
-At least one of `--start` or `--end` must be specified. Both boundaries are inclusive (`[start, end]`). It accepts the same parser options as `cast`, including `--timezone` for naive wall-clock values, with microsecond precision. Embedded offsets are authoritative instants and normalize to UTC; naive values without `--timezone` use the UTC-naive timeline.
+At least one of `--start` or `--end` must be specified. Both boundaries are inclusive
+(`[start, end]`); a date-only end means midnight at the start of that date. For string
+input, the parser options listed under `cast` apply, including `--timezone` for naive
+wall-clock values. For already-typed datetime input, omit parsing options. Embedded
+offsets are authoritative instants; naive values without `--timezone` use the UTC-naive
+timeline. Null timestamps are excluded. Invalid non-null values fail the command.
 
 Example:
 ```bash
 $ qlt load data.csv - timeslice timestamp --start "2023-01-01 00:00:00"
 $ qlt load data.csv - timeslice timestamp --end "2023-12-31 23:59:59"
 $ qlt load data.csv - timeslice timestamp --start "2023-06-01" --end "2023-06-30"
-$ qlt load access.log - timeslice timestamp --start "2023-01-01T10:00:00"
+$ qlt load access.csv - timeslice timestamp --start "2023-01-01T10:00:00"
 ```
 
 Time bucketing and aggregation use `bucket`, `count`, and `calc`.
+
+#### `timeinfo`
+Summarizes the earliest and latest timestamps over all selected rows, regardless of
+input order. This is a lazy chainable operation, so its result can be displayed,
+sorted, filtered, or saved with the usual finalizers. It does not sort the input.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| column | str | required | A Datetime column; cast strings first. |
+| --by | str | none | Comma-separated grouping columns, such as `source_file` or `host,user`. |
+
+The result contains grouping columns followed by `rows`, `valid_times`, `null_times`,
+`first_seen`, and `last_seen`. `rows` includes null timestamps; `valid_times` excludes
+them, and `null_times` counts them. An all-null group has null first/last timestamps.
+Without `--by`, even an empty input produces one row with zero counts and null bounds.
+Timestamp units and timezone metadata are preserved; group order is unspecified.
+Grouping names must be unique and cannot use the five result-column names above.
+
+With `load --source-column source_file` followed by `timeinfo ... --by source_file`,
+the result includes every successfully loaded file, including schema-compatible
+header-only CSVs and files with no
+rows left after filtering. Such files have zero counts and null bounds. Other groupings
+include only observed groups. Renaming the source column preserves this tracking;
+removing or modifying its values ends it. Counts always reflect preceding filters.
+
+```bash
+# Per-file coverage, including files with no matching events
+$ qlt load 'logs/*.csv' --source-column source_file - cast TimeCreated datetime --strict - timeinfo TimeCreated --by source_file - showtable
+# Save the complete summary instead of the bounded table preview
+$ qlt load 'logs/*.csv' --source-column source_file - cast TimeCreated datetime --strict - timeinfo TimeCreated --by source_file - dump -o coverage.csv
+# Coverage after filtering, grouped by host
+$ qlt load events.csv - cast TimeCreated datetime --strict - isin EventId 4624,4625 - timeinfo TimeCreated --by Computer - show
+```
 
 ### Finalizers
 
@@ -586,7 +661,7 @@ Displays summary statistics for each column in the dataset (e.g., count, null_co
 `stats` is an explicit aggregate barrier: it evaluates one aggregate result and
 may use memory proportional to the input. Numeric columns report count,
 null_count, mean, sample standard deviation (`ddof=1`), min, linear-interpolated
-25/50/75% quantiles, and max. Strings report min/max; other supported Polars
+25/50/75% quantiles, and max. Strings and Datetime columns report min/max; other supported Polars
 dtypes show `-` for unsupported or unavailable measures. Empty and all-null
 columns use `-` for unavailable statistics rather than panicking.
 
@@ -613,7 +688,11 @@ $ qlt load data.csv - select col1 - showquery
 
 #### `show`
 Writes the result as CSV to standard output, including the header. This command
-takes no arguments. It is the implicit finalizer when a chain ends without one.
+takes no positional arguments. It is the implicit finalizer when a chain ends without one.
+The full CSV is first written to a temporary file, then copied to stdout in bounded
+chunks. This avoids emitting rows before lazy evaluation has succeeded, but uses disk
+proportional to the rendered output. `--debug` is accepted and currently has no effect;
+use `showquery` to inspect the query plan.
 
 ```bash
 $ qlt load data.csv - head 5 - show
@@ -630,7 +709,9 @@ Displays the resulting data in a formatted table to standard output. Shows table
 - Cell contents are limited to 40 characters and truncated with `…`
 
 This command does not take any arguments or options.
-> **Tip for large files:** Use `head` before `showtable`, or use `show` instead.
+Datetime, date, time, and duration cells use human-readable values; nulls remain
+visible. The preview does not make an upstream global sort or aggregation bounded.
+Use `show` or `dump` when you need every row.
 
 ```bash
 $ qlt load data.csv - select col1,col2 - head 3 - showtable
@@ -704,6 +785,7 @@ contextual error at evaluation time.
 | `tail` | Any dtype; output keeps schema and at most N last rows | N must be non-negative; nulls unchanged | Lazy tail barrier; upstream must be consumed to find final rows |
 | `sort` | Existing sortable columns; output preserves schema and row values | Missing columns error; null order follows Polars | Lazy sort barrier; Polars may maintain input-proportional state |
 | `count` | Optional grouping columns of any supported dtype; output is group columns plus `count` | Nulls form groups; missing columns and a grouping-column name collision with `count` error | Lazy grouped barrier; Polars observes the complete input |
+| `timeinfo` | Datetime plus optional group keys; outputs counts and first/last timestamps | Null timestamps count separately; empty ungrouped input gives zero counts and null bounds | Lazy aggregate over all selected rows; no input sort |
 | `uniq` | Any schema; output removes duplicate rows | Nulls compare using Polars equality semantics | Lazy distinct barrier; Polars may maintain global state |
 | `changetz` | Datetime or parseable string source; output preserves source column after timezone rendering | Nulls remain null; invalid timezone/DST/row values error lazily | Lazy chunk UDF; parsing is per execution chunk |
 | `renamecol` | Existing source name to a new unique name; schema changes only the name | Missing source or destination collision errors | Lazy projection/schema operation |
@@ -745,16 +827,35 @@ $ qlt run <config_file_path.yaml> [files...] [options]
 | --check | flag | Parse and statically validate the run document without reading input data or writing output. |
 | --show-plan STAGE | str | Build the selected process, join, or concat stage and print its logical/optimized plan without evaluating rows or running finalizers. Dynamic branch stages are rejected. |
 | --var name=value | repeated | Supply a value for a declared typed parameter. |
-| -o, --output | str | CSV destination. If the YAML has a `dump`, this path replaces it. If not, this is the dump path. Relative paths are from the run file directory. Existing files are rejected. |
+| --stage STAGE | str | Execute this stage and its required data/control dependencies. Ancestor finalizers are suppressed and unrelated inputs are not opened. |
+| -o, --output | str | CSV destination for the selected stage or unique terminal non-branch stage. Overrides its single `dump`, or writes its frame when it has none. Relative to the caller working directory; existing files are rejected. |
 
 
 ```bash
 $ qlt run rules/my_workflow.yaml
 $ qlt run rules/my_workflow.yaml events.csv
 $ qlt run rules/my_analysis.yaml -o result.csv
+$ qlt run rules/my_workflow.yaml events.csv --stage output -o selected.csv
+$ qlt run rules/my_workflow.yaml events.csv --show-plan output
 ```
 
-No `-o` uses the YAML `dump` path. With `-o`, the CLI path wins.
+Without `-o`, each YAML output path is used as written. With `-o`, the target stage
+must be unambiguous: select it with `--stage`, or have one terminal non-branch stage.
+Multiple `dump` steps within that target are rejected. Outputs explicitly declared in
+other executed stages keep their own paths.
+
+| Path origin | Relative-path base |
+|---|---|
+| YAML `load` paths, output paths, and `path` parameter defaults | Directory containing the YAML file |
+| CLI input files, `--output`, and `--var` values declared as `path` | Caller working directory |
+
+`--check` validates the complete document without opening input data. It cannot prove
+that input columns or values are valid. `--show-plan` uses the same CLI inputs and
+variables as execution and inspects the selected dependencies without running finalizers.
+It can inspect input schemas, but does not evaluate rows or create intermediate files;
+gzip sources that require a decompression spool cannot be inspected this way.
+`--show-plan` cannot be combined with `--check` or `--stage`. Plans depending on secret
+parameters are withheld, including plans produced by a YAML `showquery` step.
 
 ```yaml
 version: 1
@@ -770,14 +871,60 @@ $ qlt run workflow.yaml              # writes default.csv
 $ qlt run workflow.yaml -o result.csv  # writes result.csv only
 ```
 
+#### Step arguments in YAML
+
+The operation name is the YAML key. Each `steps` item must be a one-key mapping. YAML
+fields map to CLI positional arguments as follows; booleans default to `false`, omitted
+numeric options keep the CLI defaults, and unknown fields are errors.
+
+| Step | Fields |
+|---|---|
+| `load` | `paths` (optional if CLI input files are supplied), `source-column`, `separator`, `low-memory`, `no-headers`, `chunk-size`, `infer-schema-length` |
+| `select` | `columns` |
+| `cast` | `column`, `type`; optional datetime fields `strict`, `input-format`, `epoch-unit`, `timezone`, `ambiguous`, `nonexistent` |
+| `bucket` | `column`, `interval`; optional `output` and the same datetime fields |
+| `delta` | `column`; optional `output` |
+| `extract` | `column`, `pattern` |
+| `flatten`, `uniq`, `stats`, `showtable`, `showquery` | `{}` |
+| `parse-size` | `column` |
+| `isin` | `column`, `values` (string/number or sequence) |
+| `contains` | `column`, `pattern`, optional `ignore-case` |
+| `sed` | `pattern`, `replacement`, optional `column`, `ignore-case` |
+| `grep` | `pattern`, optional `columns`, `ignore-case`, `invert-match` |
+| `head`, `tail` | optional `number` (default `5`) |
+| `sort` | `columns`, optional `desc` |
+| `count` | optional `columns` (all columns by default) |
+| `timeinfo` | `column`, optional `by` |
+| `changetz` | `column`, required `from-tz`, `to-tz`; optional `input-format`, `output-format`, `epoch-unit`, `strict`, `ambiguous`, `nonexistent`, `timezone` (YAML only) |
+| `renamecol` | `old`, `new` |
+| `timeslice` | `column`, at least one of `start` or `end`; optional datetime fields |
+| `show` | optional `debug` (accepted, no effect on artifact output) |
+| `headers` | optional `plain` |
+| `dump` | optional `output`, `separator` (default comma) |
+| `dumpcache` | optional `output` |
+| `partition` | `column`; optional `output-dir` (default `./partitions`) |
+| `calc` | `column` and exactly one true flag: `sum`, `avg`, `min`, `max`, `median`, `std` |
+
+`grep` uses `--column` on the CLI but `columns` in YAML. YAML list fields accept a
+single string or a sequence, for example `columns: [host, user]`.
+
+For example, these steps produce the same per-file summary as the CLI `timeinfo` example:
+
+```yaml
+- load: {paths: ["logs/*.csv"], source-column: source_file}
+- cast: {column: TimeCreated, type: datetime, strict: true}
+- timeinfo: {column: TimeCreated, by: [source_file]}
+- show: {}
+```
+
 #### Pipeline Operations in YAML
 Within a `run` document, stages can be different types to orchestrate the flow.
 
 | Operation Type | Description                                                | Key Parameters                                                                                                                                    |
 | -------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | `process`      | Executes a series of qlt operations on a dataset.          | `name` and a sequence-form `steps` (for example, `- grep: {pattern: ERROR}`). `from` (optional) names a prior stage. |
-| `concat`       | Concatenates multiple datasets (stages).                   | `name` and `concat: {inputs: [stage_a, stage_b], how: vertical}`. Horizontal concatenation is not yet implemented. |
-| `join`         | Joins datasets from multiple stages based on keys.         | `name` and `join: {inputs: [...], on: [column], how: inner}`. Use `left-on` and `right-on` for asymmetric keys; `cross` needs no key. Optional `coalesce`. |
+| `concat`       | Concatenates multiple datasets (stages).                   | `name` and `concat: {inputs: [stage_a, stage_b], how: vertical}`. Only `vertical` (`v`) is supported; schemas must be compatible. |
+| `join`         | Joins datasets from multiple stages based on keys.         | `name` and `join: {inputs: [...], on: [column], how: inner}`. Use `left-on` and `right-on` for asymmetric keys; `cross` needs no key. Modes: `inner` (default), `left`, `full` (`outer`), `cross`. Optional boolean `coalesce`. |
 | `branch`       | Selects downstream target stages from a `row-count` or `parameter` predicate. | `name` and `branch: {input: stage, when: {row-count: {greater-than: 10}}, then: [target]}` with optional `else: [target]`. |
 
 Every run document must use `version: 1` and a sequence of named stages. The schema is
@@ -790,6 +937,12 @@ over defaults. A parameter `path` default is relative to the run file; a `--var`
 path is relative to the caller's working directory. A parameter cannot be both `required` and
 have a `default`; secret values are redacted from diagnostics. Branch predicates support
 typed `row-count` and `parameter` comparisons; scalar-result predicates are deferred.
+
+Each predicate takes exactly one comparison: `equal`, `not-equal`, `greater-than`,
+`greater-or-equal`, `less-than`, or `less-or-equal`. Boolean parameters support only
+`equal` and `not-equal`. A parameter condition is written, for example,
+`when: {parameter: {name: enabled, equal: true}}`, with `enabled` declared as `bool`.
+The `else` target list is optional; an omitted false route runs no target stages.
 
 ```yaml
 parameters:
@@ -871,7 +1024,7 @@ stages:
       then: [csv-output, cache-output]
   - name: csv-output
     from: input
-    steps: [{dump: {output: events.csv}}]
+    steps: [{dump: {output: selected-events.csv}}]
   - name: cache-output
     from: input
     steps: [{dumpcache: {output: events-cache.parquet}}]
@@ -901,8 +1054,11 @@ qlt run workflow.yaml --check --var source=events.csv
 qlt run workflow.yaml --var source=events.csv --var limit=100
 ```
 
-One document may contain multiple independent output stages; each finalizer result is emitted
-in stage order. `--check` validates the complete schema, typed parameters, command arguments,
+One document may contain multiple independent file-output stages, executed in dependency
+order. Only one stdout-producing finalizer may run; use `--stage` to choose one or save
+multiple results with file finalizers. Without an explicit output, `run` exposes its final
+frame and the CLI's implicit `show` applies. Selecting a stage controlled by a branch also includes that controlling branch;
+an unchosen route is skipped. `--check` validates the complete schema, typed parameters, command arguments,
 stage references, and cycles without opening declared input files or creating output files.
 
 For time bucketing in a run document, use the `bucket` step followed by `count` or a `calc` output step.
@@ -918,6 +1074,43 @@ For scalar aggregation in a `run` output stage:
         avg: true
 ```
 
+#### Reuse, progress, and failures
+
+Each stage accepts `materialize: auto` (default), `always`, or `never`. Auto writes a
+shared result to temporary Parquet when it has multiple effective consumers, including
+row-count branch evaluation and row-reading finalizers. A stage used once stays lazy;
+`sort` alone does not force a temporary Parquet. `never` can repeat upstream work when
+consumers evaluate independently. `always` adds disk I/O even for a single consumer.
+
+`--stage` limits this calculation to the selected execution graph. `--show-plan` reports
+dependencies, inputs/outputs, and planned materialization alongside the query plan.
+During execution, stderr reports selected stages and disk intermediates; completion
+reports elapsed time and completed file outputs. These diagnostics do not add a full
+row count. Intermediate files are released when no remaining lazy consumer needs them.
+
+Outputs are committed individually. If a later stage fails, already-completed files
+remain and the error lists them. There is no run-wide rollback or automatic resume.
+Each file finalizer still rejects existing targets and cleans its incomplete staging.
+Secrets are hidden in diagnostics and plans; a secret parameter is not a request to
+redact values intentionally selected into exported data.
+
+#### Reusable log investigation recipe
+
+[`examples/timeline.yaml`](examples/timeline.yaml) applies an inclusive time range while
+preserving every input column. Its default time column is `TimeCreated`; normalized Linux
+logs use `timestamp`:
+
+```sh
+qlt run examples/timeline.yaml --var input=events.csv --var start=2024-01-01T00:00:00Z \
+  --var end=2024-01-31T23:59:59Z --var output=period.csv
+qlt run examples/timeline.yaml --var input=linux.csv --var time-column=timestamp \
+  --var start=2024-01-01T00:00:00Z --var end=2024-01-31T23:59:59Z --var output=period.csv
+```
+
+The same recipe is used by the example smoke tests. Inputs are structured log exports;
+raw Linux syslog/access-log text must first be converted to CSV or JSONL with a timestamp
+column. No cross-source normalization is performed.
+
 ## Huge File Processing
 
 Quilt supports streaming-capable execution for many large-file processing pipelines.
@@ -932,7 +1125,7 @@ Not all commands stream. Before running a pipeline on a large file, check the me
 | **Bounded / lazy** | `head`, `headers`, `showtable`, `showquery` | `head` limits output; `headers` inspects schema only; `showtable` previews a bounded number of rows; plans do not collect |
 | **Lazy / Polars-optimized** | `select`, `isin`, `contains`, `grep`, `sed`, `renamecol`, `cast`, `parse-size`, `bucket`, `delta`, `extract`, `flatten`, `changetz`, `timeslice` | Pushdown or per-chunk UDFs; usually safe |
 | **Global barriers** ⚠️ | `sort`, `uniq`, `count`, `tail` | Polars may maintain input-proportional state to produce a global result |
-| **Aggregate finalizers** ⚠️ | `stats`, `calc` | Materialize input-proportional state |
+| **Aggregate operations** | `timeinfo`, `stats`, `calc` | Read all selected rows; group cardinality and the chosen statistic determine memory requirements |
 | **Global / disk-backed finalizers** ⚠️ | `partition` | Scans the complete input through a schema-preserving Parquet spool and bounded batches; output directory is fully staged before publication |
 
 > **Warning:** Running a global barrier or aggregate finalizer on a multi-GB file may require substantial input-proportional state. `partition` bounds in-memory writer state but consumes disk proportional to the input and output. Use `head`, `timeslice`, or `isin` to reduce the dataset first.
@@ -971,6 +1164,18 @@ $ qlt load huge.parquet - select col1,col2 - show
 $ qlt load huge.parquet - isin category "important" - dump -o result.csv
 ```
 
+### Temporary files and cleanup
+
+Gzip expansion, `show`, run materialization, and partition staging use temporary disk.
+`dump`/`dumpcache` stage beside their destination so completed files can be published
+without overwriting existing data. Partition staging includes the complete output
+directory as well as its intermediate Parquet. Available disk must cover these files
+as well as the final result; lazy execution is not a guarantee of constant memory or disk.
+
+Normal completion and handled errors remove execution-owned temporary files. SIGKILL
+or a system crash can leave files behind. Exported CSV/Parquet and partition directories
+are user data and are never removed as cache cleanup.
+
 ## Installation
 
 ### Pre-built Binaries
@@ -980,8 +1185,14 @@ Download the latest release from [GitHub Releases](https://github.com/sumeshi/qu
 ```bash
 $ git clone https://github.com/sumeshi/quilt.git
 $ cd quilt
-$ cargo build --release
+$ cargo build --locked
 ```
+
+The executable is `target/debug/qlt` (`qlt.exe` on Windows). Development builds disable
+debug information and incremental compilation to limit disk growth. Reuse this profile
+for normal development and local verification; see [CONTRIBUTING.md](CONTRIBUTING.md).
+For an optimized distribution build, use `cargo build --release --locked`; its executable
+is under `target/release/` and it creates a separate set of build artifacts.
 
 ## Contributing
 Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.

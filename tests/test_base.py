@@ -1,5 +1,6 @@
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -11,7 +12,7 @@ class QuiltTestBase(unittest.TestCase):
 
     root_dir = Path(__file__).resolve().parents[1]
     fixtures_dir = root_dir / "tests" / "fixtures"
-    qlt_path = root_dir / "target" / "debug" / "qlt"
+    qlt_path = root_dir / "target" / "debug" / ("qlt.exe" if sys.platform == "win32" else "qlt")
 
     @classmethod
     def setUpClass(cls):
