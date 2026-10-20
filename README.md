@@ -134,6 +134,8 @@ Integer IDs are preserved exactly as Int64 or UInt64, including values above 2^5
 Incompatible types (including integer/float mixtures), out-of-range integers, and
 negative values mixed with values above Int64::MAX are rejected. Normalize such
 fields to strings before loading.
+Duplicate object keys, including escaped-equivalent names at any nesting depth,
+are rejected with the input path, physical line, and key path.
 
 Missing fields and nulls have the same representation. Empty objects mixed with
 null/missing values are currently unsupported; add a typed field or normalize them

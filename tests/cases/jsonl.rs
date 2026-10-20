@@ -121,6 +121,37 @@ fn unrepresentable_or_invalid_records_fail_before_producing_output() {
 }
 
 #[test]
+fn duplicate_keys_fail_with_record_and_nested_path() {
+    let root = tempfile::tempdir().unwrap();
+    for (record, key_path) in [
+        (r#"{"id":1,"id":2}"#, r#"$["id"]"#),
+        (r#"{"event":{"id":1,"id":2}}"#, r#"$["event"]["id"]"#),
+        (
+            r#"{"items":[{"id":1,"i\u0064":2}]}"#,
+            r#"$["items"][0]["id"]"#,
+        ),
+    ] {
+        let path = write(root.path(), "duplicate.jsonl", format!("\n{record}\n"));
+        let error = failure(&["load", path.to_str().unwrap()]);
+        assert!(
+            error.contains("duplicate.jsonl") && error.contains("line 2"),
+            "{error}"
+        );
+        assert!(
+            error.contains("duplicate object key") && error.contains(key_path),
+            "{error}"
+        );
+    }
+    // Repeated names in independent objects and JSON text inside a string are valid.
+    let valid = write(
+        root.path(),
+        "valid.jsonl",
+        "{\"items\":[{\"id\":1},{\"id\":2}],\"text\":\"{\\\"id\\\":1,\\\"id\\\":2}\"}\n",
+    );
+    assert_eq!(frame(&["load", valid.to_str().unwrap()]).height(), 1);
+}
+
+#[test]
 fn nested_csv_and_parquet_roundtrip_preserve_values_and_integer_types() {
     let root = tempfile::tempdir().unwrap();
     let original = json!([

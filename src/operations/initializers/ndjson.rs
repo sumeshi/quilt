@@ -1,6 +1,8 @@
 use crate::error::QuiltError;
 use polars::prelude::*;
+use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -204,6 +206,78 @@ fn diagnostic(path: &Path, line: usize, message: impl std::fmt::Display) -> Quil
     )
 }
 
+// Traverse each record without building a second JSON tree. serde_json::Value
+// intentionally keeps only the last occurrence of an object key, so this pass
+// must run before Value parsing to make duplicate keys observable.
+struct UniqueKeys {
+    path: String,
+}
+
+impl<'de> DeserializeSeed<'de> for UniqueKeys {
+    type Value = ();
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for UniqueKeys {
+    type Value = ();
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a JSON value")
+    }
+    fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_unit<E: serde::de::Error>(self) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+        let mut index = 0usize;
+        while seq
+            .next_element_seed(UniqueKeys {
+                path: format!("{}[{index}]", self.path),
+            })?
+            .is_some()
+        {
+            index += 1;
+        }
+        Ok(())
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        let mut seen = HashSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            let child = format!("{}[{key:?}]", self.path);
+            if !seen.insert(key.clone()) {
+                return Err(serde::de::Error::custom(format!(
+                    "duplicate object key {key:?} at {child}"
+                )));
+            }
+            map.next_value_seed(UniqueKeys { path: child })?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_unique_keys(input: &str) -> Result<(), serde_json::Error> {
+    let mut deserializer = serde_json::Deserializer::from_str(input);
+    UniqueKeys { path: "$".into() }.deserialize(&mut deserializer)?;
+    deserializer.end()
+}
+
 /// One record at a time: memory is proportional to the union schema plus the
 /// largest record, rather than the number of rows. Validate even bounded input
 /// beyond the sample so unknown fields and type changes cannot disappear.
@@ -223,6 +297,7 @@ pub(super) fn schema(
             if line.trim().is_empty() {
                 continue;
             }
+            validate_unique_keys(&line).map_err(|error| diagnostic(path, index + 1, error))?;
             let value: Value =
                 serde_json::from_str(&line).map_err(|error| diagnostic(path, index + 1, error))?;
             if !value.is_object() {
