@@ -31,8 +31,7 @@ pub fn show(df: &LazyFrame, resources: &ExecutionResources) -> Result<FinalizerR
         include_header: true,
         ..Default::default()
     };
-    let sink = df
-        .clone()
+    let sink = super::csv::csv_frame(df, "show CSV")?
         .sink_csv(
             SinkTarget::Path(Arc::new(path.clone())),
             options,

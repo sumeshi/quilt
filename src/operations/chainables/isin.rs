@@ -31,6 +31,9 @@ pub fn isin(df: &LazyFrame, colname: &str, values: &[String]) -> Result<LazyFram
             "column disappeared during schema inspection",
         )
     })?;
+    if matches!(col_dtype, DataType::Struct(_) | DataType::List(_)) {
+        return Err(QuiltError::schema("isin", Some(colname), "nested values are not scalar membership keys; use flatten and select a scalar field, or contains/grep for JSON text search"));
+    }
 
     let comparisons = values
         .iter()

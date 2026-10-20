@@ -4,9 +4,11 @@ use crate::operations::finalizers::FinalizerResult;
 use comfy_table::presets::UTF8_FULL;
 use comfy_table::{Cell, ContentArrangement, Table};
 use polars::prelude::*;
+use unicode_width::UnicodeWidthStr;
 
 const MAX_DISPLAY_ROWS: usize = 8;
-const MAX_DISPLAY_WIDTH: usize = 40;
+const MAX_DISPLAY_WIDTH: usize = 64;
+const MAX_DISPLAY_COLUMNS: usize = 8;
 
 pub fn showtable(df: &LazyFrame) -> Result<FinalizerResult, QuiltError> {
     LogController::debug("Applying showtable (display DataFrame as a formatted table)");
@@ -18,8 +20,20 @@ pub fn showtable(df: &LazyFrame) -> Result<FinalizerResult, QuiltError> {
 }
 
 pub fn render_table(df: &LazyFrame) -> Result<String, QuiltError> {
+    let flattened = crate::operations::chainables::flatten::flatten(df)?;
+    let schema = flattened
+        .clone()
+        .collect_schema()
+        .map_err(|error| QuiltError::operation("showtable", error.to_string()))?;
+    let total_columns = schema.len();
+    let columns: Vec<Expr> = schema
+        .iter_names()
+        .take(MAX_DISPLAY_COLUMNS)
+        .map(|name| col(name.clone()))
+        .collect();
+    let preview = super::csv::csv_frame(&flattened.select(columns), "showtable")?;
     // Try to estimate the size using limit + head approach to avoid full collection
-    let head_df = match df.clone().limit((MAX_DISPLAY_ROWS + 1) as u32).collect() {
+    let head_df = match preview.limit((MAX_DISPLAY_ROWS + 1) as u32).collect() {
         Ok(df) => df,
         Err(e) => {
             return Err(QuiltError::operation(
@@ -49,17 +63,24 @@ pub fn render_table(df: &LazyFrame) -> Result<String, QuiltError> {
     if is_truncated {
         output.push_str(&format!(
             "shape: ({}+, {}) [showing first {} rows]",
-            shape.0, shape.1, MAX_DISPLAY_ROWS
+            shape.0, total_columns, MAX_DISPLAY_ROWS
         ));
     } else {
-        output.push_str(&format!("shape: ({}, {})", shape.0, shape.1));
+        output.push_str(&format!("shape: ({}, {})", shape.0, total_columns));
     }
+    if total_columns > MAX_DISPLAY_COLUMNS {
+        output.push_str(&format!(" [showing first {MAX_DISPLAY_COLUMNS} columns; {} columns omitted; use select to choose columns]", total_columns - MAX_DISPLAY_COLUMNS));
+    }
+    output.push_str(" [cells/headers limited to 64 display columns; … marks truncation]");
     output.push('\n');
 
     let mut table = Table::new();
     table.load_preset(UTF8_FULL);
     table.set_content_arrangement(ContentArrangement::Dynamic);
-    let header_cells: Vec<Cell> = colnames.iter().map(Cell::new).collect();
+    let header_cells: Vec<Cell> = colnames
+        .iter()
+        .map(|name| Cell::new(truncate_display(name)))
+        .collect();
     table.set_header(header_cells);
 
     // Add data rows
@@ -74,7 +95,7 @@ pub fn render_table(df: &LazyFrame) -> Result<String, QuiltError> {
                 .get(row_idx);
             let cell_content = match val_result {
                 Ok(val) => truncate_display(&format_anyvalue(&val)),
-                Err(_) => "Error".to_string(),
+                Err(error) => return Err(QuiltError::operation("showtable", error.to_string())),
             };
             row_cells.push(Cell::new(cell_content));
         }
@@ -99,6 +120,7 @@ fn format_anyvalue(val: &AnyValue) -> String {
         AnyValue::Null => "null".to_string(),
         AnyValue::Boolean(b) => b.to_string(),
         AnyValue::String(s) => s.to_string(),
+        AnyValue::StringOwned(s) => s.to_string(),
         AnyValue::Int8(i) => i.to_string(),
         AnyValue::Int16(i) => i.to_string(),
         AnyValue::Int32(i) => i.to_string(),
@@ -114,15 +136,29 @@ fn format_anyvalue(val: &AnyValue) -> String {
 }
 
 fn truncate_display(value: &str) -> String {
-    if value.chars().count() <= MAX_DISPLAY_WIDTH {
-        return value.to_string();
+    let mut escaped = String::new();
+    for character in value.chars() {
+        let token = match character {
+            '\n' => "\\n".to_string(),
+            '\r' => "\\r".to_string(),
+            '\t' => "\\t".to_string(),
+            c if c.is_control()
+                || matches!(c, '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}') =>
+            {
+                c.escape_unicode().to_string()
+            }
+            c => c.to_string(),
+        };
+        escaped.push_str(&token);
+        if escaped.width() > MAX_DISPLAY_WIDTH {
+            while escaped.width() >= MAX_DISPLAY_WIDTH {
+                escaped.pop();
+            }
+            escaped.push('…');
+            break;
+        }
     }
-    let mut truncated = value
-        .chars()
-        .take(MAX_DISPLAY_WIDTH - 1)
-        .collect::<String>();
-    truncated.push('…');
-    truncated
+    escaped
 }
 
 #[cfg(test)]
@@ -141,5 +177,20 @@ mod tests {
             "1m"
         );
         assert_eq!(format_anyvalue(&AnyValue::Null), "null");
+    }
+
+    #[test]
+    fn display_escapes_controls_and_bounds_unicode_width() {
+        let text = truncate_display("日本語😀\n\t\r\u{1b}[31m\u{202e}");
+        assert!(text.contains("日本語😀\\n\\t\\r"));
+        assert!(!text.contains('\u{1b}'));
+        assert!(!text.contains('\u{202e}'));
+        let long = truncate_display(&"漢😀".repeat(100_000));
+        assert!(long.ends_with('…'));
+        assert!(long.width() <= MAX_DISPLAY_WIDTH);
+        assert_eq!(
+            truncate_display(&"a".repeat(MAX_DISPLAY_WIDTH)),
+            "a".repeat(MAX_DISPLAY_WIDTH)
+        );
     }
 }

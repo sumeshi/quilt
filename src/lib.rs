@@ -386,7 +386,7 @@ mod tests {
                     && load.low_memory
                     && load.no_headers
                     && load.chunk_size == Some(42)
-                    && load.infer_schema_length == Some(1_000)
+                    && load.infer_schema_length.is_none()
         ));
 
         let full_inference = parse_typed_commands(
@@ -870,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn ndjson_inference_default_is_bounded_and_full_is_explicit() {
+    fn ndjson_inference_default_is_full_and_bounded_rejects_late_fields() {
         use crate::operations::initializers::load::{
             load, load_with_ndjson_inference_with_resources,
         };
@@ -914,8 +914,23 @@ mod tests {
         .unwrap()
         .collect_schema()
         .unwrap();
+        let bounded = load_with_ndjson_inference_with_resources(
+            std::slice::from_ref(&path),
+            ",",
+            false,
+            false,
+            None,
+            Some(1_000),
+            None,
+            &resources,
+        );
+        assert!(bounded
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("inference limit"));
         fs::remove_file(path).unwrap();
-        assert!(default_schema.get("late").is_none());
+        assert_eq!(default_schema.get("late"), Some(&DataType::Boolean));
         assert_eq!(full_schema.get("late"), Some(&DataType::Boolean));
     }
 

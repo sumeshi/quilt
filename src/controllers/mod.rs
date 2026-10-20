@@ -5,6 +5,7 @@ pub mod csv;
 pub mod definitions;
 pub mod executor;
 pub mod log;
+pub(crate) mod nested;
 pub mod pipeline;
 pub mod resources;
 pub mod yaml_adapter;

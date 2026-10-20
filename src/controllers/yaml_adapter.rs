@@ -344,9 +344,7 @@ pub fn parse_automation_step(
             let a: YLoad = yaml_args(value, name)?;
             let paths = a.paths.map(YamlStrings::into_vec).unwrap_or_default();
             let infer = match a.infer_schema_length {
-                None => {
-                    Some(crate::operations::initializers::load::DEFAULT_NDJSON_INFER_SCHEMA_LENGTH)
-                }
+                None => crate::operations::initializers::load::DEFAULT_NDJSON_INFER_SCHEMA_LENGTH,
                 Some(YInferSchemaLength::Text(v)) if v.eq_ignore_ascii_case("full") => None,
                 Some(YInferSchemaLength::Number(n)) => {
                     if n == 0 {
@@ -381,9 +379,12 @@ pub fn parse_automation_step(
         OperationId::Select => {
             let a: YSelect = yaml_args(value, name)?;
             Ok(TypedCommand::Select(SelectArgs {
-                columns: crate::controllers::cli_adapter::select_columns_from_input(
-                    &a.columns.into_vec().join(","),
-                )?,
+                columns: match a.columns {
+                    YamlStrings::One(value) => {
+                        crate::controllers::cli_adapter::select_columns_from_input(&value)?
+                    }
+                    YamlStrings::Many(values) => values,
+                },
             }))
         }
         OperationId::Sort => {

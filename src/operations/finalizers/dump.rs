@@ -42,7 +42,7 @@ pub fn dump(
             },
             ..Default::default()
         };
-        df.clone()
+        super::csv::csv_frame(df, "write dump")?
             .sink_csv(
                 SinkTarget::Path(std::sync::Arc::new(temp.to_path_buf())),
                 options,

@@ -49,7 +49,7 @@ class TestFlatten(QuiltTestBase):
         self.assertNotEqual(mixed.returncode, 0)
         self.assertIn("Cannot mix", mixed.stderr)
 
-    def test_invalid_records_fail_cleanly_and_mixed_numbers_are_supported(self):
+    def test_invalid_records_and_mixed_numbers_fail_without_lossy_coercion(self):
         for fixture in ("flatten-malformed.jsonl", "flatten-non-object.jsonl"):
             result = self.run_pipeline(
                 ['load', str(self.get_fixture_path(fixture)), '-', 'show']
@@ -60,8 +60,9 @@ class TestFlatten(QuiltTestBase):
         result = self.run_pipeline(
             ['load', str(self.get_fixture_path('flatten-mixed-types.jsonl')), '-', 'show']
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip().splitlines(), ["value", "1.0", "2.5"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("implicit coercion is disabled", result.stderr)
+        self.assertEqual(result.stdout, "")
 
     def test_run_step(self):
         result = self.run_pipeline(

@@ -26,6 +26,12 @@ pub fn sed(
             if !schema.iter_names().any(|s| s == col) {
                 return Err(QuiltError::schema("sed", Some(col), "column not found"));
             }
+            if matches!(
+                schema.get(col),
+                Some(DataType::Struct(_) | DataType::List(_))
+            ) {
+                return Err(QuiltError::schema("sed", Some(col), "nested values cannot be replaced as text; use flatten and select a scalar field"));
+            }
             LogController::debug("Replacing values in selected column");
             let replace_expr = polars::prelude::col(col)
                 .cast(DataType::String) // Ensure the column is String
@@ -39,7 +45,10 @@ pub fn sed(
             LogController::debug("Replacing values in all columns");
             let mut result_df = df.clone();
             // Apply replacement to all columns
-            for (column_name, _) in schema.iter() {
+            for (column_name, dtype) in schema.iter() {
+                if matches!(dtype, DataType::Struct(_) | DataType::List(_)) {
+                    continue;
+                }
                 let col_str = column_name.as_str();
                 let replace_expr = polars::prelude::col(col_str)
                     .cast(DataType::String) // Ensure the column is String

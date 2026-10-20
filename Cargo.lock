@@ -2113,7 +2113,9 @@ dependencies = [
  "regex",
  "rustix 1.0.7",
  "serde",
+ "serde_json",
  "serde_yml",
+ "unicode-width",
  "windows-sys 0.61.2",
 ]
 

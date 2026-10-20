@@ -4,15 +4,12 @@ use crate::controllers::resources::ExecutionResources;
 use crate::error::QuiltError;
 use glob::glob;
 use polars::prelude::*;
-use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Number of NDJSON records inspected per file by default.  Keeping this
-/// bounded prevents a load command from scanning an entire large log merely
-/// to construct its lazy schema.  Callers that need complete inference can
-/// opt into it explicitly with `--infer-schema-length full`.
-pub const DEFAULT_NDJSON_INFER_SCHEMA_LENGTH: usize = 1_000;
+/// Full inference is the safe default; bounded samples are validated against
+/// the remaining records and reject late fields instead of dropping them.
+pub const DEFAULT_NDJSON_INFER_SCHEMA_LENGTH: Option<usize> = None;
 
 fn has_glob_pattern(path: &Path) -> bool {
     let path_str = path.to_string_lossy();
@@ -76,14 +73,14 @@ pub fn load(
         low_memory,
         no_headers,
         chunk_size,
-        Some(DEFAULT_NDJSON_INFER_SCHEMA_LENGTH),
+        DEFAULT_NDJSON_INFER_SCHEMA_LENGTH,
         None,
         resources,
     )
 }
 
-/// Load input files while retaining a bounded NDJSON schema inference policy.
-/// `infer_schema_length == None` requests Polars' full inference mode.
+/// Load input with full NDJSON validation and lossless integer inference.
+/// `infer_schema_length == None` discovers all fields; bounded discovery rejects late fields.
 #[allow(clippy::too_many_arguments)]
 pub fn load_with_ndjson_inference_with_resources(
     paths: &[PathBuf],
@@ -116,10 +113,17 @@ pub fn load_with_ndjson_inference_with_resources(
     let has_ndjson = expanded_paths.iter().any(|path| {
         path.extension()
             .and_then(|ext| ext.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case("jsonl") || ext.eq_ignore_ascii_case("ndjson"))
+            .map(|ext| {
+                ext.eq_ignore_ascii_case("jsonl")
+                    || ext.eq_ignore_ascii_case("ndjson")
+                    || super::ndjson::is_gzip(path)
+            })
             .unwrap_or(false)
     });
     let has_csv = expanded_paths.iter().any(|path| {
+        if super::ndjson::is_gzip(path) {
+            return false;
+        }
         let ext = path
             .extension()
             .and_then(|ext| ext.to_str())
@@ -139,7 +143,12 @@ pub fn load_with_ndjson_inference_with_resources(
     if has_parquet {
         load_parquet_files(&expanded_paths, source_column, resources)
     } else if has_ndjson {
-        load_ndjson_files(&expanded_paths, infer_schema_length, source_column)
+        load_ndjson_files(
+            &expanded_paths,
+            infer_schema_length,
+            source_column,
+            resources,
+        )
     } else {
         load_csv_files(
             &expanded_paths,
@@ -154,59 +163,23 @@ pub fn load_with_ndjson_inference_with_resources(
 }
 
 fn load_ndjson_files(
-    paths: &[PathBuf],
+    original_paths: &[PathBuf],
     infer_schema_length: Option<usize>,
     source_column: Option<&str>,
+    resources: &ExecutionResources,
 ) -> Result<LazyFrame, QuiltError> {
-    // Polars infers each file without materializing its rows. We merge those metadata
-    // schemas so sparse columns present only in later files are retained.
-    let empty_files = paths
+    let paths = original_paths
         .iter()
-        .map(|path| {
-            std::fs::metadata(path)
-                .map(|metadata| metadata.is_file() && metadata.len() == 0)
-                .map_err(|error| QuiltError::Io {
-                    operation: "inspect NDJSON".into(),
-                    path: Some(path.display().to_string()),
-                    message: error.to_string(),
-                })
-        })
-        .collect::<Result<Vec<_>, QuiltError>>()?;
-    let mut merged_schema = Schema::default();
-    for (path, empty) in paths.iter().zip(&empty_files) {
-        if *empty {
-            continue;
-        }
-        let file_schema = LazyJsonLineReader::new(path)
-            .with_infer_schema_length(infer_schema_length.and_then(NonZeroUsize::new))
-            .finish()
-            .and_then(|mut frame| frame.collect_schema())
-            .map_err(|error| QuiltError::Schema {
-                operation: "infer NDJSON schema".into(),
-                column: None,
-                message: format!("{}: {error}", path.display()),
-            })?;
-
-        for (name, dtype) in file_schema.iter() {
-            let dtype = match merged_schema.get(name) {
-                Some(existing) => {
-                    merge_ndjson_dtype(existing, dtype).map_err(|error| QuiltError::Schema {
-                        operation: "merge NDJSON schema".into(),
-                        column: Some(name.to_string()),
-                        message: format!("{}: {error}", path.display()),
-                    })?
-                }
-                None => dtype.clone(),
-            };
-            merged_schema.insert(name.clone(), dtype);
-        }
-    }
+        .map(|path| super::ndjson::prepare_path(path, resources))
+        .collect::<Result<Vec<_>, _>>()?;
+    let (merged_schema, empty_files) =
+        super::ndjson::schema(&paths, original_paths, infer_schema_length)?;
 
     if merged_schema.is_empty() {
         return Err(QuiltError::schema(
             "load",
             None::<String>,
-            "cannot infer NDJSON schema from empty inputs",
+            "cannot infer NDJSON schema: empty inputs or only empty objects have no columns",
         ));
     }
 
@@ -214,11 +187,12 @@ fn load_ndjson_files(
     let frames = paths
         .iter()
         .zip(&empty_files)
-        .map(|(path, empty)| {
+        .zip(original_paths)
+        .map(|((path, empty), original)| {
             if *empty {
                 return add_source_column(
                     DataFrame::empty_with_schema(schema.as_ref()).lazy(),
-                    path,
+                    original,
                     source_column,
                 );
             }
@@ -231,7 +205,7 @@ fn load_ndjson_files(
                     path: Some(path.display().to_string()),
                     message: error.to_string(),
                 })
-                .and_then(|frame| add_source_column(frame, path, source_column))
+                .and_then(|frame| add_source_column(frame, original, source_column))
         })
         .collect::<Result<Vec<_>, QuiltError>>()?;
 
@@ -244,52 +218,6 @@ fn load_ndjson_files(
         },
     )
     .map_err(|error| QuiltError::operation("concatenate NDJSON files", error.to_string()))
-}
-
-fn merge_ndjson_dtype(left: &DataType, right: &DataType) -> PolarsResult<DataType> {
-    if left == right {
-        return Ok(left.clone());
-    }
-    if matches!(left, DataType::Null) {
-        return Ok(right.clone());
-    }
-    if matches!(right, DataType::Null) {
-        return Ok(left.clone());
-    }
-    if matches!(
-        (left, right),
-        (DataType::Int64, DataType::UInt64)
-            | (DataType::UInt64, DataType::Int64)
-            | (DataType::Int64, DataType::Float64)
-            | (DataType::Float64, DataType::Int64)
-            | (DataType::UInt64, DataType::Float64)
-            | (DataType::Float64, DataType::UInt64)
-    ) {
-        return Ok(DataType::Float64);
-    }
-    match (left, right) {
-        (DataType::List(left_inner), DataType::List(right_inner)) => Ok(DataType::List(Box::new(
-            merge_ndjson_dtype(left_inner, right_inner)?,
-        ))),
-        (DataType::Struct(left_fields), DataType::Struct(right_fields)) => {
-            let mut fields = left_fields.clone();
-            for right_field in right_fields {
-                if let Some(left_field) = fields
-                    .iter_mut()
-                    .find(|left_field| left_field.name() == right_field.name())
-                {
-                    let dtype = merge_ndjson_dtype(left_field.dtype(), right_field.dtype())?;
-                    *left_field = Field::new(left_field.name().clone(), dtype);
-                } else {
-                    fields.push(right_field.clone());
-                }
-            }
-            Ok(DataType::Struct(fields))
-        }
-        _ => Err(PolarsError::ComputeError(
-            format!("incompatible NDJSON types: {left} and {right}").into(),
-        )),
-    }
 }
 
 fn load_parquet_files(

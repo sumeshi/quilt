@@ -13,8 +13,10 @@ test = false
 
 [dependencies]
 comfy-table = { version = "7.1" }
+unicode-width = "0.2"
 # Used for serde support for chrono
 serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order", "arbitrary_precision"] }
 serde_yml = "0.0.12"
 # Keep these Polars features aligned with current CLI surface:
 # - lazy: core query pipeline

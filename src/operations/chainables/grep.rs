@@ -40,8 +40,7 @@ pub fn grep(
     let filter_expr = target_columns
         .iter()
         .map(|col_name| {
-            col(col_name)
-                .cast(DataType::String)
+            crate::controllers::nested::search_expr(col_name, schema.get(col_name).unwrap())
                 .str()
                 .contains(pattern_lit.clone(), false) // literal=false for regex
                 .fill_null(lit(false))

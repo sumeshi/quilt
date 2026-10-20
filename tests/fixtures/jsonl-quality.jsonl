@@ -1,0 +1,4 @@
+{"id":9007199254740993,"event":{"deep":{"user":{"name":"日本語😀","active":true}}},"tags":["host","line\nbreak","\u001b[31m"],"items":[{"name":"alpha","values":[1,null,3]}],"empty":{},"xmlns:auto-ns3":"uri","literal.dot":"dot","a,b":"comma","a-b":"dash","space key":"space","nullable":null}
+{"id":9007199254740995,"event":{"deep":{"user":{"name":"other"}}},"tags":[],"items":[],"empty":{},"nullable":null}
+{"id":null,"event":null,"tags":null,"items":null,"empty":{}}
+{"empty":{}}

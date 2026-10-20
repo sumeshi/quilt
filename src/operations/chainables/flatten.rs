@@ -4,6 +4,10 @@ use std::collections::HashSet;
 
 fn leaf_expr(expr: Expr, dtype: &DataType, prefix: &str, output: &mut Vec<(Expr, String)>) {
     if let DataType::Struct(fields) = dtype {
+        if fields.is_empty() {
+            output.push((expr.alias(prefix), prefix.to_string()));
+            return;
+        }
         for field in fields {
             let path = format!("{prefix}.{}", field.name);
             leaf_expr(

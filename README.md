@@ -108,7 +108,7 @@ Load one or more CSV, JSONL/NDJSON, or Parquet files.
 **Supported formats:**
 - CSV files (.csv, .tsv, .txt)
 - Gzipped CSV files (.csv.gz)
-- JSON Lines files (.jsonl, .ndjson), including nested objects
+- JSON Lines files (.jsonl, .ndjson, .jsonl.gz, .ndjson.gz), including nested objects
 - Parquet files (.parquet) - high performance, preserves data types
 
 | Parameter     | Type        | Default | Description                                      |
@@ -118,17 +118,30 @@ Load one or more CSV, JSONL/NDJSON, or Parquet files.
 | --low-memory  | flag    | `false` | Enable low-memory mode for very large files (CSV files only). |
 | --no-headers  | flag    | `false` | Treat the first row as data, not headers (CSV files only). When enabled, columns will be named automatically (`column_1`, `column_2`, etc.). |
 | --chunk-size  | int     | (auto)  | Number of rows to read per chunk (CSV files only). Controls memory usage during file processing. |
-| --infer-schema-length | int or `full` | `1000` | Number of NDJSON records inspected per file for schema inference. Use `full` when sparse fields require a complete scan. |
+| --infer-schema-length | int or `full` | `full` | NDJSON schema discovery per file. A positive limit rejects fields or types first appearing later; all records are validated. |
 | --source-column | str | none | Add each input's expanded path as a String column. Available for all input formats; an existing column with this name is an error. |
 
 CSV separators must be one ASCII character; TSV requires an explicit tab separator.
 Concatenated gzip members are all read, and corruption in a later member fails the load.
 Gzip input is expanded to temporary disk before the lazy scan.
 
-NDJSON schema inference is bounded per file. Late fields may require
-`--infer-schema-length full`; this performs a full inference scan before execution.
-Zero-byte NDJSON files can accompany nonempty files and borrow their inferred schema.
-If every NDJSON file is empty, there is no schema to infer and loading fails.
+NDJSON discovers fields across all records and files by default. With
+`--infer-schema-length N`, later records are still validated; late fields or types
+are errors rather than silently omitted. Blank lines are ignored, and empty files
+can accompany nonempty files. Inputs with no columns cannot be loaded.
+
+Integer IDs are preserved exactly as Int64 or UInt64, including values above 2^53.
+Incompatible types (including integer/float mixtures), out-of-range integers, and
+negative values mixed with values above Int64::MAX are rejected. Normalize such
+fields to strings before loading.
+
+Missing fields and nulls have the same representation. Empty objects mixed with
+null/missing values are currently unsupported; add a typed field or normalize them
+before loading. Empty objects must also be normalized before Parquet export.
+Gzipped NDJSON uses temporary disk proportional to the uncompressed input and
+retains the original path in `--source-column`. Gzipped input is not supported by
+`run --show-plan`.
+
 CSV files loaded together must have compatible inferred column types. In particular,
 a header-only CSV infers String columns and can conflict with numeric columns in a
 nonempty sibling. This currently fails with a schema error; `--source-column` does
@@ -153,6 +166,18 @@ $ qlt load cache.parquet                              # Load from parquet cache
 $ qlt load cache1.parquet cache2.parquet              # Load multiple parquet files
 ```
 
+For example, convert the JSONL output of `evtx2json` to CSV:
+
+```bash
+$ evtx2json Security.evtx --format jsonl -o Security.jsonl
+$ qlt load Security.jsonl - flatten - dump -o Security.csv
+$ qlt load Security.jsonl - flatten - isin event.code 4624,4625 - select '@timestamp,event.code,winlog.computer_name,winlog.event_data.SubjectUserName' - show
+```
+
+`flatten` turns nested object fields into dot-named columns. Arrays stay in one
+cell and are encoded as JSON by `show` and `dump`; nulls become empty CSV cells.
+Use `dumpcache` for Parquet output that preserves supported data types.
+
 ### Chainable Functions
 
 #### `select`
@@ -171,7 +196,10 @@ Select columns by name, numeric index, or range notation.
 - **Quoted colon notation**: `"col:1":"col:3"` - For column names containing colons (preserve the inner quotes when invoking from a shell)
 - **Mixed formats**: `1,col2,4:6` - Combine different selection methods
 
-**Disambiguation rule:** If an exact column name matching `col1-col3` exists, it is selected as-is. Range expansion only occurs when no exact match is found.
+**Disambiguation rule:** Exact column names take precedence over ranges, including
+names such as `col1-col3` and `xmlns:auto-ns3`. For comma-containing names, use
+inner quotes: `select '"a,b",xmlns:auto-ns3'`. In YAML, use a sequence such as
+`columns: ["a,b", "xmlns:auto-ns3"]` to preserve literal names.
 
 ```bash
 $ qlt load data.csv - select datetime                       # Select single column by name
@@ -249,7 +277,8 @@ Recursively expands nested JSON object (Struct) fields into dot-notated columns.
 Scalar fields such as `user.name` and `process.command_line` can then be selected
 normally. Lists and arrays, including lists of objects, remain list-valued and are
 not exploded. Missing or null nested fields remain null. Name collisions between
-existing columns and generated paths fail before the frame is changed.
+existing columns and generated paths fail before the frame is changed. Empty
+objects remain columns.
 
 ```bash
 $ qlt load events.jsonl - flatten - select user.name,process.command_line - show
@@ -318,6 +347,8 @@ $ qlt load data.csv - extract path '^(?P<dir>.*)/(?P<file>[^/]+)$' - show
 #### `isin`
 Filter rows where a column matches any of the given values.
 
+Membership keys must be scalar; use `flatten` to select a nested field.
+
 | Parameter | Type   | Default | Description                                                                          |
 |-----------|--------|---------|--------------------------------------------------------------------------------------|
 | colname   | str    |         | Column name to filter. Required.                                                     |
@@ -334,6 +365,9 @@ $ qlt load data.csv - isin col1 1,4
 #### `contains`
 Filter rows where a column contains a specific literal substring.
 
+For nested columns, matching uses JSON text (including keys and escapes) and
+preserves the original values. Use `flatten` to search a specific scalar field.
+
 | Parameter   | Type   | Default | Description                                 |
 |-------------|--------|---------|---------------------------------------------|
 | colname     | str    |         | Column name to search. Required.            |
@@ -348,6 +382,9 @@ $ qlt load data.csv - contains str BA --ignore-case
 
 #### `sed`
 Replace values in column(s) using a Regex pattern.
+
+Global replacement leaves nested columns unchanged. To replace a nested field,
+use `flatten` first; selecting an object or array directly is an error.
 
 | Parameter   | Type   | Default | Description                                 |
 |-------------|--------|---------|---------------------------------------------|
@@ -367,6 +404,9 @@ $ qlt load data.csv - sed ".*o.*" foooooo --column str      # Regex replacement 
 
 #### `grep`
 Filter rows where any column matches a regex pattern.
+
+Nested columns are searched as JSON text, including keys and escapes; matched
+rows retain their original values.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -694,6 +734,9 @@ chunks. This avoids emitting rows before lazy evaluation has succeeded, but uses
 proportional to the rendered output. `--debug` is accepted and currently has no effect;
 use `showquery` to inspect the query plan.
 
+Object and list columns are encoded as JSON strings inside CSV cells, with
+normal CSV quoting. Null cells remain empty; empty lists are `[]`.
+
 ```bash
 $ qlt load data.csv - head 5 - show
 ```
@@ -706,7 +749,12 @@ Displays the resulting data in a formatted table to standard output. Shows table
 - For datasets with 9+ rows: shows the first 8 rows and a truncation indicator (`⋮`)
 - For datasets with 8 or fewer rows: shows all rows without truncation
 - At most 8 rows are evaluated for the preview, plus one row to detect truncation
-- Cell contents are limited to 40 characters and truncated with `…`
+- Struct fields are recursively displayed as dot-named columns; path collisions error
+- Arrays remain one JSON cell per input row; rows are never automatically exploded
+- The first 8 columns are displayed; the total column count and omitted count are shown
+- Cells and headers are limited to 64 terminal display columns and truncated with `…`
+- Newlines, tabs, ANSI/control and bidi characters are escaped before rendering
+- Use `select` to choose columns and `show`/`dump` for complete machine-readable output
 
 This command does not take any arguments or options.
 Datetime, date, time, and duration cells use human-readable values; nulls remain
@@ -723,6 +771,9 @@ Outputs the processing results to a CSV/TSV file. The destination must not
 already exist; output is first written to a temporary sibling and atomically
 published with a no-replace primitive (with a safe hard-link fallback where
 supported). The finalizer evaluates the lazy frame as its required write barrier.
+As with `show`, object and list values become JSON strings inside CSV cells;
+nulls remain empty. Use `flatten` first to turn nested object fields into columns,
+or `dumpcache` to preserve the original types in Parquet.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -775,12 +826,12 @@ contextual error at evaluation time.
 
 | Operation | Accepted input and output schema | Null/error behavior | Evaluation and memory |
 |---|---|---|---|
-| `load` | CSV/TSV/gzip CSV, same-family JSONL/NDJSON, or Parquet; outputs inferred/preserved columns | Missing files, mixed families, malformed records, and incompatible schemas fail before/at scan | Lazy scan; bounded NDJSON inference (1000 rows by default), `full` scans all records |
+| `load` | CSV/TSV/gzip CSV, same-family JSONL/NDJSON, or Parquet; outputs inferred/preserved columns | Missing files, mixed families, malformed records, and incompatible schemas fail before/at scan | Lazy scan after full NDJSON validation; bounded discovery rejects late fields |
 | `select` | Existing names, 1-based indices, and ranges; output contains selected columns in requested order | Missing names, invalid/out-of-range/oversized ranges fail with usage/schema error | Lazy projection; schema-only validation |
-| `isin` | Any column; output preserves schema and matching rows | Numeric/boolean values are parsed to the column type; nulls do not match; empty values produce an empty frame; invalid typed values and missing columns error | Lazy filter; schema-only validation |
-| `contains` | String/coercible column plus literal substring; output preserves schema and matching rows | Values are string-coerced; nulls do not match; missing columns and invalid options error | Lazy filter; schema-only validation |
+| `isin` | Scalar column; output preserves schema and matching rows | Numeric/boolean values are parsed to the column type; nulls do not match; empty values produce an empty frame; invalid typed values and missing columns error | Lazy filter; schema-only validation |
+| `contains` | String/coercible column plus literal substring; output preserves schema and matching rows | Scalars are string-coerced; nested values use JSON text; nulls do not match; missing columns and invalid options error | Lazy filter; schema-only validation |
 | `grep` | Regex over all or named columns; output preserves schema and matching rows | Nulls stringify as non-matches; invalid regex/columns error | Lazy filter; schema-only validation |
-| `sed` | Regex replacement over all or one column; output keeps names (all-column mode may stringify values) | Nulls remain null; invalid regex/column errors | Lazy expression; schema-only validation |
+| `sed` | Regex replacement over all or one column; output keeps names (all-column mode may stringify values) | Nulls remain null; global mode skips nested columns and explicit nested targets error | Lazy expression; schema-only validation |
 | `head` | Any dtype; output keeps schema and at most N first rows | N must be non-negative; nulls unchanged | Lazy limit; bounded output evaluation |
 | `tail` | Any dtype; output keeps schema and at most N last rows | N must be non-negative; nulls unchanged | Lazy tail barrier; upstream must be consumed to find final rows |
 | `sort` | Existing sortable columns; output preserves schema and row values | Missing columns error; null order follows Polars | Lazy sort barrier; Polars may maintain input-proportional state |

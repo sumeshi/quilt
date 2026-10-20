@@ -23,21 +23,16 @@ pub fn contains(
     }
 
     LogController::debug("Applying contains");
+    let searchable = crate::controllers::nested::search_expr(colname, schema.get(colname).unwrap());
 
     // Use Polars' native string operations for better performance
     let expr = if ignorecase {
         // For case-insensitive search, use regex with (?i) flag
         let pattern_regex = format!("(?i){}", regex::escape(pattern));
-        col(colname)
-            .cast(DataType::String)
-            .str()
-            .contains(lit(pattern_regex), false) // literal=false for regex
+        searchable.str().contains(lit(pattern_regex), false) // literal=false for regex
     } else {
         // For case-sensitive search, use literal contains
-        col(colname)
-            .cast(DataType::String)
-            .str()
-            .contains(lit(pattern), true) // literal=true for exact string match
+        searchable.str().contains(lit(pattern), true) // literal=true for exact string match
     };
 
     Ok(df.clone().filter(expr))

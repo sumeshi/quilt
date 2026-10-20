@@ -53,5 +53,16 @@ pub fn render_command_help(name: &str) -> Option<String> {
                 + "Parameter placeholders are whole YAML values: {\"$param\": name}; partial interpolation is rejected.\n",
         );
     }
-    Some(format!("{}\n\nUsage: {}\n", s.name, s.help))
+    let details = match name {
+        "load" => "\nJSONL/NDJSON (including .jsonl.gz/.ndjson.gz): full, strict schema validation by default.\n  --infer-schema-length full|N  N limits schema discovery, but all records are validated; late fields error.\nInteger/float mixtures and incompatible signed/unsigned ranges are rejected without precision loss.\nGzip input is spooled to temporary disk; inference retains one record plus schema in memory.\n",
+        "showtable" => "\nStruct fields are displayed as dot paths; lists stay JSON cells. Preview: 8 rows, 8 columns, 64 display columns per cell/header. Omitted content is marked. Controls are escaped. Use select to choose visible columns, show/dump for complete CSV output.\n",
+        "flatten" => "\nLazily project recursive Struct fields as dot paths; preserve lists and non-null empty objects. Path collisions are errors. Lists are never exploded.\n",
+        "show" | "dump" => "\nCSV output: nested objects/lists are JSON strings inside quoted CSV cells; nulls are empty. Use flatten to expose object fields as columns, dumpcache for typed Parquet.\n",
+        "select" => "\nExact existing names take precedence over range syntax. Quote comma-containing names inside the argument, e.g. select '\"a,b\",xmlns:auto-ns3'. YAML columns sequences preserve literal names.\n",
+        "grep" | "contains" => "\nNested columns are searched through their JSON representation (keys and values, JSON escaping included); matched rows retain original types. Use flatten for scalar-field search.\n",
+        "sed" => "\nGlobal replacement leaves nested columns unchanged; selecting a nested column explicitly is an error. Use flatten to target scalar fields.\n",
+        "isin" => "\nMembership keys must be scalar; nested columns are rejected. Use flatten for a scalar field or grep/contains for JSON text search.\n",
+        _ => "",
+    };
+    Some(format!("{}\n\nUsage: {}\n{details}", s.name, s.help))
 }

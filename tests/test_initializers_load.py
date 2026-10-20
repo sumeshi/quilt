@@ -171,7 +171,7 @@ class TestLoad(QuiltTestBase):
 
             default = self.run_pipeline(['load', str(ndjson_path), '-', 'headers'])
             self.assertEqual(default.returncode, 0, default.stderr)
-            self.assertNotIn("late", default.stdout)
+            self.assertIn("late", default.stdout)
 
             full = self.run_pipeline(
                 ['load', str(ndjson_path), '--infer-schema-length', 'full', '-', 'headers']
@@ -192,7 +192,7 @@ class TestLoad(QuiltTestBase):
                 )
             run_default = self.run_pipeline(['run', str(default_run_config)])
             self.assertEqual(run_default.returncode, 0, run_default.stderr)
-            self.assertNotIn("late", run_default.stdout)
+            self.assertIn("late", run_default.stdout)
 
             full_run_config = os.path.join(directory, "run-full.yaml")
             with open(full_run_config, "w", encoding="utf-8") as handle:

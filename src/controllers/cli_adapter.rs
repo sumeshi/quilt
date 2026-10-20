@@ -243,7 +243,35 @@ fn split_values(value: &str) -> Result<Vec<String>, QuiltError> {
     }
 }
 pub(crate) fn select_columns_from_input(input: &str) -> Result<Vec<String>, QuiltError> {
-    split_values(input)
+    let mut columns = Vec::new();
+    let mut quoted = false;
+    let mut start = 0;
+    for (index, character) in input.char_indices() {
+        if character == '"' {
+            quoted = !quoted;
+        }
+        if character == ',' && !quoted {
+            columns.push(input[start..index].trim().to_string());
+            start = index + 1;
+        }
+    }
+    if quoted {
+        return Err(QuiltError::usage("Error: unclosed quote in select columns"));
+    }
+    columns.push(input[start..].trim().to_string());
+    for name in &mut columns {
+        if name.starts_with('"')
+            && name.ends_with('"')
+            && name.len() >= 2
+            && !name.contains("\":\"")
+        {
+            *name = name[1..name.len() - 1].replace("\"\"", "\"");
+        }
+    }
+    if columns.iter().any(String::is_empty) {
+        return Err(QuiltError::usage("Error: select columns must not be empty"));
+    }
+    Ok(columns)
 }
 
 fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
@@ -270,9 +298,9 @@ fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
                     .transpose()
                     .map_err(|_| QuiltError::usage("Error: Invalid chunk size"))?,
                 infer_schema_length: match val(&raw, "infer_schema_length") {
-                    None => Some(
-                        crate::operations::initializers::load::DEFAULT_NDJSON_INFER_SCHEMA_LENGTH,
-                    ),
+                    None => {
+                        crate::operations::initializers::load::DEFAULT_NDJSON_INFER_SCHEMA_LENGTH
+                    }
                     Some(value) if value.eq_ignore_ascii_case("full") => None,
                     Some(value) => {
                         let length = value.parse::<usize>().map_err(|_| {

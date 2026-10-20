@@ -20,7 +20,9 @@ pub fn select(df: &LazyFrame, colnames: &[String]) -> Result<LazyFrame, QuiltErr
     let mut expanded_colnames = Vec::new();
 
     for colname in colnames {
-        if colname.contains(':') && !colname.starts_with('"') {
+        if available_columns.contains(colname) {
+            expanded_colnames.push(colname.clone());
+        } else if colname.contains(':') && !colname.starts_with('"') {
             let range_cols = if is_numeric_range(colname) {
                 parse_numeric_range(colname, &available_columns)?
             } else {
@@ -38,8 +40,6 @@ pub fn select(df: &LazyFrame, colnames: &[String]) -> Result<LazyFrame, QuiltErr
             } else {
                 expanded_colnames.push(colname.clone());
             }
-        } else if available_columns.contains(colname) {
-            expanded_colnames.push(colname.clone());
         } else if RE_COL_RANGE_HYPHEN.is_match(colname) {
             expanded_colnames.extend(parse_hyphen_range(colname, &available_columns)?);
         } else if is_numeric_index(colname) {
