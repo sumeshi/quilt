@@ -1,3 +1,4 @@
+use crate::controllers::nested::literal_col;
 use crate::error::QuiltError;
 use crate::operations::datetime::{
     localize, parse_datetime_detailed_with_diagnostics, DateTimeConfig, ParserDiagnostics,
@@ -63,7 +64,7 @@ pub fn cast_with_config(
         let config = datetime.clone();
         let diagnostics = diagnostics.clone();
         let output_dtype = dtype.clone();
-        col(column).cast(DataType::String).map(
+        literal_col(column).cast(DataType::String).map(
             move |series| {
                 let values = series.str()?.into_iter().enumerate();
                 let parsed = values
@@ -109,7 +110,7 @@ pub fn cast_with_config(
         let target_name = target.clone();
         let output_name = column.to_string();
         let output_dtype = dtype.clone();
-        col(column).map(
+        literal_col(column).map(
             move |series| {
                 let casted = series.strict_cast(&output_dtype).map_err(|error| {
                     PolarsError::ComputeError(

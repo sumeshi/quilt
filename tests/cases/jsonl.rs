@@ -152,6 +152,83 @@ fn duplicate_keys_fail_with_record_and_nested_path() {
 }
 
 #[test]
+fn wildcard_and_regex_shaped_schema_names_remain_literal() {
+    let root = tempfile::tempdir().unwrap();
+    let path = write(
+        root.path(),
+        "literal.jsonl",
+        "{\"*\":11,\"^x$\":22,\"x\":33,\"__qlt_grep_0\":44,\"__qlt_grep_1\":55,\"event\":{\"*\":66,\"^y$\":77,\"y\":88}}\n",
+    );
+    let shown = rows(&text(&["load", path.to_str().unwrap(), "-", "flatten"]));
+    assert_eq!(shown[0]["*"], "11");
+    assert_eq!(shown[0]["^x$"], "22");
+    assert_eq!(shown[0]["event.*"], "66");
+    assert_eq!(shown[0]["event.^y$"], "77");
+    let selected = frame(&["load", path.to_str().unwrap(), "-", "select", "*"]);
+    assert_eq!(selected.width(), 1);
+    assert_eq!(
+        selected.column("*").unwrap().i64().unwrap().get(0),
+        Some(11)
+    );
+    let raw = rows(&text(&["load", path.to_str().unwrap()]));
+    assert_eq!(
+        serde_json::from_str::<Value>(&raw[0]["event"]).unwrap()["*"],
+        66
+    );
+    let preview = text(&["load", path.to_str().unwrap(), "-", "showtable"]);
+    assert!(preview.contains("event.^y$") && preview.contains("77"));
+    let filtered = frame(&["load", path.to_str().unwrap(), "-", "grep", "^22$"]);
+    assert_eq!(filtered.height(), 1);
+    assert_eq!(filtered.width(), 6);
+    assert_eq!(
+        filtered
+            .column("__qlt_grep_0")
+            .unwrap()
+            .i64()
+            .unwrap()
+            .get(0),
+        Some(44)
+    );
+    assert_eq!(filtered.column("^x$").unwrap().dtype(), &DataType::Int64);
+    let grouped = rows(&text(&[
+        "load",
+        path.to_str().unwrap(),
+        "-",
+        "count",
+        "*",
+        "-",
+        "sort",
+        "*",
+        "-",
+        "show",
+    ]));
+    assert_eq!(grouped[0]["*"], "11");
+    assert_eq!(grouped[0]["count"], "1");
+    let edited = rows(&text(&[
+        "load",
+        path.to_str().unwrap(),
+        "-",
+        "sed",
+        "11",
+        "matched",
+        "--column",
+        "*",
+        "-",
+        "isin",
+        "*",
+        "matched",
+        "-",
+        "renamecol",
+        "*",
+        "^renamed$",
+        "-",
+        "select",
+        "^renamed$",
+    ]));
+    assert_eq!(edited[0]["^renamed$"], "matched");
+}
+
+#[test]
 fn nested_csv_and_parquet_roundtrip_preserve_values_and_integer_types() {
     let root = tempfile::tempdir().unwrap();
     let original = json!([

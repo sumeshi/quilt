@@ -1,3 +1,4 @@
+use crate::controllers::nested::literal_col;
 use crate::error::QuiltError;
 use polars::prelude::*;
 
@@ -87,7 +88,7 @@ pub fn parse_size_column(df: &LazyFrame, column: &str) -> Result<LazyFrame, Quil
         ));
     }
     let output_name = column.to_string();
-    let output = col(column).cast(DataType::String).map(
+    let output = literal_col(column).cast(DataType::String).map(
         move |series| {
             let casted = series.cast(&DataType::String)?;
             let strings = casted.str()?.into_iter();

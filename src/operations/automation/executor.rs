@@ -10,7 +10,7 @@ use crate::controllers::log::LogController;
 use crate::controllers::resources::ExecutionResources;
 use crate::error::QuiltError;
 use crate::operations::automation::model::{ConcatStage, JoinStage};
-use polars::prelude::{col, lit, JoinType, LazyFrame};
+use polars::prelude::{col, lit, Expr, JoinType, LazyFrame};
 use serde_yml::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -431,8 +431,14 @@ fn join_pair(
         JoinKeySpec::Asymmetric { left, right } => (left.clone(), right.clone()),
         JoinKeySpec::Cross => unreachable!("cross join handled earlier"),
     };
-    let left_on_exprs: Vec<_> = left_on.iter().map(col).collect();
-    let right_on_exprs: Vec<_> = right_on.iter().map(col).collect();
+    let left_on_exprs: Vec<_> = left_on
+        .iter()
+        .map(|name| Expr::Column(name.into()))
+        .collect();
+    let right_on_exprs: Vec<_> = right_on
+        .iter()
+        .map(|name| Expr::Column(name.into()))
+        .collect();
     LogController::debug("Joining dataframes");
     left_df.join(right_df, &left_on_exprs, &right_on_exprs, join_args)
 }

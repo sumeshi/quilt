@@ -29,7 +29,7 @@ pub fn render_table(df: &LazyFrame) -> Result<String, QuiltError> {
     let columns: Vec<Expr> = schema
         .iter_names()
         .take(MAX_DISPLAY_COLUMNS)
-        .map(|name| col(name.clone()))
+        .map(|name| crate::controllers::nested::literal_col(name.as_str()))
         .collect();
     let preview = super::csv::csv_frame(&flattened.select(columns), "showtable")?;
     // Try to estimate the size using limit + head approach to avoid full collection

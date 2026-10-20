@@ -1,3 +1,4 @@
+use crate::controllers::nested::literal_col;
 use crate::error::QuiltError;
 use polars::prelude::*;
 
@@ -41,20 +42,20 @@ pub fn delta(df: &LazyFrame, column: &str, output: Option<&str>) -> Result<LazyF
         // integer input range; the final strict cast makes the public result
         // Int64 and reports out-of-range values at sink time.
         let decimal = DataType::Decimal(Some(38), Some(0));
-        let difference =
-            col(column).cast(decimal.clone()) - col(column).cast(decimal).shift(lit(1i64));
+        let difference = literal_col(column).cast(decimal.clone())
+            - literal_col(column).cast(decimal).shift(lit(1i64));
         Ok(df
             .clone()
             .with_columns([difference.strict_cast(DataType::Int64).alias(output)]))
     } else if matches!(source, DataType::Float32 | DataType::Float64) {
         // Floating inputs retain their source precision; Float32 deltas are
         // Float32 and Float64 deltas are Float64.
-        Ok(df
-            .clone()
-            .with_columns([(col(column) - col(column).shift(lit(1i64))).alias(output)]))
+        Ok(df.clone().with_columns([
+            (literal_col(column) - literal_col(column).shift(lit(1i64))).alias(output)
+        ]))
     } else if let DataType::Datetime(unit, timezone) = source {
-        let raw_delta =
-            col(column).cast(DataType::Int64) - col(column).cast(DataType::Int64).shift(lit(1i64));
+        let raw_delta = literal_col(column).cast(DataType::Int64)
+            - literal_col(column).cast(DataType::Int64).shift(lit(1i64));
         let micros = match unit {
             TimeUnit::Nanoseconds => raw_delta / lit(1_000i64),
             TimeUnit::Microseconds => raw_delta,

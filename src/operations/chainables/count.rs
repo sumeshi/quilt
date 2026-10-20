@@ -1,6 +1,6 @@
 use crate::controllers::log::LogController;
 use crate::error::QuiltError;
-use polars::prelude::{col, len, Expr, LazyFrame, SortMultipleOptions};
+use polars::prelude::{len, Expr, LazyFrame, SortMultipleOptions};
 
 pub fn count(df: &LazyFrame, columns: &[String]) -> Result<LazyFrame, QuiltError> {
     // Grouped counting (and its count sort) is intentionally a global
@@ -37,7 +37,12 @@ pub fn count(df: &LazyFrame, columns: &[String]) -> Result<LazyFrame, QuiltError
 
     Ok(df
         .clone()
-        .group_by(group_colnames.iter().map(col).collect::<Vec<Expr>>())
+        .group_by(
+            group_colnames
+                .iter()
+                .map(|name| crate::controllers::nested::literal_col(name))
+                .collect::<Vec<Expr>>(),
+        )
         .agg([len().alias("count")])
         .sort(
             ["count"],

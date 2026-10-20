@@ -1,4 +1,5 @@
 use crate::controllers::log::LogController;
+use crate::controllers::nested::literal_col;
 use crate::error::QuiltError;
 use polars::prelude::*;
 
@@ -42,21 +43,23 @@ pub fn isin(df: &LazyFrame, colname: &str, values: &[String]) -> Result<LazyFram
                 DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => value
                     .parse::<i64>()
                     .map_err(|_| ())
-                    .map(|parsed| col(colname).cast(DataType::Int64).eq(lit(parsed))),
+                    .map(|parsed| literal_col(colname).cast(DataType::Int64).eq(lit(parsed))),
                 DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => value
                     .parse::<u64>()
                     .map_err(|_| ())
-                    .map(|parsed| col(colname).cast(DataType::UInt64).eq(lit(parsed))),
+                    .map(|parsed| literal_col(colname).cast(DataType::UInt64).eq(lit(parsed))),
                 DataType::Float32 | DataType::Float64 => value
                     .parse::<f64>()
                     .map_err(|_| ())
-                    .map(|parsed| col(colname).cast(DataType::Float64).eq(lit(parsed))),
+                    .map(|parsed| literal_col(colname).cast(DataType::Float64).eq(lit(parsed))),
                 DataType::Boolean => value
                     .parse::<bool>()
                     .map_err(|_| ())
-                    .map(|parsed| col(colname).eq(lit(parsed))),
-                DataType::String => Ok(col(colname).eq(lit(value.as_str()))),
-                _ => Ok(col(colname).cast(DataType::String).eq(lit(value.as_str()))),
+                    .map(|parsed| literal_col(colname).eq(lit(parsed))),
+                DataType::String => Ok(literal_col(colname).eq(lit(value.as_str()))),
+                _ => Ok(literal_col(colname)
+                    .cast(DataType::String)
+                    .eq(lit(value.as_str()))),
             }
             .map_err(|_| {
                 QuiltError::usage(format!(

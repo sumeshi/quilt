@@ -23,7 +23,10 @@ pub fn sort(df: &LazyFrame, colnames: &[String], desc: bool) -> Result<LazyFrame
 
     LogController::debug("Sorting columns");
 
-    let sort_exprs: Vec<Expr> = colnames.iter().map(col).collect();
+    let sort_exprs: Vec<Expr> = colnames
+        .iter()
+        .map(|name| crate::controllers::nested::literal_col(name))
+        .collect();
     let sort_options = SortMultipleOptions::default().with_order_descending(desc);
 
     Ok(df.clone().sort_by_exprs(sort_exprs, sort_options))

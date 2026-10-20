@@ -202,6 +202,7 @@ Select columns by name, numeric index, or range notation.
 names such as `col1-col3` and `xmlns:auto-ns3`. For comma-containing names, use
 inner quotes: `select '"a,b",xmlns:auto-ns3'`. In YAML, use a sequence such as
 `columns: ["a,b", "xmlns:auto-ns3"]` to preserve literal names.
+Names such as `*` and `^name$` are also literal column names; quote them in the shell.
 
 ```bash
 $ qlt load data.csv - select datetime                       # Select single column by name

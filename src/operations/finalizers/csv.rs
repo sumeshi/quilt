@@ -9,7 +9,7 @@ pub(super) fn csv_frame(df: &LazyFrame, operation: &str) -> Result<LazyFrame, Qu
         .collect_schema()
         .map_err(|error| QuiltError::finalizer(operation, error.to_string()))?;
     let expressions = schema.iter().map(|(name, dtype)| {
-        let column = col(name.clone());
+        let column = crate::controllers::nested::literal_col(name.as_str());
         if matches!(dtype, DataType::Struct(_) | DataType::List(_)) {
             crate::controllers::nested::json_expr(column).alias(name.clone())
         } else {

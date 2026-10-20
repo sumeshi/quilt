@@ -8,10 +8,10 @@ fn leaf_expr(expr: Expr, dtype: &DataType, prefix: &str, output: &mut Vec<(Expr,
             output.push((expr.alias(prefix), prefix.to_string()));
             return;
         }
-        for field in fields {
+        for (index, field) in fields.iter().enumerate() {
             let path = format!("{prefix}.{}", field.name);
             leaf_expr(
-                expr.clone().struct_().field_by_name(&field.name),
+                expr.clone().struct_().field_by_index(index as i64),
                 &field.dtype,
                 &path,
                 output,
@@ -36,7 +36,7 @@ pub fn flatten(df: &LazyFrame) -> Result<LazyFrame, QuiltError> {
             let mut leaves = Vec::new();
             let field_name = field.name().to_string();
             leaf_expr(
-                col(field_name.clone()),
+                crate::controllers::nested::literal_col(&field_name),
                 field.dtype(),
                 &field_name,
                 &mut leaves,
@@ -55,7 +55,9 @@ pub fn flatten(df: &LazyFrame) -> Result<LazyFrame, QuiltError> {
             }
         } else {
             names.insert(field.name().to_string());
-            output.push(col(field.name().to_string()));
+            output.push(crate::controllers::nested::literal_col(
+                field.name().as_str(),
+            ));
         }
     }
     Ok(df.clone().select(output))

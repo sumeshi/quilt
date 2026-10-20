@@ -65,7 +65,10 @@ pub fn select(df: &LazyFrame, colnames: &[String]) -> Result<LazyFrame, QuiltErr
         }
     }
 
-    let selected_cols: Vec<Expr> = expanded_colnames.iter().map(col).collect();
+    let selected_cols: Vec<Expr> = expanded_colnames
+        .iter()
+        .map(|name| crate::controllers::nested::literal_col(name))
+        .collect();
     if selected_cols.is_empty() {
         LogController::warn("No valid columns selected. Returning original DataFrame.");
         return Ok(df.clone());

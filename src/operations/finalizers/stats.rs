@@ -1,4 +1,5 @@
 use crate::controllers::log::LogController;
+use crate::controllers::nested::literal_col;
 use crate::error::QuiltError;
 use crate::operations::finalizers::FinalizerResult;
 use comfy_table::{presets::UTF8_FULL, Cell, Color, Table};
@@ -107,7 +108,7 @@ fn calculate_stats_lazy(
     // Add null count for all columns
     for col_name in column_names {
         basic_exprs.push(
-            col(col_name)
+            literal_col(col_name)
                 .null_count()
                 .alias(format!("null_count_{col_name}")),
         );
@@ -116,17 +117,21 @@ fn calculate_stats_lazy(
     // Add numeric statistics for numeric columns
     for col_name in &numeric_cols {
         basic_exprs.extend([
-            col(*col_name).mean().alias(format!("mean_{col_name}")),
-            col(*col_name).std(1).alias(format!("std_{col_name}")),
-            col(*col_name).min().alias(format!("min_{col_name}")),
-            col(*col_name).max().alias(format!("max_{col_name}")),
-            col(*col_name)
+            literal_col(col_name)
+                .mean()
+                .alias(format!("mean_{col_name}")),
+            literal_col(col_name)
+                .std(1)
+                .alias(format!("std_{col_name}")),
+            literal_col(col_name).min().alias(format!("min_{col_name}")),
+            literal_col(col_name).max().alias(format!("max_{col_name}")),
+            literal_col(col_name)
                 .quantile(lit(0.25), QuantileMethod::Linear)
                 .alias(format!("p25_{col_name}")),
-            col(*col_name)
+            literal_col(col_name)
                 .quantile(lit(0.50), QuantileMethod::Linear)
                 .alias(format!("p50_{col_name}")),
-            col(*col_name)
+            literal_col(col_name)
                 .quantile(lit(0.75), QuantileMethod::Linear)
                 .alias(format!("p75_{col_name}")),
         ]);
@@ -135,8 +140,8 @@ fn calculate_stats_lazy(
     // Add string statistics for string columns
     for col_name in &string_cols {
         basic_exprs.extend([
-            col(*col_name).min().alias(format!("min_{col_name}")),
-            col(*col_name).max().alias(format!("max_{col_name}")),
+            literal_col(col_name).min().alias(format!("min_{col_name}")),
+            literal_col(col_name).max().alias(format!("max_{col_name}")),
         ]);
     }
 

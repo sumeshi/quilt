@@ -1,3 +1,4 @@
+use crate::controllers::nested::literal_col;
 use crate::error::QuiltError;
 use polars::prelude::*;
 use regex::Regex;
@@ -50,7 +51,7 @@ pub fn extract(df: &LazyFrame, column: &str, pattern: &str) -> Result<LazyFrame,
     let expressions = group_names.into_iter().map(|group_name| {
         let regex = regex.clone();
         let capture_name = group_name.clone();
-        col(column)
+        literal_col(column)
             .map(
                 move |series| {
                     let values = series

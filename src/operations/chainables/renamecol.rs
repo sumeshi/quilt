@@ -1,4 +1,5 @@
 use crate::controllers::log::LogController;
+use crate::controllers::nested::literal_col;
 use crate::error::QuiltError;
 use polars::prelude::*;
 
@@ -34,9 +35,9 @@ pub fn renamecol(
         .iter_names()
         .map(|name| {
             if name.as_str() == old_colname {
-                col(old_colname).alias(new_colname)
+                literal_col(old_colname).alias(new_colname)
             } else {
-                col(name.as_str())
+                literal_col(name.as_str())
             }
         })
         .collect();

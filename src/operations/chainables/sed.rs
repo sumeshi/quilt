@@ -1,4 +1,5 @@
 use crate::controllers::log::LogController;
+use crate::controllers::nested::literal_col;
 use crate::error::QuiltError;
 use polars::prelude::*;
 
@@ -33,7 +34,7 @@ pub fn sed(
                 return Err(QuiltError::schema("sed", Some(col), "nested values cannot be replaced as text; use flatten and select a scalar field"));
             }
             LogController::debug("Replacing values in selected column");
-            let replace_expr = polars::prelude::col(col)
+            let replace_expr = literal_col(col)
                 .cast(DataType::String) // Ensure the column is String
                 .str()
                 .replace_all(lit(final_pattern), lit(replacement.to_string()), false) // literal: false for regex
@@ -50,7 +51,7 @@ pub fn sed(
                     continue;
                 }
                 let col_str = column_name.as_str();
-                let replace_expr = polars::prelude::col(col_str)
+                let replace_expr = literal_col(col_str)
                     .cast(DataType::String) // Ensure the column is String
                     .str()
                     .replace_all(

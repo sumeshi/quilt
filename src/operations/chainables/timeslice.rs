@@ -1,4 +1,5 @@
 use crate::controllers::log::LogController;
+use crate::controllers::nested::literal_col;
 use crate::error::QuiltError;
 use crate::operations::datetime::{
     localize, parse_datetime_detailed_with_diagnostics, DateTimeConfig, ParserDiagnostics,
@@ -45,7 +46,7 @@ pub fn timeslice(
     }
     let temporary_output_name = temporary_column.clone();
     let time_column_name = time_column.to_string();
-    let time_col_expr = col(time_column)
+    let time_col_expr = literal_col(time_column)
         .cast(DataType::String)
         .map(
             {
@@ -109,7 +110,7 @@ pub fn timeslice(
                 )
             })?;
 
-        let start_filter = col(&temporary_column).gt_eq(lit(start_datetime));
+        let start_filter = literal_col(&temporary_column).gt_eq(lit(start_datetime));
         result_df = result_df.filter(start_filter);
     }
 
@@ -134,13 +135,18 @@ pub fn timeslice(
                 )
             })?;
 
-        let end_filter = col(&temporary_column).lt_eq(lit(end_datetime));
+        let end_filter = literal_col(&temporary_column).lt_eq(lit(end_datetime));
         result_df = result_df.filter(end_filter);
     }
 
     // Remove the temporary datetime column
     let original_columns: Vec<String> = schema.iter_names().map(|s| s.to_string()).collect();
-    Ok(result_df.select([cols(original_columns)]))
+    Ok(result_df.select(
+        original_columns
+            .iter()
+            .map(|name| literal_col(name))
+            .collect::<Vec<_>>(),
+    ))
 }
 
 fn parse_datetime_string_canonical(

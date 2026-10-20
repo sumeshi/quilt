@@ -4,17 +4,17 @@ use serde_json::json;
 #[test]
 fn dag_forward_references_join_and_fanout_concat_keep_values_and_order() {
     let root = tempfile::tempdir().unwrap();
-    let left = write(root.path(), "left.csv", "id\n1\n2\n");
-    let right = write(root.path(), "right.csv", "key,label\n1,match\n");
+    let left = write(root.path(), "left.csv", "*\n1\n2\n");
+    let right = write(root.path(), "right.csv", "^key$,label\n1,match\n");
     let config = document(
         root.path(),
         "graph.yaml",
         json!({"version":1,"stages":[
             {"name":"output","from":"combined","steps":[{"show":{}}]},
             {"name":"combined","concat":{"inputs":["first","second"],"how":"vertical"}},
-            {"name":"first","from":"joined","steps":[{"select":{"columns":["id","label"]}}]},
-            {"name":"second","from":"joined","steps":[{"select":{"columns":["id","label"]}}]},
-            {"name":"joined","join":{"inputs":["left","right"],"how":"left","left-on":["id"],"right-on":["key"],"coalesce":true}},
+            {"name":"first","from":"joined","steps":[{"select":{"columns":["*","label"]}}]},
+            {"name":"second","from":"joined","steps":[{"select":{"columns":["*","label"]}}]},
+            {"name":"joined","join":{"inputs":["left","right"],"how":"left","left-on":["*"],"right-on":["^key$"],"coalesce":true}},
             {"name":"left","steps":[{"load":{"paths":[left]}}]},
             {"name":"right","steps":[{"load":{"paths":[right]}}]}
         ]}),
@@ -23,7 +23,7 @@ fn dag_forward_references_join_and_fanout_concat_keep_values_and_order() {
     assert_eq!(
         result
             .iter()
-            .map(|r| (r["id"].as_str(), r["label"].as_str()))
+            .map(|r| (r["*"].as_str(), r["label"].as_str()))
             .collect::<Vec<_>>(),
         [("1", "match"), ("2", ""), ("1", "match"), ("2", "")]
     );

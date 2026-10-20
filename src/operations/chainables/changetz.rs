@@ -1,3 +1,4 @@
+use crate::controllers::nested::literal_col;
 use crate::error::QuiltError;
 use crate::operations::datetime::{
     localize, localize_local, parse_ambiguous_policy, parse_datetime_detailed_with_diagnostics,
@@ -98,7 +99,7 @@ pub fn changetz_with_config(
     let output_format = output_format.map(ToOwned::to_owned);
     let diagnostics = ParserDiagnostics::new();
     Ok(df.clone().with_column(
-        col(colname)
+        literal_col(colname)
             .cast(DataType::String)
             .map(
                 move |series| {

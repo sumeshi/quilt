@@ -34,23 +34,54 @@ pub fn grep(
         pattern.to_string()
     };
 
-    // Create a single filter expression that checks all string columns
-    // Use reference to avoid cloning the pattern for each column
+    // Polars cannot combine distinct regex selectors in one predicate. Resolve
+    // selector-shaped names in separate lazy expressions before combining them.
     let pattern_lit = lit(final_pattern);
-    let filter_expr = target_columns
+    let special_columns: Vec<&String> = target_columns
         .iter()
-        .map(|col_name| {
+        .filter(|name| name.as_str() == "*" || (name.starts_with('^') && name.ends_with('$')))
+        .collect();
+    let mut reserved: std::collections::HashSet<String> =
+        schema.iter_names().map(|name| name.to_string()).collect();
+    let mut helper_index = 0usize;
+    let helper_names: Vec<String> = (0..special_columns.len())
+        .map(|_| loop {
+            let name = format!("__qlt_grep_{helper_index}");
+            helper_index += 1;
+            if reserved.insert(name.clone()) {
+                break name;
+            }
+        })
+        .collect();
+    let search_columns: Vec<Expr> = special_columns
+        .iter()
+        .zip(&helper_names)
+        .map(|(col_name, helper)| {
             crate::controllers::nested::search_expr(col_name, schema.get(col_name).unwrap())
                 .str()
                 .contains(pattern_lit.clone(), false) // literal=false for regex
                 .fill_null(lit(false))
+                .alias(helper)
         })
+        .collect();
+    let ordinary_exprs = target_columns
+        .iter()
+        .filter(|name| !(name.as_str() == "*" || (name.starts_with('^') && name.ends_with('$'))))
+        .map(|col_name| {
+            crate::controllers::nested::search_expr(col_name, schema.get(col_name).unwrap())
+                .str()
+                .contains(pattern_lit.clone(), false)
+                .fill_null(lit(false))
+        });
+    let filter_expr = ordinary_exprs
+        .chain(helper_names.iter().map(col))
         .reduce(|acc, expr| acc.or(expr))
         .unwrap_or_else(|| lit(false));
 
+    let searched = df.clone().with_columns(search_columns);
     if is_inverted {
-        Ok(df.clone().filter(filter_expr.not()))
+        Ok(searched.filter(filter_expr.not()).drop(helper_names))
     } else {
-        Ok(df.clone().filter(filter_expr))
+        Ok(searched.filter(filter_expr).drop(helper_names))
     }
 }

@@ -1,3 +1,4 @@
+use crate::controllers::nested::literal_col;
 use crate::error::QuiltError;
 use polars::prelude::*;
 
@@ -48,16 +49,16 @@ pub fn timeinfo(df: &LazyFrame, column: &str, by: &[String]) -> Result<LazyFrame
     }
     let aggregates = [
         len().alias("rows"),
-        col(column).count().alias("valid_times"),
-        col(column).null_count().alias("null_times"),
-        col(column).min().alias("first_seen"),
-        col(column).max().alias("last_seen"),
+        literal_col(column).count().alias("valid_times"),
+        literal_col(column).null_count().alias("null_times"),
+        literal_col(column).min().alias("first_seen"),
+        literal_col(column).max().alias("last_seen"),
     ];
     Ok(if by.is_empty() {
         df.clone().select(aggregates)
     } else {
         df.clone()
-            .group_by(by.iter().map(col).collect::<Vec<_>>())
+            .group_by(by.iter().map(|name| literal_col(name)).collect::<Vec<_>>())
             .agg(aggregates)
     })
 }

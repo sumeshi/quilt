@@ -1,3 +1,4 @@
+use crate::controllers::nested::literal_col;
 use crate::error::QuiltError;
 use crate::operations::datetime::{
     floor_datetime_raw, interval_micros, localize, parse_datetime_detailed_with_diagnostics,
@@ -97,7 +98,7 @@ pub fn bucket_with_config(
     let output_name = output.clone();
     let column_name = column.to_string();
     let output_timezone = timezone.clone();
-    let bucketed = col(column)
+    let bucketed = literal_col(column)
         .map(
             move |series| {
                 let buckets = if parse_strings {

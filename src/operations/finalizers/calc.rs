@@ -1,3 +1,4 @@
+use crate::controllers::nested::literal_col;
 use crate::error::QuiltError;
 use crate::operations::finalizers::FinalizerResult;
 use polars::prelude::*;
@@ -55,12 +56,12 @@ pub fn calc(df: &LazyFrame, column: &str, mode: &str) -> Result<FinalizerResult,
         ));
     }
     let expression = match mode {
-        "sum" => col(column).sum(),
-        "avg" => col(column).mean(),
-        "min" => col(column).min(),
-        "max" => col(column).max(),
-        "median" => col(column).quantile(lit(0.5), QuantileMethod::Linear),
-        "std" => col(column)
+        "sum" => literal_col(column).sum(),
+        "avg" => literal_col(column).mean(),
+        "min" => literal_col(column).min(),
+        "max" => literal_col(column).max(),
+        "median" => literal_col(column).quantile(lit(0.5), QuantileMethod::Linear),
+        "std" => literal_col(column)
             .cast(DataType::Float64)
             .var(1)
             .sqrt()
@@ -71,7 +72,7 @@ pub fn calc(df: &LazyFrame, column: &str, mode: &str) -> Result<FinalizerResult,
         .clone()
         .select([
             expression.alias("calc_value"),
-            col(column).count().alias("calc_count"),
+            literal_col(column).count().alias("calc_count"),
         ])
         .collect()
         .map_err(|error| {
