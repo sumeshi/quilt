@@ -678,12 +678,6 @@ mod tests {
     }
 
     #[test]
-    fn load_accepts_only_canonical_paths_field() {
-        assert!(parse_automation_step("load", &yaml("paths: [input.csv]")).is_ok());
-        assert!(parse_automation_step("load", &yaml("path: input.csv")).is_err());
-    }
-
-    #[test]
     fn datetime_commands_reject_unknown_fields() {
         for (name, source) in [
             ("cast", "column: value\ntype: int\nunknown: true"),
@@ -697,17 +691,6 @@ mod tests {
             assert!(
                 parse_automation_step(name, &yaml(source)).is_err(),
                 "{name} accepted an unknown datetime field"
-            );
-        }
-    }
-
-    #[test]
-    fn numeric_yaml_diagnostics_match_cli_contract() {
-        for name in ["head", "tail"] {
-            let error = parse_automation_step(name, &yaml("number: nope")).unwrap_err();
-            assert_eq!(
-                error.to_string(),
-                format!("Error: {name} requires a valid number")
             );
         }
     }

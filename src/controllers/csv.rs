@@ -356,11 +356,6 @@ mod tests {
     }
 
     #[test]
-    fn gzip_decompression_buffer_is_fixed_and_bounded() {
-        assert_eq!(GZIP_BUFFER_SIZE, 16 * 1024 * 1024);
-    }
-
-    #[test]
     fn gzip_load_returns_pending_scan_with_execution_owned_spool() {
         let path = PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),

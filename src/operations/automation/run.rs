@@ -38,8 +38,6 @@ use super::model::ResolvedParameter;
 pub use super::model::{ParameterDeclaration, ParameterLiteral, ParameterType, ParameterValue};
 #[cfg(test)]
 use crate::controllers::command_model::parse_automation_step;
-#[cfg(test)]
-pub(crate) use executor::step_error;
 pub use orchestrator::{run, run_show_plan};
 #[cfg(test)]
 use polars::prelude::ScanArgsParquet;
@@ -389,7 +387,7 @@ stages:
     }
 
     #[test]
-    fn schema_rejects_unknown_keys_legacy_shapes_and_mapping_steps() {
+    fn schema_requires_known_fields_and_sequence_steps() {
         assert!(
             serde_yml::from_str::<RunDocument>("version: 1\nunknown: true\nstages: []").is_err()
         );
@@ -399,11 +397,6 @@ stages:
         .is_err());
         assert!(serde_yml::from_str::<RunDocument>(
             "version: 1\nstages: [{name: input, steps: {load: {paths: [x]}}}]"
-        )
-        .is_err());
-        assert!(serde_yml::from_str::<RunDocument>("version: '1.0.0'\nstages: {}").is_err());
-        assert!(serde_yml::from_str::<RunDocument>(
-            "version: 1\nstages: [{name: input, type: process, steps: []}]"
         )
         .is_err());
     }

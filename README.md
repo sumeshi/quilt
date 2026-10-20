@@ -1239,14 +1239,23 @@ $ cd quilt
 $ cargo build --locked
 ```
 
-The executable is `target/debug/qlt` (`qlt.exe` on Windows). Development builds disable
-debug information and incremental compilation to limit disk growth. Reuse this profile
-for normal development and local verification; see [CONTRIBUTING.md](CONTRIBUTING.md).
-For an optimized distribution build, use `cargo build --release --locked`; its executable
-is under `target/release/` and it creates a separate set of build artifacts.
+The executable is `target/debug/qlt` (`qlt.exe` on Windows). For an optimized
+build, use `cargo build --release --locked`; the executable is in `target/release/`.
 
 ## Contributing
-Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+Install stable Rust with `rustfmt` and `clippy`, then run:
+
+```sh
+cargo test --locked
+cargo clippy --locked --all-targets -- -D warnings
+cargo fmt --all -- --check
+```
+
+Keep regression tests focused on distinct behavior and failure modes; prefer direct
+Rust tests and reserve CLI subprocesses for process-level behavior. Keep this README
+as the single project guide, focused on usage and necessary contributor commands.
+Put task reports, migration history and machine-specific measurements in commit messages.
 
 ## License
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

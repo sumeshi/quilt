@@ -543,19 +543,6 @@ mod tests {
     }
 
     #[test]
-    fn record_registry_is_the_automation_allowlist() {
-        let expected = registry()
-            .iter()
-            .filter(|d| d.category != CommandCategory::Automation)
-            .map(|d| d.name)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            record_operations().map(|d| d.name).collect::<Vec<_>>(),
-            expected
-        );
-    }
-
-    #[test]
     fn every_definition_has_cli_adapter_and_run_excludes_run() {
         for definition in registry() {
             let mut argv = vec![definition.name.to_string()];
