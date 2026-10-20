@@ -49,6 +49,10 @@ tempfile = "3"
 [profile.dev]
 debug = 0
 incremental = false
+# Avoid hundreds of object files per crate and large final symbol tables.
+# The test profile inherits this; opt-level stays at 0 for short build cycles.
+codegen-units = 16
+strip = "symbols"
 
 [profile.release]
 # Optimize for speed with some size reduction
