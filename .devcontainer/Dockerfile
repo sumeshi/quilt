@@ -1,4 +1,4 @@
-FROM rust:1.88-bookworm
+FROM rust:1.99-bookworm
 
 RUN apt -y update && apt upgrade -qqy && apt -y install \
     curl \
