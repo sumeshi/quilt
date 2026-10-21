@@ -8,7 +8,9 @@ use crate::controllers::log::LogController;
 use crate::controllers::pipeline::Pipeline;
 use crate::controllers::resources::ExecutionResources;
 use crate::error::QuiltError;
-use crate::operations::automation::model::{ConcatStage, JoinStage, PlannedStep};
+use crate::operations::automation::model::{
+    ConcatStage, JoinStage, MaterializePolicy, PlannedStep,
+};
 use polars::prelude::{col, cols, lit, Expr, JoinType, LazyFrame};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -27,6 +29,7 @@ pub(super) struct ProcessRequest<'steps, 'a, 'context> {
     pub input: Option<LazyFrame>,
     pub context: &'context mut ExecuteStepContext<'a>,
     pub materialize: bool,
+    pub materialize_policy: MaterializePolicy,
 }
 
 pub(crate) fn step_error(
@@ -65,8 +68,9 @@ pub(super) fn execute_process(
         input: mut stage_output_df,
         context: step_context,
         materialize,
+        materialize_policy,
     } = request;
-    let mut materialized = false;
+    let mut materialization_attempted = false;
 
     for step in steps {
         let step_index = step.index;
@@ -99,20 +103,24 @@ pub(super) fn execute_process(
             }
         }
 
-        if materialize && !materialized && matches!(command.category(), CommandCategory::Finalizer)
+        if materialize
+            && !materialization_attempted
+            && matches!(command.category(), CommandCategory::Finalizer)
         {
             if let Some(frame) = stage_output_df.take() {
-                let (frame, resources) =
-                    materialization::materialize_frame(frame, &step_context.resources).map_err(
-                        |error| {
-                            step_context
-                                .diagnostics
-                                .sanitize_step_error(error, sensitive_step)
-                        },
-                    )?;
+                let (frame, resources) = materialization::materialize_frame(
+                    frame,
+                    &step_context.resources,
+                    materialize_policy,
+                )
+                .map_err(|error| {
+                    step_context
+                        .diagnostics
+                        .sanitize_step_error(error, sensitive_step)
+                })?;
                 stage_output_df = Some(frame);
                 step_context.resources = resources;
-                materialized = true;
+                materialization_attempted = true;
             }
         }
 
@@ -178,17 +186,19 @@ pub(super) fn execute_process(
         });
     }
 
-    if materialize && !materialized {
+    if materialize && !materialization_attempted {
         if let Some(frame) = stage_output_df.take() {
-            let (frame, resources) =
-                materialization::materialize_frame(frame, &step_context.resources).map_err(
-                    |error| {
-                        step_context.diagnostics.sanitize_step_error(
-                            error,
-                            step_context.diagnostics.frame_is_sensitive(stage_name),
-                        )
-                    },
-                )?;
+            let (frame, resources) = materialization::materialize_frame(
+                frame,
+                &step_context.resources,
+                materialize_policy,
+            )
+            .map_err(|error| {
+                step_context.diagnostics.sanitize_step_error(
+                    error,
+                    step_context.diagnostics.frame_is_sensitive(stage_name),
+                )
+            })?;
             stage_output_df = Some(frame);
             step_context.resources = resources;
         }
@@ -432,6 +442,7 @@ mod tests {
                 input: Some(df!("value" => &[1i64, 2]).unwrap().lazy()),
                 context: &mut context,
                 materialize: false,
+                materialize_policy: crate::operations::automation::model::MaterializePolicy::Never,
             })
             .unwrap();
             drop(context);

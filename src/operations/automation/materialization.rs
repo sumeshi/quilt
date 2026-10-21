@@ -1,6 +1,7 @@
 //! Materialization policy boundary. Policy calculation is kept separate from
 //! stage execution so planning remains inspectable and side-effect free.
 
+use crate::controllers::log::LogController;
 use crate::controllers::resources::ExecutionResources;
 use crate::error::QuiltError;
 use crate::operations::automation::model::{
@@ -25,9 +26,47 @@ pub(super) struct MaterializationPlan {
 }
 
 pub(super) fn materialize_frame(
-    frame: LazyFrame,
+    mut frame: LazyFrame,
     resources: &ExecutionResources,
+    policy: MaterializePolicy,
 ) -> Result<(LazyFrame, ExecutionResources), QuiltError> {
+    // Parquet cannot represent a struct with no fields. Auto is only an
+    // optimization, so leave such frames lazy and let their consumers see the
+    // original schema. Always makes an explicit request and reports why it
+    // cannot be honored.
+    let schema = match frame.collect_schema() {
+        Ok(schema) => schema,
+        Err(_) if policy == MaterializePolicy::Auto => {
+            LogController::debug(
+                "Skipping automatic stage materialization because schema inspection failed",
+            );
+            return Ok((frame, resources.clone()));
+        }
+        Err(error) => {
+            return Err(QuiltError::operation(
+                "materialize stage",
+                format!("could not inspect the frame schema for Parquet materialization: {error}"),
+            ));
+        }
+    };
+    if let Some(column) = schema
+        .iter()
+        .find_map(|(name, dtype)| contains_empty_struct(dtype).then(|| name.to_string()))
+    {
+        if policy == MaterializePolicy::Auto {
+            LogController::debug(
+                "Skipping automatic stage materialization because the schema contains an empty struct",
+            );
+            return Ok((frame, resources.clone()));
+        }
+        return Err(QuiltError::operation(
+            "materialize stage",
+            format!(
+                "column '{column}' contains an empty struct, which Parquet cannot represent; use materialize: auto or never"
+            ),
+        ));
+    }
+
     let owned = resources.fork(Vec::new());
     let mut reservation = owned
         .reserve_temp_file("qlt-stage-materialized", "parquet")
@@ -76,7 +115,21 @@ pub(super) fn materialize_frame(
     Ok((frame, owned))
 }
 
-fn stage_materialize_policy(stage: &StageConfig<PlannedStep>) -> MaterializePolicy {
+fn contains_empty_struct(dtype: &polars::prelude::DataType) -> bool {
+    use polars::prelude::DataType;
+    match dtype {
+        DataType::Struct(fields) => {
+            fields.is_empty()
+                || fields
+                    .iter()
+                    .any(|field| contains_empty_struct(field.dtype()))
+        }
+        DataType::List(inner) => contains_empty_struct(inner),
+        _ => false,
+    }
+}
+
+pub(super) fn stage_materialize_policy(stage: &StageConfig<PlannedStep>) -> MaterializePolicy {
     match stage {
         StageConfig::Process(stage) => stage.materialize,
         StageConfig::Join(stage) => stage.materialize,

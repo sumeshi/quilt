@@ -1227,10 +1227,12 @@ shared result to temporary Parquet when it has multiple effective consumers, inc
 row-count branch evaluation and row-reading finalizers. A stage used once stays lazy;
 `sort` alone does not force a temporary Parquet. `never` can repeat upstream work when
 consumers evaluate independently. `always` adds disk I/O even for a single consumer.
+Auto keeps results lazy when their schema contains empty objects that Parquet cannot
+represent; `always` reports an error for those schemas.
 
 `--stage` limits this calculation to the selected execution graph. `--show-plan` reports
 dependencies, inputs/outputs, and planned materialization alongside the query plan.
-During execution, stderr reports selected stages and disk intermediates; completion
+During execution, stderr reports selected stages and planned disk intermediates; completion
 reports elapsed time and completed file outputs. These diagnostics do not add a full
 row count. Intermediate files are released when no remaining lazy consumer needs them.
 

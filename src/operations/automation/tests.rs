@@ -398,6 +398,67 @@ fn run_fanout_materializes_one_probed_source_evaluation() {
 }
 
 #[test]
+fn auto_materialization_preserves_empty_nested_struct_fanout_results() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let input = dir.join("input.jsonl");
+    std::fs::write(&input, "{\"id\":1,\"nested\":{\"empty\":{}}}\n").unwrap();
+
+    for policy in ["auto", "never"] {
+        let left_output = dir.join(format!("left-{policy}.csv"));
+        let right_output = dir.join(format!("right-{policy}.csv"));
+        let config = dir.join(format!("run-{policy}.yaml"));
+        std::fs::write(
+            &config,
+            format!(
+                "version: 1\nstages:\n  - name: input\n    materialize: {policy}\n    steps: [{{load: {{paths: [{}]}}}}]\n  - name: left\n    from: input\n    steps: [{{select: {{columns: [id]}}}}, {{dump: {{output: {}}}}}]\n  - name: right\n    from: input\n    steps: [{{select: {{columns: [id]}}}}, {{dump: {{output: {}}}}}]\n",
+                input.display(),
+                left_output.display(),
+                right_output.display()
+            ),
+        )
+        .unwrap();
+        let mut controller = PipelineState::empty(ExecutionResources::new_in(dir.to_path_buf()));
+        run(
+            &mut controller,
+            config.to_str().unwrap(),
+            None,
+            None,
+            &[],
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(left_output).unwrap(), "id\n1\n");
+        assert_eq!(std::fs::read_to_string(right_output).unwrap(), "id\n1\n");
+    }
+
+    let config = dir.join("run-always.yaml");
+    std::fs::write(
+        &config,
+        format!(
+            "version: 1\nstages:\n  - name: input\n    materialize: always\n    steps: [{{load: {{paths: [{}]}}}}]\n  - name: left\n    from: input\n    steps: [{{select: {{columns: [id]}}}}, {{dump: {{output: {}}}}}]\n  - name: right\n    from: input\n    steps: [{{select: {{columns: [id]}}}}, {{dump: {{output: {}}}}}]\n",
+            input.display(),
+            dir.join("left-always.csv").display(),
+            dir.join("right-always.csv").display()
+        ),
+    )
+    .unwrap();
+    let mut controller = PipelineState::empty(ExecutionResources::new_in(dir.to_path_buf()));
+    let error = run(
+        &mut controller,
+        config.to_str().unwrap(),
+        None,
+        None,
+        &[],
+        false,
+        None,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("Parquet cannot represent"));
+}
+
+#[test]
 fn always_has_one_stage_artifact_and_serial_auto_has_none() {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();
@@ -491,12 +552,19 @@ fn completed_materialization_releases_its_input_owner() {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();
     let base = ExecutionResources::new_in(dir.to_path_buf());
-    let (first, first_resources) =
-        materialization::materialize_frame(polars::df!("id" => &[1i64, 2]).unwrap().lazy(), &base)
-            .unwrap();
+    let (first, first_resources) = materialization::materialize_frame(
+        polars::df!("id" => &[1i64, 2]).unwrap().lazy(),
+        &base,
+        crate::operations::automation::model::MaterializePolicy::Always,
+    )
+    .unwrap();
     let first_path = first_resources.tracked_paths()[0].clone();
-    let (second, second_resources) =
-        materialization::materialize_frame(first, &first_resources).unwrap();
+    let (second, second_resources) = materialization::materialize_frame(
+        first,
+        &first_resources,
+        crate::operations::automation::model::MaterializePolicy::Always,
+    )
+    .unwrap();
     drop(first_resources);
     assert!(!first_path.exists());
     assert_eq!(second.collect().unwrap().height(), 2);
@@ -516,7 +584,12 @@ fn materialization_failure_does_not_leave_stage_artifact() {
         ScanArgsParquet::default(),
     )
     .unwrap();
-    assert!(materialization::materialize_frame(bad, &resources).is_err());
+    assert!(materialization::materialize_frame(
+        bad,
+        &resources,
+        crate::operations::automation::model::MaterializePolicy::Always,
+    )
+    .is_err());
     assert_eq!(resources.tracked_count(), 0);
     assert!(std::fs::read_dir(dir).unwrap().next().is_none());
 }

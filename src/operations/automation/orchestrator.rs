@@ -126,7 +126,7 @@ pub(super) fn run_impl(
             .map(|name| diagnostics.sanitize_stage_name(name))
             .collect::<Vec<_>>()
             .join(", ");
-        eprintln!("run: stages [{selected}]; disk intermediates [{disk}]");
+        eprintln!("run: stages [{selected}]; planned disk intermediates [{disk}]");
         let mut last_processed = None;
         let mut remaining_consumers = HashMap::<String, usize>::new();
         for stage in stage_configs.values() {
@@ -225,6 +225,7 @@ pub(super) fn run_impl(
                         input: current_stage_input.map(|pipeline| pipeline.frame().clone()),
                         context: &mut process_step_context,
                         materialize: materialization.should_materialize(&stage_name),
+                        materialize_policy: materialization::stage_materialize_policy(stage_config),
                     })?
                 }
                 StageConfig::Join(join) => {
@@ -342,6 +343,7 @@ pub(super) fn run_impl(
                     let (frame, resources) = materialization::materialize_frame(
                         frame,
                         &stage_resources,
+                        materialization::stage_materialize_policy(stage_config),
                     )
                     .map_err(|error| {
                         diagnostics
@@ -763,6 +765,7 @@ pub(super) fn build_plan_stage(
                     .map(|pipeline| pipeline.frame().clone()),
                 context,
                 materialize: false,
+                materialize_policy: materialization::stage_materialize_policy(stage),
             })?
             .ok_or_else(|| {
                 QuiltError::usage(format!("run stage '{name}' did not produce a frame"))
