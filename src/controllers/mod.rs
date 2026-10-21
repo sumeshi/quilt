@@ -2,6 +2,7 @@ pub mod arguments;
 pub mod cli_adapter;
 pub mod command_model;
 pub mod csv;
+pub mod csv_input;
 pub mod definitions;
 pub mod executor;
 pub mod log;

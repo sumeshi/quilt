@@ -1,11 +1,14 @@
+use crate::controllers::csv_input::{read_csv_lazy, CsvInputOptions, CsvScanSettings};
 use crate::controllers::log::LogController;
 use crate::controllers::resources::ExecutionResources;
 use crate::error::QuiltError;
+use crate::operations::initializers::rejected::{RejectedReport, SharedRejectedReport};
 use polars::prelude::*;
 use rayon::prelude::*; // Re-enabled for parallel processing
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 // Performance optimization constants
 const OPTIMAL_CHUNK_SIZE: usize = 8192; // Optimized chunk size for CSV reading
 const PARALLEL_THRESHOLD: usize = 2; // Minimum files to use parallel processing
@@ -83,8 +86,8 @@ fn get_optimized_csv_options(
         .with_has_header(has_header)
         .with_low_memory(low_memory)
         .with_chunk_size(optimized_chunk_size)
-        // CSV schema inference follows Polars' reader defaults; NDJSON has a
-        // separate bounded inference option in the load command.
+        // Schema discovery and strict record validation happen in csv_input;
+        // this reader options object controls scan performance and delimiter.
         .map_parse_options(|parse_opts| {
             parse_opts.with_separator(sep_byte)
             // Date conversion is explicit through the shared datetime commands.
@@ -102,6 +105,17 @@ fn get_optimized_csv_options(
 pub struct CsvController {
     paths: Vec<PathBuf>,
 }
+
+struct CsvReadRequest<'a> {
+    separator: &'a str,
+    low_memory: bool,
+    has_header: bool,
+    chunk_size: Option<usize>,
+    resources: &'a ExecutionResources,
+    input_options: &'a CsvInputOptions,
+    report: Option<SharedRejectedReport>,
+}
+
 impl CsvController {
     pub fn new(paths: &[PathBuf]) -> Self {
         Self {
@@ -116,27 +130,101 @@ impl CsvController {
         chunk_size: Option<usize>,
         resources: &ExecutionResources,
     ) -> Result<LazyFrame, QuiltError> {
-        separator_byte(separator)?;
-        if self.paths.len() == 1 {
-            let path = &self.paths[0];
-            self.read_csv_file(
-                path, separator, low_memory, no_headers, chunk_size, resources,
-            )
-        } else {
-            self.concat_csv_files(separator, low_memory, no_headers, chunk_size, resources)
-        }
+        self.get_dataframe_with_options(
+            separator,
+            low_memory,
+            no_headers,
+            chunk_size,
+            resources,
+            &CsvInputOptions::default(),
+        )
     }
-    fn read_csv_file(
+    pub fn get_dataframe_with_options(
         &self,
-        path: &Path,
         separator: &str,
         low_memory: bool,
         no_headers: bool,
         chunk_size: Option<usize>,
         resources: &ExecutionResources,
+        input_options: &CsvInputOptions,
+    ) -> Result<LazyFrame, QuiltError> {
+        let report = input_options
+            .rejects
+            .as_ref()
+            .map(|p| RejectedReport::new(p).map(|r| Arc::new(Mutex::new(r))))
+            .transpose()?;
+        let frame = self.get_dataframe_with_shared_report(
+            separator,
+            low_memory,
+            no_headers,
+            chunk_size,
+            resources,
+            input_options,
+            report.clone(),
+            None,
+        )?;
+        if let Some(report) = report {
+            let report = Arc::try_unwrap(report)
+                .map_err(|_| QuiltError::Operation {
+                    operation: "publish rejects report".into(),
+                    message: "report is still in use".into(),
+                })?
+                .into_inner()
+                .map_err(|_| QuiltError::Operation {
+                    operation: "publish rejects report".into(),
+                    message: "report lock is poisoned".into(),
+                })?;
+            report.publish()?;
+        }
+        Ok(frame)
+    }
+    // Preserve the load module's established call boundary; the private file
+    // reading path itself uses CsvReadRequest to keep its argument count small.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn get_dataframe_with_shared_report(
+        &self,
+        separator: &str,
+        low_memory: bool,
+        no_headers: bool,
+        chunk_size: Option<usize>,
+        resources: &ExecutionResources,
+        input_options: &CsvInputOptions,
+        report: Option<SharedRejectedReport>,
+        source_labels: Option<&[PathBuf]>,
+    ) -> Result<LazyFrame, QuiltError> {
+        separator_byte(separator)?;
+        if source_labels.is_some_and(|labels| labels.len() != self.paths.len()) {
+            return Err(QuiltError::usage(
+                "CSV source label count must match input file count",
+            ));
+        }
+        let request = CsvReadRequest {
+            separator,
+            low_memory,
+            has_header: !no_headers,
+            chunk_size,
+            resources,
+            input_options,
+            report,
+        };
+        let frame = if self.paths.len() == 1 {
+            let path = &self.paths[0];
+            let source = source_labels
+                .map(|labels| labels[0].as_path())
+                .unwrap_or(path.as_path());
+            self.read_csv_file(path, source, &request)
+        } else {
+            self.concat_csv_files(&request, source_labels)
+        }?;
+        Ok(frame)
+    }
+    fn read_csv_file(
+        &self,
+        path: &Path,
+        source_path: &Path,
+        request: &CsvReadRequest<'_>,
     ) -> Result<LazyFrame, QuiltError> {
         LogController::debug("Reading CSV file");
-        let has_header = !no_headers;
         // Check if file is gzipped based on extension
         let is_gzipped = path
             .extension()
@@ -145,16 +233,19 @@ impl CsvController {
             .unwrap_or(false);
         if is_gzipped {
             LogController::debug("Reading gzipped CSV file");
-            self.read_gzipped_csv_file(
-                path, separator, low_memory, has_header, chunk_size, resources,
-            )
+            self.read_gzipped_csv_file(path, source_path, request)
         } else {
             // Get file size for optimization
             let file_size = std::fs::metadata(path).ok().map(|m| m.len());
 
-            // Use optimized CSV options
+            // Validate in a streaming pass, then scan the original input with
+            // the explicit schema discovered by csv_input.
             let csv_options = get_optimized_csv_options(
-                separator, has_header, low_memory, chunk_size, file_size,
+                request.separator,
+                request.has_header,
+                request.low_memory,
+                request.chunk_size,
+                file_size,
             )?;
 
             LogController::debug(&format!(
@@ -162,41 +253,38 @@ impl CsvController {
                 file_size.map(|s| s / 1024 / 1024).unwrap_or(0)
             ));
 
-            let reader = LazyCsvReader::new(PlRefPath::try_from_path(path)?)
-                .with_glob(false)
-                .with_separator(csv_options.parse_options.separator)
-                .with_has_header(csv_options.has_header)
-                .with_low_memory(csv_options.low_memory)
-                .with_chunk_size(csv_options.chunk_size)
-                // CSV schema inference follows the reader defaults.
-                .finish();
-
-            match reader {
-                Ok(df) => Ok(crate::controllers::resources::instrument_evaluation(
-                    df, resources,
-                )),
-                Err(e) => Err(QuiltError::Io {
-                    operation: "read CSV".into(),
-                    path: Some(path.display().to_string()),
-                    message: e.to_string(),
-                }),
-            }
+            let scan_settings = CsvScanSettings {
+                separator: csv_options.parse_options.separator,
+                has_header: request.has_header,
+                eol_char: csv_options.parse_options.eol_char,
+                low_memory: csv_options.low_memory,
+                chunk_size: csv_options.chunk_size,
+            };
+            let df = read_csv_lazy(
+                path,
+                source_path,
+                &scan_settings,
+                request.input_options,
+                request.resources,
+                request.report.clone(),
+            )?;
+            Ok(crate::controllers::resources::instrument_evaluation(
+                df,
+                request.resources,
+            ))
         }
     }
 
     fn read_gzipped_csv_file(
         &self,
         path: &Path,
-        separator: &str,
-        low_memory: bool,
-        has_header: bool,
-        chunk_size: Option<usize>,
-        resources: &ExecutionResources,
+        source_path: &Path,
+        request: &CsvReadRequest<'_>,
     ) -> Result<LazyFrame, QuiltError> {
         use flate2::read::MultiGzDecoder;
         use std::io::{BufReader, BufWriter, Read};
 
-        if !resources.temp_files_enabled() {
+        if !request.resources.temp_files_enabled() {
             return Err(QuiltError::usage(
                 "run --show-plan cannot inspect gzipped CSV without execution",
             ));
@@ -204,17 +292,18 @@ impl CsvController {
 
         let source = File::open(path).map_err(|e| QuiltError::Io {
             operation: "open gzip".into(),
-            path: Some(path.display().to_string()),
+            path: Some(source_path.display().to_string()),
             message: e.to_string(),
         })?;
 
         LogController::debug("Spooling gzip payload to temporary file");
 
-        let mut reservation = resources
+        let mut reservation = request
+            .resources
             .reserve_temp_file("qlt-gzip-spool", "csv")
             .map_err(|e| QuiltError::Io {
                 operation: "create gzip spool".into(),
-                path: Some(path.display().to_string()),
+                path: Some(source_path.display().to_string()),
                 message: e.to_string(),
             })?;
 
@@ -247,7 +336,7 @@ impl CsvController {
                 Err(e) => {
                     return Err(QuiltError::Io {
                         operation: "decompress gzip".into(),
-                        path: Some(path.display().to_string()),
+                        path: Some(source_path.display().to_string()),
                         message: e.to_string(),
                     });
                 }
@@ -269,26 +358,30 @@ impl CsvController {
         ));
 
         let csv_options = get_optimized_csv_options(
-            separator,
-            has_header,
-            low_memory,
-            chunk_size,
+            request.separator,
+            request.has_header,
+            request.low_memory,
+            request.chunk_size,
             Some(total_written as u64),
         )?;
 
-        let reader = LazyCsvReader::new(PlRefPath::try_from_path(&temp_path)?)
-            .with_glob(false)
-            .with_separator(csv_options.parse_options.separator)
-            .with_has_header(csv_options.has_header)
-            .with_low_memory(csv_options.low_memory)
-            .with_chunk_size(csv_options.chunk_size)
-            .finish()
-            .map_err(|e| QuiltError::Io {
-                operation: "scan gzip CSV".into(),
-                path: Some(path.display().to_string()),
-                message: e.to_string(),
-            })?;
-        resources
+        let scan_settings = CsvScanSettings {
+            separator: csv_options.parse_options.separator,
+            has_header: request.has_header,
+            eol_char: csv_options.parse_options.eol_char,
+            low_memory: csv_options.low_memory,
+            chunk_size: csv_options.chunk_size,
+        };
+        let reader = read_csv_lazy(
+            &temp_path,
+            source_path,
+            &scan_settings,
+            request.input_options,
+            request.resources,
+            request.report.clone(),
+        )?;
+        request
+            .resources
             .retain_temp_file(reservation)
             .map_err(|e| QuiltError::Io {
                 operation: "retain gzip spool".into(),
@@ -299,11 +392,8 @@ impl CsvController {
     }
     fn concat_csv_files(
         &self,
-        separator: &str,
-        low_memory: bool,
-        no_headers: bool,
-        chunk_size: Option<usize>,
-        resources: &ExecutionResources,
+        request: &CsvReadRequest<'_>,
+        source_labels: Option<&[PathBuf]>,
     ) -> Result<LazyFrame, QuiltError> {
         LogController::debug(&format!("Reading {} CSV files", self.paths.len()));
 
@@ -312,20 +402,24 @@ impl CsvController {
             LogController::debug("Using parallel file reading for better performance");
             self.paths
                 .par_iter() // Enabled parallel processing
-                .map(|path| {
-                    self.read_csv_file(
-                        path, separator, low_memory, no_headers, chunk_size, resources,
-                    )
+                .enumerate()
+                .map(|(index, path)| {
+                    let source_path = source_labels
+                        .map(|labels| labels[index].as_path())
+                        .unwrap_or(path.as_path());
+                    self.read_csv_file(path, source_path, request)
                 })
                 .collect::<Result<Vec<_>, _>>()?
         } else {
             // Sequential for small number of files
             self.paths
                 .iter()
-                .map(|path| {
-                    self.read_csv_file(
-                        path, separator, low_memory, no_headers, chunk_size, resources,
-                    )
+                .enumerate()
+                .map(|(index, path)| {
+                    let source_path = source_labels
+                        .map(|labels| labels[index].as_path())
+                        .unwrap_or(path.as_path());
+                    self.read_csv_file(path, source_path, request)
                 })
                 .collect::<Result<Vec<_>, _>>()?
         };
