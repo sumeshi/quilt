@@ -163,6 +163,7 @@ impl CsvController {
             ));
 
             let reader = LazyCsvReader::new(path)
+                .with_glob(false)
                 .with_separator(csv_options.parse_options.separator)
                 .with_has_header(csv_options.has_header)
                 .with_low_memory(csv_options.low_memory)
@@ -276,6 +277,7 @@ impl CsvController {
         )?;
 
         let reader = LazyCsvReader::new(&temp_path)
+            .with_glob(false)
             .with_separator(csv_options.parse_options.separator)
             .with_has_header(csv_options.has_header)
             .with_low_memory(csv_options.low_memory)

@@ -20,7 +20,7 @@ pub(crate) fn expand_input_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>, Quil
     let mut expanded_paths = Vec::new();
 
     for path in paths {
-        if has_glob_pattern(path) {
+        if has_glob_pattern(path) && !path.exists() {
             let pattern = path.to_string_lossy();
             let mut matches = Vec::new();
 
@@ -196,7 +196,7 @@ fn load_ndjson_files(
                     source_column,
                 );
             }
-            LazyJsonLineReader::new(path)
+            let mut frame = LazyJsonLineReader::new(path)
                 .with_schema(Some(schema.clone()))
                 .with_rechunk(true)
                 .finish()
@@ -204,8 +204,21 @@ fn load_ndjson_files(
                     operation: "read NDJSON".into(),
                     path: Some(path.display().to_string()),
                     message: error.to_string(),
-                })
-                .and_then(|frame| add_source_column(frame, original, source_column))
+                })?;
+            // Polars 0.48's NDJSON reader hardcodes glob=true and has no setter.
+            // Paths have already been expanded and validated by Quilt.
+            match &mut frame.logical_plan {
+                DslPlan::Scan {
+                    unified_scan_args, ..
+                } => unified_scan_args.glob = false,
+                _ => {
+                    return Err(QuiltError::operation(
+                        "read NDJSON",
+                        "expected a file scan plan",
+                    ))
+                }
+            }
+            add_source_column(frame, original, source_column)
         })
         .collect::<Result<Vec<_>, QuiltError>>()?;
 
@@ -226,23 +239,34 @@ fn load_parquet_files(
     resources: &ExecutionResources,
 ) -> Result<LazyFrame, QuiltError> {
     if paths.len() == 1 {
-        LazyFrame::scan_parquet(&paths[0], ScanArgsParquet::default())
-            .map_err(|e| QuiltError::Io {
-                operation: "read parquet".into(),
-                path: Some(paths[0].display().to_string()),
-                message: e.to_string(),
-            })
-            .and_then(|frame| add_source_column(frame, &paths[0], source_column))
-            .map(|frame| crate::controllers::resources::instrument_evaluation(frame, resources))
+        LazyFrame::scan_parquet(
+            &paths[0],
+            ScanArgsParquet {
+                glob: false,
+                ..Default::default()
+            },
+        )
+        .map_err(|e| QuiltError::Io {
+            operation: "read parquet".into(),
+            path: Some(paths[0].display().to_string()),
+            message: e.to_string(),
+        })
+        .and_then(|frame| add_source_column(frame, &paths[0], source_column))
+        .map(|frame| crate::controllers::resources::instrument_evaluation(frame, resources))
     } else {
         let mut dataframes = Vec::new();
         for path in paths {
-            let df = LazyFrame::scan_parquet(path, ScanArgsParquet::default()).map_err(|e| {
-                QuiltError::Io {
-                    operation: "read parquet".into(),
-                    path: Some(path.display().to_string()),
-                    message: e.to_string(),
-                }
+            let df = LazyFrame::scan_parquet(
+                path,
+                ScanArgsParquet {
+                    glob: false,
+                    ..Default::default()
+                },
+            )
+            .map_err(|e| QuiltError::Io {
+                operation: "read parquet".into(),
+                path: Some(path.display().to_string()),
+                message: e.to_string(),
             })?;
             dataframes.push(crate::controllers::resources::instrument_evaluation(
                 add_source_column(df, path, source_column)?,

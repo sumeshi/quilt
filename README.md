@@ -124,6 +124,7 @@ Load one or more CSV, JSONL/NDJSON, or Parquet files.
 CSV separators must be one ASCII character; TSV requires an explicit tab separator.
 Concatenated gzip members are all read, and corruption in a later member fails the load.
 Gzip input is expanded to temporary disk before the lazy scan.
+Existing input paths are treated literally, including brackets; otherwise glob patterns are expanded.
 
 NDJSON discovers fields across all records and files by default. With
 `--infer-schema-length N`, later records are still validated; late fields or types

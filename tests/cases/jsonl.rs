@@ -9,6 +9,39 @@ use serde_json::{json, Value};
 use std::io::Write;
 
 #[test]
+fn existing_bracketed_paths_remain_literal_across_readers() {
+    let root = tempfile::tempdir().unwrap();
+    let literal = write(root.path(), "Security[1].jsonl", "{\"id\":1}\n");
+    let sibling = write(root.path(), "Security1.jsonl", "{\"id\":2}\n");
+    let loaded = rows(&text(&["load", literal.to_str().unwrap()]));
+    assert_eq!(loaded[0]["id"], "1");
+    let pattern = root.path().join("Security*.jsonl");
+    assert_eq!(frame(&["load", pattern.to_str().unwrap()]).height(), 2);
+    for source in [&literal, &sibling] {
+        let csv = source.with_extension("csv");
+        let parquet = source.with_extension("parquet");
+        execute(&[
+            "load",
+            source.to_str().unwrap(),
+            "-",
+            "dump",
+            "-o",
+            csv.to_str().unwrap(),
+            "-",
+            "dumpcache",
+            "-o",
+            parquet.to_str().unwrap(),
+        ])
+        .unwrap();
+    }
+    for extension in ["csv", "parquet"] {
+        let path = literal.with_extension(extension);
+        let loaded = rows(&text(&["load", path.to_str().unwrap()]));
+        assert_eq!(loaded[0]["id"], "1");
+    }
+}
+
+#[test]
 fn schema_union_discovers_late_fields_without_rounding_unsigned_ids() {
     let root = tempfile::tempdir().unwrap();
     let late = write(
