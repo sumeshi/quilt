@@ -23,3 +23,19 @@ jobs:
         if: runner.os == 'Linux'
       - run: cargo fmt --check
         if: runner.os == 'Linux'
+
+  linux-musl-release:
+    name: Build and smoke test Linux musl release binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --locked --release --target x86_64-unknown-linux-musl
+      - name: Smoke test release binary
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: bash .github/scripts/cli-smoke.sh target/x86_64-unknown-linux-musl/release/qlt

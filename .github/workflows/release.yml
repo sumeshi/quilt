@@ -45,12 +45,14 @@ jobs:
 
       - name: Smoke test release binary
         shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           binary="target/${{ matrix.target }}/release/qlt"
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             binary+=".exe"
           fi
-          "$binary" load tests/fixtures/jsonl-quality.jsonl - flatten - head 1 - show
+          bash .github/scripts/cli-smoke.sh "$binary"
 
       - name: Package binary
         shell: bash
