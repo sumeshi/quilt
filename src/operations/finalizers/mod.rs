@@ -224,13 +224,17 @@ where
     let stage = reserve_atomic_stage(parent, file_name, operation)?;
     let temp = stage.path().join("payload");
     let result = write(&temp).and_then(|_| {
-        let payload = File::open(&temp).map_err(|error| {
-            QuiltError::io(
-                operation,
-                Some(temp.display().to_string()),
-                error.to_string(),
-            )
-        })?;
+        // Windows FlushFileBuffers requires a handle with write access.
+        let payload = OpenOptions::new()
+            .write(true)
+            .open(&temp)
+            .map_err(|error| {
+                QuiltError::io(
+                    operation,
+                    Some(temp.display().to_string()),
+                    error.to_string(),
+                )
+            })?;
         payload.sync_all().map_err(|error| {
             QuiltError::io(
                 operation,
