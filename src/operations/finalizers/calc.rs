@@ -21,6 +21,18 @@ fn is_numeric_dtype(dtype: &DataType) -> bool {
     )
 }
 
+fn integral_sum_dtype(dtype: &DataType) -> Option<DataType> {
+    match dtype {
+        DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
+            Some(DataType::Int64)
+        }
+        DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
+            Some(DataType::UInt64)
+        }
+        _ => None,
+    }
+}
+
 fn scalar_text(value: &AnyValue<'_>) -> String {
     match value {
         AnyValue::Null => "null".to_string(),
@@ -56,7 +68,19 @@ pub fn calc(df: &LazyFrame, column: &str, mode: &str) -> Result<FinalizerResult,
         ));
     }
     let expression = match mode {
-        "sum" => literal_col(column).sum(),
+        "sum" => {
+            if let Some(public_dtype) = integral_sum_dtype(source_dtype) {
+                // Decimal128 keeps the complete input sum exact. The strict cast
+                // reports totals outside Polars' conventional Int64/UInt64 sum
+                // type instead of silently wrapping them.
+                literal_col(column)
+                    .cast(DataType::Decimal(38, 0))
+                    .sum()
+                    .strict_cast(public_dtype)
+            } else {
+                literal_col(column).sum()
+            }
+        }
         "avg" => literal_col(column).mean(),
         "min" => literal_col(column).min(),
         "max" => literal_col(column).max(),
@@ -102,4 +126,26 @@ pub fn calc(df: &LazyFrame, column: &str, mode: &str) -> Result<FinalizerResult,
         scalar_text(&value)
     };
     Ok(FinalizerResult::Scalar(output))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn integer_sum_does_not_wrap() {
+        let signed = df!("n" => [i64::MAX, 1]).unwrap().lazy();
+        assert!(calc(&signed, "n", "sum").is_err());
+        let unsigned = df!("n" => [u64::MAX, 1]).unwrap().lazy();
+        assert!(calc(&unsigned, "n", "sum").is_err());
+    }
+
+    #[test]
+    fn empty_and_all_null_sum_remain_null() {
+        let all_null = df!("n" => [None::<i64>]).unwrap().lazy();
+        assert_eq!(
+            calc(&all_null, "n", "sum").unwrap(),
+            FinalizerResult::Scalar("null".into())
+        );
+    }
 }
