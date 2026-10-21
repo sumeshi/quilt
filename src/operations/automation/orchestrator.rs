@@ -394,6 +394,7 @@ pub(super) fn run_impl(
                 let mut output_executor = CommandExecutor::from_pipeline(pipeline);
                 output_executor
                     .execute(&TypedCommand::Dump(DumpArgs {
+                        format: Default::default(),
                         output: Some(absolute_path.to_string_lossy().into_owned()),
                         separator: ',',
                     }))

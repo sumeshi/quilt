@@ -1,7 +1,9 @@
 use crate::support::*;
+use flate2::{write::GzEncoder, Compression};
 use serde_json::json;
+use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 fn qlt(directory: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_qlt"))
@@ -10,6 +12,128 @@ fn qlt(directory: &Path, args: &[&str]) -> Output {
         .env("RUST_LOG", "debug")
         .output()
         .unwrap()
+}
+
+fn qlt_in_temp(directory: &Path, temp: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_qlt"))
+        .args(args)
+        .current_dir(directory)
+        .env("RUST_LOG", "debug")
+        .env("TMPDIR", temp)
+        .env("TMP", temp)
+        .env("TEMP", temp)
+        .output()
+        .unwrap()
+}
+
+fn qlt_with_stdin_in_temp(directory: &Path, temp: &Path, args: &[&str], input: &[u8]) -> Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_qlt"))
+        .args(args)
+        .current_dir(directory)
+        .env("RUST_LOG", "debug")
+        .env("TMPDIR", temp)
+        .env("TMP", temp)
+        .env("TEMP", temp)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    child.wait_with_output().unwrap()
+}
+
+fn assert_temp_directory_empty(directory: &Path) {
+    let artifacts = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        artifacts.is_empty(),
+        "left temporary artifacts: {artifacts:?}"
+    );
+}
+
+#[test]
+fn cli_errors_drop_execution_owned_temporary_files() {
+    let root = tempfile::tempdir().unwrap();
+    let temp = root.path().join("isolated-temp");
+    std::fs::create_dir(&temp).unwrap();
+    let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
+    gzip.write_all(b"id,message\n1,keep\n").unwrap();
+    let compressed = gzip.finish().unwrap();
+    write(root.path(), "input.csv.gz", compressed);
+
+    let conversion = qlt_in_temp(
+        root.path(),
+        &temp,
+        &[
+            "load",
+            "input.csv.gz",
+            "-",
+            "cast",
+            "message",
+            "int",
+            "-",
+            "show",
+        ],
+    );
+    assert!(!conversion.status.success());
+    assert!(conversion.stdout.is_empty());
+    assert_temp_directory_empty(&temp);
+
+    let stdin_args = [
+        "load",
+        "--stdin-format",
+        "jsonl",
+        "--source-column",
+        "source",
+        "-",
+        "show",
+        "--format",
+        "jsonl",
+    ];
+    let stdin_data = b"{\"id\":9007199254740993,\"nested\":{\"value\":\"kept\"}}\n";
+    let stdin_success = qlt_with_stdin_in_temp(root.path(), &temp, &stdin_args, stdin_data);
+    assert!(
+        stdin_success.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stdin_success.stderr)
+    );
+    let output = String::from_utf8(stdin_success.stdout).unwrap();
+    assert!(output.contains("\"source\":\"<stdin>\""), "{output}");
+    assert!(output.contains("\"id\":9007199254740993"), "{output}");
+    assert!(
+        output.contains("\"nested\":{\"value\":\"kept\"}"),
+        "{output}"
+    );
+    assert_temp_directory_empty(&temp);
+
+    let stdin_error =
+        qlt_with_stdin_in_temp(root.path(), &temp, &stdin_args, b"{\"id\":1,\"nested\":\n");
+    assert!(!stdin_error.status.success());
+    assert!(stdin_error.stdout.is_empty());
+    assert_temp_directory_empty(&temp);
+
+    #[cfg(target_os = "linux")]
+    {
+        let full = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_qlt"))
+            .args(["load", "input.csv.gz", "-", "show"])
+            .current_dir(root.path())
+            .env("RUST_LOG", "debug")
+            .env("TMPDIR", &temp)
+            .env("TMP", &temp)
+            .env("TEMP", &temp)
+            .stdout(Stdio::from(full))
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert_temp_directory_empty(&temp);
+    }
 }
 
 #[test]

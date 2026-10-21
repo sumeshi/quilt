@@ -280,7 +280,20 @@ fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
         .ok_or_else(|| QuiltError::usage(format!("Error: Unknown command '{}'", raw.name)))?;
     match operation {
         OperationId::Load => {
-            args(&raw, 1, None, "load [files...]")?;
+            args(&raw, 0, None, "load [files...] --stdin-format csv|jsonl")?;
+            if a.is_empty() && val(&raw, "stdin_format").is_none() {
+                return Err(QuiltError::usage(
+                    "load requires input paths or --stdin-format",
+                ));
+            }
+            if !a.is_empty() && val(&raw, "stdin_format").is_some() {
+                return Err(QuiltError::usage(
+                    "--stdin-format cannot be combined with input paths",
+                ));
+            }
+            if let Some(format) = val(&raw, "stdin_format") {
+                crate::operations::initializers::stdin::validate_format(&format)?;
+            }
             let separator = val(&raw, "separator").unwrap_or_else(|| ",".into());
             if separator.chars().count() != 1 || !separator.is_ascii() {
                 return Err(QuiltError::usage(
@@ -290,6 +303,16 @@ fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
             Ok(TypedCommand::Load(LoadArgs {
                 paths: a.iter().map(PathBuf::from).collect(),
                 source_column: val(&raw, "source_column"),
+                all_strings: flag(&raw, "all_strings"),
+                schema: raw
+                    .repeated
+                    .get("schema")
+                    .into_iter()
+                    .flatten()
+                    .map(|v| parse_column_type(v))
+                    .collect::<Result<_, _>>()?,
+                stdin_format: val(&raw, "stdin_format"),
+                rejects: val(&raw, "rejects").map(PathBuf::from),
                 separator: separator.chars().next().unwrap_or(','),
                 low_memory: flag(&raw, "low_memory"),
                 no_headers: flag(&raw, "no_headers"),
@@ -305,17 +328,71 @@ fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
                     Some(value) => {
                         let length = value.parse::<usize>().map_err(|_| {
                             QuiltError::usage(
-                                "Error: NDJSON inference length must be a positive integer or 'full'",
+                                "Error: inference length must be a positive integer or 'full'",
                             )
                         })?;
                         if length == 0 {
                             return Err(QuiltError::usage(
-                                "Error: NDJSON inference length must be positive or 'full'",
+                                "Error: inference length must be positive or 'full'",
                             ));
                         }
                         Some(length)
                     }
                 },
+            }))
+        }
+        OperationId::Filter => {
+            args(&raw, 1, Some(1), "filter <expression>")?;
+            Ok(TypedCommand::Filter(FilterArgs {
+                expression: a[0].clone(),
+            }))
+        }
+        OperationId::Derive => {
+            args(&raw, 2, Some(2), "derive <output> <expression>")?;
+            Ok(TypedCommand::Derive(DeriveArgs {
+                output: a[0].clone(),
+                expression: a[1].clone(),
+            }))
+        }
+        OperationId::Aggregate => {
+            args(
+                &raw,
+                1,
+                None,
+                "aggregate <mode:column:output...> [--by columns]",
+            )?;
+            Ok(TypedCommand::Aggregate(AggregateArgs {
+                metrics: a
+                    .iter()
+                    .map(|s| parse_metric(s))
+                    .collect::<Result<_, _>>()?,
+                by: val(&raw, "by")
+                    .map(|s| select_columns_from_input(&s))
+                    .transpose()?
+                    .unwrap_or_default(),
+            }))
+        }
+        OperationId::ArrayContains => {
+            args(&raw, 2, Some(2), "array-contains <column> <value>")?;
+            Ok(TypedCommand::ArrayContains(ArrayContainsArgs {
+                column: a[0].clone(),
+                value: a[1].clone(),
+            }))
+        }
+        OperationId::ArrayGet => {
+            args(&raw, 2, Some(2), "array-get <column> <index>")?;
+            Ok(TypedCommand::ArrayGet(ArrayGetArgs {
+                column: a[0].clone(),
+                index: a[1]
+                    .parse()
+                    .map_err(|_| QuiltError::usage("array-get index must be an integer"))?,
+                output: val(&raw, "output").unwrap_or_else(|| format!("{}_item", a[0])),
+            }))
+        }
+        OperationId::Explode => {
+            args(&raw, 1, Some(1), "explode <columns>")?;
+            Ok(TypedCommand::Explode(ExplodeArgs {
+                columns: select_columns_from_input(&a[0])?,
             }))
         }
         OperationId::Select => {
@@ -350,6 +427,10 @@ fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
         OperationId::Delta => {
             args(&raw, 1, Some(1), "delta <column>")?;
             Ok(TypedCommand::Delta(ColumnOutputArgs {
+                by: val(&raw, "by")
+                    .map(|s| select_columns_from_input(&s))
+                    .transpose()?
+                    .unwrap_or_default(),
                 column: a[0].clone(),
                 output: val(&raw, "output"),
             }))
@@ -526,6 +607,11 @@ fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
             args(&raw, 0, Some(0), "show")?;
             Ok(TypedCommand::Show(ShowArgs {
                 debug: flag(&raw, "debug"),
+                format: val(&raw, "format")
+                    .as_deref()
+                    .map(OutputFormat::parse)
+                    .transpose()?
+                    .unwrap_or_default(),
             }))
         }
         OperationId::ShowTable => {
@@ -548,6 +634,14 @@ fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
         }
         OperationId::Dump => {
             args(&raw, 0, Some(0), "dump")?;
+            let format = val(&raw, "format")
+                .as_deref()
+                .map(OutputFormat::parse)
+                .transpose()?
+                .unwrap_or_default();
+            if format == OutputFormat::Jsonl && val(&raw, "separator").is_some() {
+                return Err(QuiltError::usage("separator applies only to CSV output"));
+            }
             let separator = val(&raw, "separator").unwrap_or_else(|| ",".into());
             if separator.chars().count() != 1 || !separator.is_ascii() {
                 return Err(QuiltError::usage(
@@ -555,6 +649,7 @@ fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
                 ));
             }
             Ok(TypedCommand::Dump(DumpArgs {
+                format,
                 output: val(&raw, "output"),
                 separator: separator.chars().next().unwrap_or(','),
             }))

@@ -50,6 +50,13 @@ impl YamlValues {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct YLoad {
+    #[serde(rename = "all-strings", default)]
+    all_strings: bool,
+    #[serde(default)]
+    schema: std::collections::BTreeMap<String, String>,
+    #[serde(rename = "stdin-format")]
+    stdin_format: Option<String>,
+    rejects: Option<PathBuf>,
     paths: Option<YamlStrings>,
     #[serde(rename = "source-column")]
     source_column: Option<String>,
@@ -129,6 +136,7 @@ struct YDate {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct YColumnOutput {
+    by: Option<YamlStrings>,
     column: String,
     output: Option<String>,
 }
@@ -219,6 +227,7 @@ struct YTimeSlice {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct YShow {
+    format: Option<String>,
     #[serde(default)]
     debug: bool,
 }
@@ -231,6 +240,7 @@ struct YHeaders {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct YDump {
+    format: Option<String>,
     output: Option<String>,
     separator: Option<String>,
 }
@@ -343,6 +353,14 @@ pub fn parse_automation_step(
         OperationId::Load => {
             let a: YLoad = yaml_args(value, name)?;
             let paths = a.paths.map(YamlStrings::into_vec).unwrap_or_default();
+            if let Some(format) = &a.stdin_format {
+                crate::operations::initializers::stdin::validate_format(format)?;
+                if !paths.is_empty() {
+                    return Err(QuiltError::usage(
+                        "stdin-format cannot be combined with input paths",
+                    ));
+                }
+            }
             let infer = match a.infer_schema_length {
                 None => crate::operations::initializers::load::DEFAULT_NDJSON_INFER_SCHEMA_LENGTH,
                 Some(YInferSchemaLength::Text(v)) if v.eq_ignore_ascii_case("full") => None,
@@ -369,11 +387,100 @@ pub fn parse_automation_step(
             Ok(TypedCommand::Load(LoadArgs {
                 paths: paths.into_iter().map(PathBuf::from).collect(),
                 source_column: a.source_column,
+                all_strings: a.all_strings,
+                schema: a
+                    .schema
+                    .into_iter()
+                    .map(|(name, dtype)| parse_column_type(&format!("{name}={dtype}")))
+                    .collect::<Result<_, _>>()?,
+                stdin_format: a.stdin_format,
+                rejects: a.rejects,
                 separator: separator(a.separator)?,
                 low_memory: a.low_memory,
                 no_headers: a.no_headers,
                 chunk_size: a.chunk_size,
                 infer_schema_length: infer,
+            }))
+        }
+        OperationId::Filter => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct X {
+                expression: String,
+            }
+            let a: X = yaml_args(value, name)?;
+            Ok(TypedCommand::Filter(FilterArgs {
+                expression: a.expression,
+            }))
+        }
+        OperationId::Derive => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct X {
+                output: String,
+                expression: String,
+            }
+            let a: X = yaml_args(value, name)?;
+            Ok(TypedCommand::Derive(DeriveArgs {
+                output: a.output,
+                expression: a.expression,
+            }))
+        }
+        OperationId::Aggregate => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct X {
+                metrics: YamlStrings,
+                by: Option<YamlStrings>,
+            }
+            let a: X = yaml_args(value, name)?;
+            Ok(TypedCommand::Aggregate(AggregateArgs {
+                metrics: a
+                    .metrics
+                    .into_vec()
+                    .iter()
+                    .map(|s| parse_metric(s))
+                    .collect::<Result<_, _>>()?,
+                by: a.by.map(YamlStrings::into_vec).unwrap_or_default(),
+            }))
+        }
+        OperationId::ArrayContains => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct X {
+                column: String,
+                value: String,
+            }
+            let a: X = yaml_args(value, name)?;
+            Ok(TypedCommand::ArrayContains(ArrayContainsArgs {
+                column: a.column,
+                value: a.value,
+            }))
+        }
+        OperationId::ArrayGet => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct X {
+                column: String,
+                index: i64,
+                output: Option<String>,
+            }
+            let a: X = yaml_args(value, name)?;
+            Ok(TypedCommand::ArrayGet(ArrayGetArgs {
+                output: a.output.unwrap_or_else(|| format!("{}_item", a.column)),
+                column: a.column,
+                index: a.index,
+            }))
+        }
+        OperationId::Explode => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct X {
+                columns: YamlStrings,
+            }
+            let a: X = yaml_args(value, name)?;
+            Ok(TypedCommand::Explode(ExplodeArgs {
+                columns: a.columns.into_vec(),
             }))
         }
         OperationId::Select => {
@@ -460,6 +567,7 @@ pub fn parse_automation_step(
         OperationId::Delta => {
             let a: YColumnOutput = yaml_args(value, name)?;
             Ok(TypedCommand::Delta(ColumnOutputArgs {
+                by: a.by.map(YamlStrings::into_vec).unwrap_or_default(),
                 column: a.column,
                 output: a.output,
             }))
@@ -599,7 +707,15 @@ pub fn parse_automation_step(
         }
         OperationId::Show => {
             let a: YShow = yaml_args(value, name)?;
-            Ok(TypedCommand::Show(ShowArgs { debug: a.debug }))
+            Ok(TypedCommand::Show(ShowArgs {
+                debug: a.debug,
+                format: a
+                    .format
+                    .as_deref()
+                    .map(OutputFormat::parse)
+                    .transpose()?
+                    .unwrap_or_default(),
+            }))
         }
         OperationId::Headers => {
             let a: YHeaders = yaml_args(value, name)?;
@@ -607,7 +723,17 @@ pub fn parse_automation_step(
         }
         OperationId::Dump => {
             let a: YDump = yaml_args(value, name)?;
+            let format = a
+                .format
+                .as_deref()
+                .map(OutputFormat::parse)
+                .transpose()?
+                .unwrap_or_default();
+            if format == OutputFormat::Jsonl && a.separator.is_some() {
+                return Err(QuiltError::usage("separator applies only to CSV output"));
+            }
             Ok(TypedCommand::Dump(DumpArgs {
+                format,
                 output: a.output,
                 separator: separator(a.separator)?,
             }))

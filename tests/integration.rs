@@ -1,3 +1,5 @@
+#[path = "cases/analysis.rs"]
+mod analysis;
 #[path = "cases/cli.rs"]
 mod cli;
 #[path = "cases/core.rs"]

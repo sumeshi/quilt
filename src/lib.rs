@@ -586,14 +586,26 @@ mod tests {
     fn typed_parser_rejects_before_any_input_io() {
         use crate::controllers::command_model::parse_typed_commands;
 
-        let error = parse_typed_commands(&[
-            "load".into(),
-            "/definitely/missing.csv".into(),
-            "--not-an-option".into(),
-        ])
-        .expect_err("invalid syntax must fail before loading");
-        assert!(matches!(error, QuiltError::Usage { .. }));
-        assert!(!error.to_string().contains("File not found"));
+        for args in [
+            vec!["load", "/definitely/missing.csv", "--not-an-option"],
+            vec!["load", "--stdin-format", "unknown"],
+            vec![
+                "load",
+                "/definitely/missing.csv",
+                "-",
+                "dump",
+                "--format",
+                "jsonl",
+                "--separator",
+                ";",
+            ],
+        ] {
+            let error =
+                parse_typed_commands(&args.into_iter().map(String::from).collect::<Vec<_>>())
+                    .expect_err("invalid syntax must fail before loading");
+            assert!(matches!(error, QuiltError::Usage { .. }));
+            assert!(!error.to_string().contains("File not found"));
+        }
     }
 
     #[test]
@@ -627,7 +639,10 @@ mod tests {
             .unwrap();
         executor
             .execute(&TypedCommand::Show(
-                crate::controllers::command_model::ShowArgs { debug: false },
+                crate::controllers::command_model::ShowArgs {
+                    debug: false,
+                    format: Default::default(),
+                },
             ))
             .unwrap();
         assert_eq!(executor.finalizer_results().len(), 2);

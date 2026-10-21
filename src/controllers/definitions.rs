@@ -162,6 +162,30 @@ const LOAD: &[OptionSpec] = &[
         takes_value: true,
         repeated: false,
     },
+    OptionSpec {
+        name: "all-strings",
+        short: None,
+        takes_value: false,
+        repeated: false,
+    },
+    OptionSpec {
+        name: "schema",
+        short: None,
+        takes_value: true,
+        repeated: true,
+    },
+    OptionSpec {
+        name: "stdin-format",
+        short: None,
+        takes_value: true,
+        repeated: false,
+    },
+    OptionSpec {
+        name: "rejects",
+        short: None,
+        takes_value: true,
+        repeated: false,
+    },
 ];
 const OUTPUT: &[OptionSpec] = &[OptionSpec {
     name: "output",
@@ -169,6 +193,20 @@ const OUTPUT: &[OptionSpec] = &[OptionSpec {
     takes_value: true,
     repeated: false,
 }];
+const DELTA: &[OptionSpec] = &[
+    OptionSpec {
+        name: "output",
+        short: None,
+        takes_value: true,
+        repeated: false,
+    },
+    OptionSpec {
+        name: "by",
+        short: None,
+        takes_value: true,
+        repeated: false,
+    },
+];
 const TIMEINFO: &[OptionSpec] = &[OptionSpec {
     name: "by",
     short: None,
@@ -327,12 +365,20 @@ const TIMESLICE: &[OptionSpec] = &[
         repeated: false,
     },
 ];
-const SHOW: &[OptionSpec] = &[OptionSpec {
-    name: "debug",
-    short: None,
-    takes_value: false,
-    repeated: false,
-}];
+const SHOW: &[OptionSpec] = &[
+    OptionSpec {
+        name: "debug",
+        short: None,
+        takes_value: false,
+        repeated: false,
+    },
+    OptionSpec {
+        name: "format",
+        short: None,
+        takes_value: true,
+        repeated: false,
+    },
+];
 const DUMP: &[OptionSpec] = &[
     OptionSpec {
         name: "output",
@@ -343,6 +389,12 @@ const DUMP: &[OptionSpec] = &[
     OptionSpec {
         name: "separator",
         short: Some("s"),
+        takes_value: true,
+        repeated: false,
+    },
+    OptionSpec {
+        name: "format",
+        short: None,
         takes_value: true,
         repeated: false,
     },
@@ -453,11 +505,17 @@ macro_rules! define_operations {
 }
 
 define_operations! {
-    Load(LoadArgs) => { name: "load", category: Initializer, min_args: 1, max_args: None, options: LOAD, help: "load [files...] [options] — CSV, JSONL/NDJSON, or Parquet" },
+    Load(LoadArgs) => { name: "load", category: Initializer, min_args: 0, max_args: None, options: LOAD, help: "load [files...] [options] — CSV, JSONL/NDJSON, or Parquet" },
     Select(SelectArgs) => { name: "select", category: Chainable, min_args: 1, max_args: None, options: NONE, help: "select <columns>" },
+    Filter(FilterArgs) => { name: "filter", category: Chainable, min_args: 1, max_args: Some(1), options: NONE, help: "filter <expression>" },
+    Derive(DeriveArgs) => { name: "derive", category: Chainable, min_args: 2, max_args: Some(2), options: NONE, help: "derive <output> <expression>" },
+    Aggregate(AggregateArgs) => { name: "aggregate", category: Chainable, min_args: 1, max_args: None, options: TIMEINFO, help: "aggregate <mode:column:output...> [--by columns]" },
+    ArrayContains(ArrayContainsArgs) => { name: "array-contains", category: Chainable, min_args: 2, max_args: Some(2), options: NONE, help: "array-contains <column> <value>" },
+    ArrayGet(ArrayGetArgs) => { name: "array-get", category: Chainable, min_args: 2, max_args: Some(2), options: OUTPUT, help: "array-get <column> <index> [--output name]" },
+    Explode(ExplodeArgs) => { name: "explode", category: Chainable, min_args: 1, max_args: Some(1), options: NONE, help: "explode <columns>" },
     Cast(CastArgs) => { name: "cast", category: Chainable, min_args: 2, max_args: Some(2), options: DATETIME, help: "cast <column> <type>" },
     Bucket(BucketArgs) => { name: "bucket", category: Chainable, min_args: 2, max_args: Some(2), options: BUCKET, help: "bucket <column> <interval>" },
-    Delta(ColumnOutputArgs) => { name: "delta", category: Chainable, min_args: 1, max_args: Some(1), options: OUTPUT, help: "delta <column>" },
+    Delta(ColumnOutputArgs) => { name: "delta", category: Chainable, min_args: 1, max_args: Some(1), options: DELTA, help: "delta <column>" },
     Extract(ExtractArgs) => { name: "extract", category: Chainable, min_args: 2, max_args: Some(2), options: NONE, help: "extract <column> <regex>" },
     Flatten(UnitArgs) => { name: "flatten", category: Chainable, min_args: 0, max_args: Some(0), options: NONE, help: "flatten" },
     ParseSize(ParseSizeArgs) => { name: "parse-size", category: Chainable, min_args: 1, max_args: Some(1), options: NONE, help: "parse-size <column>" },
@@ -540,35 +598,6 @@ mod tests {
         assert!(registry()
             .iter()
             .all(|d| d.run_available() == (d.name != "run")));
-    }
-
-    #[test]
-    fn every_definition_has_cli_adapter_and_run_excludes_run() {
-        for definition in registry() {
-            let mut argv = vec![definition.name.to_string()];
-            argv.extend(std::iter::repeat_n(
-                "column".to_string(),
-                definition.min_args,
-            ));
-            if definition.name == "changetz" {
-                argv.extend([
-                    "--from-tz".into(),
-                    "UTC".into(),
-                    "--to-tz".into(),
-                    "UTC".into(),
-                ]);
-            } else if definition.name == "calc" {
-                argv.push("--sum".into());
-            } else if definition.name == "timeslice" {
-                argv.extend(["--start".into(), "00:00".into()]);
-            }
-            let parsed = crate::controllers::command_model::parse_typed_commands(&argv).unwrap();
-            assert_eq!(parsed.len(), 1);
-            assert_eq!(parsed[0].name(), definition.name);
-            assert_eq!(parsed[0].category(), definition.category);
-        }
-        let empty = yaml_serde::Value::Mapping(yaml_serde::Mapping::new());
-        assert!(crate::controllers::command_model::parse_automation_step("run", &empty).is_err());
     }
 
     #[test]

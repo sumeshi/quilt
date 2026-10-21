@@ -20,6 +20,109 @@ pub struct LoadArgs {
     pub chunk_size: Option<usize>,
     pub infer_schema_length: Option<usize>,
     pub source_column: Option<String>,
+    pub all_strings: bool,
+    pub schema: Vec<(String, String)>,
+    pub stdin_format: Option<String>,
+    pub rejects: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutputFormat {
+    #[default]
+    Csv,
+    Jsonl,
+}
+impl OutputFormat {
+    pub fn parse(value: &str) -> Result<Self, crate::QuiltError> {
+        match value {
+            "csv" => Ok(Self::Csv),
+            "jsonl" | "ndjson" => Ok(Self::Jsonl),
+            _ => Err(crate::QuiltError::usage("format must be csv or jsonl")),
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilterArgs {
+    pub expression: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeriveArgs {
+    pub output: String,
+    pub expression: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggregateArgs {
+    pub metrics: Vec<crate::operations::chainables::aggregate::AggregateSpec>,
+    pub by: Vec<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArrayContainsArgs {
+    pub column: String,
+    pub value: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArrayGetArgs {
+    pub column: String,
+    pub index: i64,
+    pub output: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplodeArgs {
+    pub columns: Vec<String>,
+}
+
+pub(crate) fn parse_metric(
+    value: &str,
+) -> Result<crate::operations::chainables::aggregate::AggregateSpec, crate::QuiltError> {
+    use crate::operations::chainables::aggregate::{AggregateMode, AggregateSpec};
+    let (mode, rest) = value.split_once(':').ok_or_else(|| {
+        crate::QuiltError::usage("metric must be count:output or mode:column:output")
+    })?;
+    let mode = match mode {
+        "count" => AggregateMode::Count,
+        "sum" => AggregateMode::Sum,
+        "avg" => AggregateMode::Avg,
+        "min" => AggregateMode::Min,
+        "max" => AggregateMode::Max,
+        "median" => AggregateMode::Median,
+        "std" => AggregateMode::Std,
+        "nunique" => AggregateMode::Nunique,
+        s if s.starts_with('p') => AggregateMode::Percentile(
+            s[1..]
+                .parse::<u8>()
+                .ok()
+                .filter(|p| *p <= 100)
+                .ok_or_else(|| crate::QuiltError::usage("percentile must be p0 through p100"))?,
+        ),
+        _ => return Err(crate::QuiltError::usage("unknown aggregate mode")),
+    };
+    let (column, output) = match rest.rsplit_once(':') {
+        Some((column, output)) if !column.is_empty() => (Some(column.to_string()), output),
+        None if mode == AggregateMode::Count => (None, rest),
+        _ => {
+            return Err(crate::QuiltError::usage(
+                "metric must be count:output or mode:column:output",
+            ))
+        }
+    };
+    if output.is_empty() {
+        return Err(crate::QuiltError::usage(
+            "metric output name must not be empty",
+        ));
+    }
+    Ok(AggregateSpec::new(mode, column, output))
+}
+
+pub(crate) fn parse_column_type(value: &str) -> Result<(String, String), crate::QuiltError> {
+    let (name, dtype) = value.rsplit_once('=').ok_or_else(|| {
+        crate::QuiltError::usage("schema must be column=string|int|uint|float|bool")
+    })?;
+    if name.is_empty() || !matches!(dtype, "string" | "int" | "uint" | "float" | "bool") {
+        return Err(crate::QuiltError::usage(
+            "schema must be column=string|int|uint|float|bool",
+        ));
+    }
+    Ok((name.to_owned(), dtype.to_owned()))
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectArgs {
@@ -39,6 +142,7 @@ pub struct RenameColArgs {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShowArgs {
     pub debug: bool,
+    pub format: OutputFormat,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeadersArgs {
@@ -65,6 +169,7 @@ pub struct BucketArgs {
 pub struct ColumnOutputArgs {
     pub column: String,
     pub output: Option<String>,
+    pub by: Vec<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtractArgs {
@@ -139,6 +244,7 @@ pub struct TimeSliceArgs {
 pub struct DumpArgs {
     pub output: Option<String>,
     pub separator: char,
+    pub format: OutputFormat,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionArgs {

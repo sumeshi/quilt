@@ -1,27 +1,31 @@
 use std::io::Write;
-use std::process;
+use std::process::ExitCode;
 
 use controllers::command_model::{parse_typed_commands, render_command_help, render_registry_help};
 use controllers::executor::{CommandExecutor, CommandResult};
 use quilt::controllers;
 
-fn main() {
+fn main() -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
         .format(|buf, record| writeln!(buf, "{}", record.args()))
         .init();
 
+    run()
+}
+
+fn run() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() == 1 {
         print_registry_help();
-        return;
+        return ExitCode::SUCCESS;
     }
     if args.len() == 2 && (args[1] == "-h" || args[1] == "--help") {
         print_registry_help();
-        return;
+        return ExitCode::SUCCESS;
     }
     if args.len() == 2 && (args[1] == "-v" || args[1] == "--version") {
         println!("{}", env!("CARGO_PKG_VERSION"));
-        return;
+        return ExitCode::SUCCESS;
     }
     if args.len() >= 3 && (args[2] == "-h" || args[2] == "--help") {
         if let Some(help) = render_command_help(&args[1]) {
@@ -29,14 +33,14 @@ fn main() {
         } else {
             print_registry_help();
         }
-        return;
+        return ExitCode::SUCCESS;
     }
 
     let commands = match parse_typed_commands(&args[1..]) {
         Ok(commands) => commands,
         Err(error) => {
             eprintln!("{error}");
-            process::exit(1);
+            return ExitCode::FAILURE;
         }
     };
 
@@ -60,16 +64,19 @@ fn main() {
                     Ok(quilt::operations::finalizers::WriteStatus::BrokenPipe) => break,
                     Err(error) => {
                         eprintln!("Error: {error}");
-                        process::exit(1);
+                        return ExitCode::FAILURE;
                     }
                 }
             }
         }
         Err(error) => {
             eprintln!("Error: {error}");
-            process::exit(1);
+            return ExitCode::FAILURE;
         }
     }
+
+    // Returning an exit code lets executor-owned resources drop on every path.
+    ExitCode::SUCCESS
 }
 
 fn print_registry_help() {

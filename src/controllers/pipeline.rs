@@ -129,6 +129,114 @@ impl Pipeline {
         Ok(Self::new(frame, resources).with_source_inventory(inventory))
     }
 
+    pub fn load_args(
+        args: &crate::controllers::arguments::LoadArgs,
+        resources: ExecutionResources,
+    ) -> Result<Self, QuiltError> {
+        let csv = crate::controllers::csv_input::CsvInputOptions {
+            all_strings: args.all_strings,
+            schema: args.schema.clone(),
+            infer_schema_length: args.infer_schema_length,
+            rejects: args.rejects.clone(),
+        };
+        let frame = load::load_with_options(
+            &args.paths,
+            &args.separator.to_string(),
+            args.low_memory,
+            args.no_headers,
+            args.chunk_size,
+            args.infer_schema_length,
+            args.source_column.as_deref(),
+            load::LoadOptions {
+                stdin_format: args.stdin_format.as_deref(),
+                rejects_path: args.rejects.as_deref(),
+                csv_options: Some(&csv),
+            },
+            &resources,
+        )?;
+        let inventory = args
+            .source_column
+            .as_ref()
+            .map(|name| {
+                if args.stdin_format.is_some() {
+                    Ok((name.clone(), vec!["<stdin>".into()]))
+                } else {
+                    load::expand_input_paths(&args.paths).map(|paths| {
+                        (
+                            name.clone(),
+                            paths
+                                .iter()
+                                .map(|p| p.to_string_lossy().into_owned())
+                                .collect(),
+                        )
+                    })
+                }
+            })
+            .transpose()?;
+        Ok(Self::new(frame, resources).with_source_inventory(inventory))
+    }
+    pub fn filter(&mut self, expression: &str) -> Result<&mut Self, QuiltError> {
+        self.frame = crate::operations::chainables::filter::filter(&self.frame, expression)?;
+        Ok(self)
+    }
+    pub fn derive(&mut self, output: &str, expression: &str) -> Result<&mut Self, QuiltError> {
+        self.frame =
+            crate::operations::chainables::filter::derive(&self.frame, output, expression)?;
+        Ok(self)
+    }
+    pub fn aggregate(
+        &mut self,
+        metrics: &[crate::operations::chainables::aggregate::AggregateSpec],
+        by: &[String],
+    ) -> Result<&mut Self, QuiltError> {
+        self.frame = crate::operations::chainables::aggregate::aggregate(&self.frame, metrics, by)?;
+        self.source_inventory = None;
+        Ok(self)
+    }
+    pub fn array_contains(&mut self, column: &str, value: &str) -> Result<&mut Self, QuiltError> {
+        self.frame = crate::operations::chainables::arrays::contains(&self.frame, column, value)?;
+        Ok(self)
+    }
+    pub fn array_get(
+        &mut self,
+        column: &str,
+        index: i64,
+        output: &str,
+    ) -> Result<&mut Self, QuiltError> {
+        self.frame =
+            crate::operations::chainables::arrays::get(&self.frame, column, index, output)?;
+        Ok(self)
+    }
+    pub fn explode(&mut self, columns: &[String]) -> Result<&mut Self, QuiltError> {
+        self.frame = crate::operations::chainables::arrays::explode(&self.frame, columns)?;
+        Ok(self)
+    }
+    pub fn delta_by(
+        &mut self,
+        column: &str,
+        output: Option<&str>,
+        by: &[String],
+    ) -> Result<&mut Self, QuiltError> {
+        self.frame = delta::delta_with_groups(&self.frame, column, output, by)?;
+        Ok(self)
+    }
+    pub fn show_jsonl_result(
+        &self,
+    ) -> Result<crate::operations::finalizers::FinalizerResult, QuiltError> {
+        crate::operations::finalizers::jsonl::show_jsonl(&self.frame, &self.resources)
+    }
+    pub fn dump_jsonl_result(
+        &self,
+        output: Option<&str>,
+    ) -> Result<crate::operations::finalizers::FinalizerResult, QuiltError> {
+        let path = output.map(str::to_owned).unwrap_or_else(|| {
+            format!(
+                "dump_{}.jsonl",
+                chrono::Local::now().format("%Y%m%d_%H%M%S_%9f")
+            )
+        });
+        crate::operations::finalizers::jsonl::dump_jsonl(&self.frame, &path)
+    }
     pub fn cast(
         &mut self,
         colname: &str,

@@ -59,6 +59,11 @@ fn resolve_command_paths(command: &mut TypedCommand, config_path: &Path) {
     let base = config_path.parent().unwrap_or_else(|| Path::new("."));
     match command {
         TypedCommand::Load(args) => {
+            if let Some(path) = &mut args.rejects {
+                if path.is_relative() {
+                    *path = base.join(&*path);
+                }
+            }
             for path in &mut args.paths {
                 if path.is_relative() {
                     *path = base.join(&*path);
@@ -279,7 +284,7 @@ pub(super) fn preflight(
                                 ));
                             }
                             finalizer_seen |= typed.category() == CommandCategory::Finalizer;
-                            let load_paths_omitted = matches!(typed, TypedCommand::Load(_))
+                            let load_paths_omitted = matches!(&typed, TypedCommand::Load(load) if load.stdin_format.is_none())
                                 && args.get("paths").is_none();
                             resolve_command_paths(&mut typed, config_path);
                             steps.push(PlannedStep {

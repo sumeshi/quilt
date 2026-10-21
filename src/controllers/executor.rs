@@ -4,6 +4,7 @@ use super::command_model::{
 };
 use super::pipeline::{Pipeline, PipelineState};
 use super::resources::ExecutionResources;
+use crate::controllers::arguments::OutputFormat;
 use crate::error::QuiltError;
 use crate::operations;
 
@@ -125,17 +126,40 @@ impl CommandExecutor {
         match command {
             TypedCommand::Load(args) => {
                 let resources = self.controller.resources();
-                let loaded = Pipeline::load(
-                    &args.paths,
-                    &args.separator.to_string(),
-                    args.low_memory,
-                    args.no_headers,
-                    args.chunk_size,
-                    args.infer_schema_length,
-                    args.source_column.as_deref(),
-                    resources,
-                )?;
+                let loaded = Pipeline::load_args(args, resources)?;
                 self.controller = PipelineState::Loaded(Box::new(loaded));
+            }
+            TypedCommand::Filter(args) => {
+                self.controller
+                    .loaded_mut("filter")?
+                    .filter(&args.expression)?;
+            }
+            TypedCommand::Derive(args) => {
+                self.controller
+                    .loaded_mut("derive")?
+                    .derive(&args.output, &args.expression)?;
+            }
+            TypedCommand::Aggregate(args) => {
+                self.controller
+                    .loaded_mut("aggregate")?
+                    .aggregate(&args.metrics, &args.by)?;
+            }
+            TypedCommand::ArrayContains(args) => {
+                self.controller
+                    .loaded_mut("array-contains")?
+                    .array_contains(&args.column, &args.value)?;
+            }
+            TypedCommand::ArrayGet(args) => {
+                self.controller.loaded_mut("array-get")?.array_get(
+                    &args.column,
+                    args.index,
+                    &args.output,
+                )?;
+            }
+            TypedCommand::Explode(args) => {
+                self.controller
+                    .loaded_mut("explode")?
+                    .explode(&args.columns)?;
             }
             TypedCommand::Select(args) => {
                 self.controller
@@ -158,9 +182,11 @@ impl CommandExecutor {
                 )?;
             }
             TypedCommand::Delta(args) => {
-                self.controller
-                    .loaded_mut("delta")?
-                    .delta(&args.column, args.output.as_deref())?;
+                self.controller.loaded_mut("delta")?.delta_by(
+                    &args.column,
+                    args.output.as_deref(),
+                    &args.by,
+                )?;
             }
             TypedCommand::Extract(args) => {
                 self.controller
@@ -255,8 +281,12 @@ impl CommandExecutor {
                     &args.datetime,
                 )?;
             }
-            TypedCommand::Show(ShowArgs { debug }) => {
-                let result = self.controller.loaded("show")?.show_result()?;
+            TypedCommand::Show(ShowArgs { debug, format }) => {
+                let pipeline = self.controller.loaded("show")?;
+                let result = match format {
+                    OutputFormat::Csv => pipeline.show_result()?,
+                    OutputFormat::Jsonl => pipeline.show_jsonl_result()?,
+                };
                 self.results.push(if *debug {
                     match result {
                         crate::operations::finalizers::FinalizerResult::Stdout(text) => {
@@ -285,11 +315,13 @@ impl CommandExecutor {
                 self.results.push(result);
             }
             TypedCommand::Dump(args) => {
-                self.results.push(
-                    self.controller
-                        .loaded("dump")?
-                        .dump_result(args.output.as_deref(), args.separator)?,
-                );
+                let pipeline = self.controller.loaded("dump")?;
+                self.results.push(match args.format {
+                    OutputFormat::Csv => {
+                        pipeline.dump_result(args.output.as_deref(), args.separator)?
+                    }
+                    OutputFormat::Jsonl => pipeline.dump_jsonl_result(args.output.as_deref())?,
+                });
             }
             TypedCommand::DumpCache(DumpCacheArgs { output }) => {
                 self.results.push(
@@ -404,6 +436,10 @@ mod tests {
             chunk_size: None,
             infer_schema_length: Some(1_000),
             source_column: None,
+            all_strings: false,
+            schema: Vec::new(),
+            stdin_format: None,
+            rejects: None,
         })
     }
 
@@ -487,6 +523,10 @@ mod tests {
                 chunk_size: None,
                 infer_schema_length: Some(1000),
                 source_column: None,
+                all_strings: false,
+                schema: Vec::new(),
+                stdin_format: None,
+                rejects: None,
             }))
             .unwrap_err();
         assert!(matches!(error, QuiltError::Io { .. }));
@@ -513,7 +553,10 @@ mod tests {
             ))
             .unwrap();
         assert!(matches!(
-            executor.execute(&TypedCommand::Show(ShowArgs { debug: false })),
+            executor.execute(&TypedCommand::Show(ShowArgs {
+                debug: false,
+                format: Default::default()
+            })),
             Ok(CommandResult::Finalizer(_))
         ));
         assert!(executor.into_pipeline().is_some());
@@ -556,7 +599,10 @@ mod tests {
             }))
             .unwrap();
         assert!(executor
-            .execute(&TypedCommand::Show(ShowArgs { debug: false }))
+            .execute(&TypedCommand::Show(ShowArgs {
+                debug: false,
+                format: Default::default()
+            }))
             .is_err());
         assert!(spool[0].exists());
         drop(executor);
@@ -578,6 +624,7 @@ mod tests {
             .execute(&TypedCommand::Dump(DumpArgs {
                 output: Some(target.to_string_lossy().into_owned()),
                 separator: ',',
+                format: Default::default(),
             }))
             .is_err());
         assert!(spool[0].exists());
@@ -602,6 +649,10 @@ mod tests {
                 chunk_size: None,
                 infer_schema_length: Some(1_000),
                 source_column: None,
+                all_strings: false,
+                schema: Vec::new(),
+                stdin_format: None,
+                rejects: None,
             }),
         );
         assert!(result.is_err());

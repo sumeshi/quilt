@@ -411,7 +411,10 @@ mod tests {
         let steps = vec![crate::operations::automation::model::PlannedStep {
             index: 0,
             command: crate::controllers::command_model::TypedCommand::Show(
-                crate::controllers::command_model::ShowArgs { debug: false },
+                crate::controllers::command_model::ShowArgs {
+                    debug: false,
+                    format: Default::default(),
+                },
             ),
             load_paths_omitted: false,
         }];
