@@ -3,7 +3,7 @@ use quilt::controllers::command_model::parse_typed_commands;
 use quilt::controllers::executor::CommandExecutor;
 use quilt::operations::finalizers::{write_stdout, FinalizerResult};
 use quilt::QuiltError;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 pub type Row = BTreeMap<String, String>;
@@ -38,6 +38,11 @@ pub fn text(args: &[&str]) -> String {
 pub fn rows(text: &str) -> Vec<Row> {
     let mut reader = csv::Reader::from_reader(text.as_bytes());
     let headers = reader.headers().unwrap().clone();
+    assert_eq!(
+        headers.iter().collect::<BTreeSet<_>>().len(),
+        headers.len(),
+        "duplicate CSV headers: {headers:?}"
+    );
     reader
         .records()
         .map(|record| {

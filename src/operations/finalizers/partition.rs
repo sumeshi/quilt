@@ -563,10 +563,9 @@ mod tests {
     use super::*;
     use crate::operations::finalizers::{publish_directory_and_sync, NativePublicationBackend};
     use std::fs;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Barrier};
     use std::thread;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn test_parent(label: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -582,7 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_publishers_have_one_winner() {
+    fn concurrent_publishers_stage_complete_partitions_and_have_one_winner() {
         let parent = test_parent("concurrent");
         let target = parent.join("partitions");
         let barrier = Arc::new(Barrier::new(2));
@@ -591,7 +590,7 @@ mod tests {
                 let target = target.clone();
                 let barrier = Arc::clone(&barrier);
                 thread::spawn(move || {
-                    let frame = df!("part" => &["a", "b"], "value" => &[1i64, 2])
+                    let frame = df!("part" => &["a", "b", "c"], "value" => &[1i64, 2, 3])
                         .unwrap()
                         .lazy();
                     partition_with_publisher(
@@ -599,7 +598,24 @@ mod tests {
                         "part",
                         target.to_str().unwrap(),
                         move |stage, target| {
+                            let unpublished = !target.exists();
+                            let staged = fs::read_dir(stage).and_then(|entries| {
+                                entries
+                                    .map(|entry| fs::read_to_string(entry?.path()))
+                                    .collect::<std::io::Result<Vec<_>>>()
+                            });
                             barrier.wait();
+                            assert!(unpublished);
+                            let mut staged = staged.unwrap();
+                            staged.sort();
+                            assert_eq!(
+                                staged,
+                                [
+                                    "part,value\na,1\n",
+                                    "part,value\nb,2\n",
+                                    "part,value\nc,3\n"
+                                ]
+                            );
                             let parent = target.parent().unwrap_or_else(|| Path::new("."));
                             publish_directory_and_sync(
                                 &NativePublicationBackend,
@@ -620,71 +636,13 @@ mod tests {
             .filter(|success| *success)
             .count();
         assert_eq!(successes, 1);
-        assert_eq!(fs::read_dir(&target).unwrap().count(), 2);
-        fs::remove_dir_all(parent).unwrap();
-    }
-
-    #[test]
-    fn observer_sees_no_partial_partition_directory() {
-        let parent = test_parent("observer");
-        let target = parent.join("partitions");
-        let started = Arc::new(AtomicBool::new(false));
-        let finished = Arc::new(AtomicBool::new(false));
-        let invalid = Arc::new(AtomicBool::new(false));
-        let observer_target = target.clone();
-        let observer_finished = Arc::clone(&finished);
-        let observer_invalid = Arc::clone(&invalid);
-        let observer = thread::spawn(move || {
-            while !observer_finished.load(Ordering::Acquire) {
-                if observer_target.exists() {
-                    match fs::read_dir(&observer_target) {
-                        Ok(entries) => {
-                            if entries.count() != 3 {
-                                observer_invalid.store(true, Ordering::Release);
-                                break;
-                            }
-                        }
-                        Err(_) => {
-                            observer_invalid.store(true, Ordering::Release);
-                            break;
-                        }
-                    }
-                }
-                thread::yield_now();
-            }
-        });
-        let publish_started = Arc::clone(&started);
-        let publish_finished = Arc::clone(&finished);
-        let frame = df!(
-            "part" => &["a", "b", "c"],
-            "value" => &[1i64, 2, 3]
-        )
-        .unwrap()
-        .lazy();
-        let result = partition_with_publisher(
-            &frame,
-            "part",
-            target.to_str().unwrap(),
-            move |stage, target| {
-                publish_started.store(true, Ordering::Release);
-                thread::sleep(Duration::from_millis(25));
-                let parent = target.parent().unwrap_or_else(|| Path::new("."));
-                let result = publish_directory_and_sync(
-                    &NativePublicationBackend,
-                    stage,
-                    target,
-                    parent,
-                    "publish partition directory",
-                );
-                publish_finished.store(true, Ordering::Release);
-                result
-            },
-        );
-        assert!(result.is_ok());
-        assert!(started.load(Ordering::Acquire));
-        observer.join().unwrap();
-        assert!(!invalid.load(Ordering::Acquire));
         assert_eq!(fs::read_dir(&target).unwrap().count(), 3);
+        for (name, value) in [("a", 1), ("b", 2), ("c", 3)] {
+            assert_eq!(
+                fs::read_to_string(target.join(format!("{name}.csv"))).unwrap(),
+                format!("part,value\n{name},{value}\n")
+            );
+        }
         fs::remove_dir_all(parent).unwrap();
     }
 
