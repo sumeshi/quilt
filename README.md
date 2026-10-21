@@ -85,8 +85,9 @@ quoted globs you want Quilt to expand.
   Once those arguments are filled, the next `-` separates commands:
   `qlt load file.csv - grep -- - - show` searches for a literal hyphen.
 
-`-` does not select stdin or stdout as an input/output path. Use an explicit input
-file and `show` for stdout. Unknown or duplicate options are errors.
+`-` remains the command separator. Read finite standard input with an explicit
+format, for example `producer | qlt load --stdin-format jsonl - show --format jsonl`.
+Use `show` for stdout. Unknown or duplicate options are errors.
 
 If no finalizer is specified, Quilt uses machine-readable `show`. This does not
 depend on TTY or build features. `showtable` is always a bounded preview and is
@@ -118,7 +119,11 @@ Load one or more CSV, JSONL/NDJSON, or Parquet files.
 | --low-memory  | flag    | `false` | Enable low-memory mode for very large files (CSV files only). |
 | --no-headers  | flag    | `false` | Treat the first row as data, not headers (CSV files only). When enabled, columns will be named automatically (`column_1`, `column_2`, etc.). |
 | --chunk-size  | int     | (auto)  | Number of rows to read per chunk (CSV files only). Controls memory usage during file processing. |
-| --infer-schema-length | int or `full` | `full` | NDJSON schema discovery per file. A positive limit rejects fields or types first appearing later; all records are validated. |
+| --infer-schema-length | int or `full` | `full` | Limit CSV/NDJSON schema discovery per file; all later records are still validated. |
+| --all-strings | flag | `false` | Read CSV fields as String before any conversion. |
+| --schema | `column=type` | none | Override a CSV column's type; repeatable. Types: `string`, `int`, `uint`, `float`, `bool`. |
+| --stdin-format | str | none | Read finite stdin as `csv`, `tsv`, `jsonl`, or `ndjson`; cannot be combined with paths. |
+| --rejects | path | none | Write rejected CSV/NDJSON records and reasons to a new JSONL report; keep accepted records. |
 | --source-column | str | none | Add each input's expanded path as a String column. Available for all input formats; an existing column with this name is an error. |
 
 CSV separators must be one ASCII character; TSV requires an explicit tab separator.
@@ -144,6 +149,26 @@ before loading. Empty objects must also be normalized before Parquet export.
 Gzipped NDJSON uses temporary disk proportional to the uncompressed input and
 retains the original path in `--source-column`. Gzipped input is not supported by
 `run --show-plan`.
+
+CSV validates all records before the lazy scan and preserves leading-zero IDs as
+strings. Quoted empty fields remain empty strings, distinct from null fields.
+Fields without a lossless common numeric type also remain strings. Explicit
+schema overrides are checked before conversion; casting after loading cannot recover
+an identifier that was already parsed numerically. Input must be UTF-8; unsupported
+UTF-16/UTF-32 BOMs and malformed UTF-8 fail with the source path and line.
+
+```bash
+$ qlt load events.csv --schema event_id=string --schema bytes=uint - show
+$ qlt load events.csv --all-strings - show
+$ qlt load events.jsonl --rejects rejected.jsonl - show --format jsonl
+```
+
+With `--rejects`, rejected records retain their source, physical line, raw text
+(or hexadecimal bytes for invalid UTF-8), and rejection reason. The report is
+published without overwriting an existing file. Accepted records use temporary
+disk; malformed CSV quoting that prevents finding record boundaries still fails.
+Input is strict by default. `run --check` does not read stdin, and `--show-plan`
+cannot inspect inputs that require a spool.
 
 CSV files loaded together must have compatible inferred column types. In particular,
 a header-only CSV infers String columns and can conflict with numeric columns in a
@@ -182,6 +207,57 @@ cell and are encoded as JSON by `show` and `dump`; nulls become empty CSV cells.
 Use `dumpcache` for Parquet output that preserves supported data types.
 
 ### Chainable Functions
+
+#### `filter`
+Keep rows matching a typed Boolean expression. Comparisons support `==`, `!=`,
+`<`, `<=`, `>`, `>=`, column-to-column comparisons, `and`/`or`/`not` (also
+`&&`/`||`/`!`), parentheses, and `IS NULL`/`IS NOT NULL`. Quote string literals;
+use backticks for literal column names containing spaces or punctuation.
+Incompatible types and implicit precision-losing conversions are errors.
+
+```bash
+$ qlt load events.jsonl - filter 'latency > 1000 and (status >= 500 or suspicious == true)'
+$ qlt load events.csv - filter '`user name` == "alice" or message IS NULL'
+```
+
+#### `derive`
+Create a new column from typed `+`, `-`, `*`, and `/` expressions. Existing output
+columns are rejected. Integer results are checked Int64 values; cast a source to
+Float64 explicitly before computing a floating-point rate.
+
+```bash
+$ qlt load events.csv - derive transferred 'sent + received'
+$ qlt load events.csv - cast bytes float - derive bytes_per_second 'bytes / 60.0'
+```
+
+#### `aggregate`
+Calculate several metrics in one lazy operation, optionally grouped by `--by`.
+Pass each metric as a separate `mode:column:output` argument; `count:output`
+counts rows. Modes are `count`, `sum`, `avg`, `min`, `max`, `median`, `std`,
+`p0` through `p100`, and `nunique`. Column counts and `nunique` exclude nulls;
+a sum with no non-null values is null. Integer sums fail on overflow. Groups
+keep first-seen order, and the result can continue through the pipeline.
+`min`, `max`, `p0`, and `p100` retain the input type and exact integer values.
+Average, median, standard deviation, and interior percentiles use floating-point
+statistics and can round large integers; use exact endpoints for identifier ranges.
+
+```bash
+$ qlt load events.jsonl - cast timestamp datetime - bucket timestamp 5m - aggregate count:events sum:bytes:total_bytes avg:latency:mean_latency p95:latency:p95_latency --by host,timestamp_bucket - show
+```
+
+#### `array-contains`, `array-get`, and `explode`
+`array-contains <column> <value>` filters by exact typed scalar membership rather
+than JSON substring matching. `null` searches for a null item; pass the quoted
+string `"null"` within the argument to search for that text. Null lists do not match.
+`array-get <column> <index> [--output name]` creates a column (default
+`<column>_item`); negative indexes count from the end, and missing elements are null.
+`explode <columns>` explicitly expands lists into rows. Null and empty lists
+produce a null row; multiple selected lists must have matching lengths per row.
+
+```bash
+$ qlt load events.jsonl - array-contains tags suspicious - array-get tags 0 --output first_tag - show
+$ qlt load events.jsonl - explode tags - count tags - show
+```
 
 #### `select`
 Select columns by name, numeric index, or range notation.
@@ -328,6 +404,7 @@ and any pair involving a null produce null. Existing output names are rejected.
 ```bash
 $ qlt load data.csv - delta count - show
 $ qlt load data.csv - cast timestamp datetime - delta timestamp --output elapsed - show
+$ qlt load data.csv - cast timestamp datetime - sort host,timestamp - delta timestamp --by host - show
 ```
 
 #### `extract`
@@ -397,7 +474,8 @@ use `flatten` first; selecting an object or array directly is an error.
 | --column    | str    | (all)   | Apply replacement to specific column only. If not specified, applies to all columns. |
 | -i, --ignore-case | flag | `false` | Perform case-insensitive matching.          |
 
-> **Warning:** When `--column` is omitted, `sed` replaces across **all columns**. In log/DFIR data this can silently modify timestamps, EventIDs, file paths, and usernames. Always specify `--column` unless you intend a full-dataset replacement.
+When `--column` is omitted, `sed` replaces only String columns and preserves other
+types. An explicit scalar target is converted to String; nested targets are rejected.
 
 ```bash
 $ qlt load data.csv - sed foo foooooo                       # Replace 'foo' with 'foooooo' in all columns
@@ -478,7 +556,7 @@ $ qlt load data.csv - sort col1,col2,col3 --desc
 ```
 
 #### `count`
-Count duplicate rows, grouping by all columns by default. Results are automatically sorted by count in descending order.
+Count duplicate rows, grouping by all columns by default. Results are sorted by count descending; equal counts retain the first-seen group order.
 
 > ⚠️ **Memory:** This is a global operation and may require memory proportional to the input.
 
@@ -731,15 +809,21 @@ $ qlt load data.csv - select col1 - showquery
 ```
 
 #### `show`
-Writes the result as CSV to standard output, including the header. This command
+Writes the result to standard output. `--format csv` (default) includes the header;
+`--format jsonl` emits one object per row. This command
 takes no positional arguments. It is the implicit finalizer when a chain ends without one.
-The full CSV is first written to a temporary file, then copied to stdout in bounded
+The full output is first written to a temporary file, then copied to stdout in bounded
 chunks. This avoids emitting rows before lazy evaluation has succeeded, but uses disk
 proportional to the rendered output. `--debug` is accepted and currently has no effect;
 use `showquery` to inspect the query plan.
 
 Object and list columns are encoded as JSON strings inside CSV cells, with
-normal CSV quoting. Null cells remain empty; empty lists are `[]`.
+normal CSV quoting. Null cells remain empty; empty lists are `[]`. Duration values at any nesting level
+use exact integer counts in their declared unit (for example, `delta` uses microseconds).
+JSONL preserves supported nested values, nulls and exact integers; datetime values
+are strings and durations follow the same integer rule. Non-finite JSON numbers
+are rejected. JSONL does not recover distinctions already unified during loading,
+such as missing fields versus nulls.
 
 ```bash
 $ qlt load data.csv - head 5 - show
@@ -771,17 +855,18 @@ $ qlt load data.csv - select col1,col2 - head 3 - showtable
 ```
 
 #### `dump`
-Outputs the processing results to a CSV/TSV file. The destination must not
+Outputs the processing results to a CSV/TSV or JSONL file. The destination must not
 already exist; output is first written to a temporary sibling and atomically
 published with a no-replace primitive (with a safe hard-link fallback where
 supported). The finalizer evaluates the lazy frame as its required write barrier.
-As with `show`, object and list values become JSON strings inside CSV cells;
+As with `show`, the default is CSV; object and list values become JSON strings inside CSV cells;
 nulls remain empty. Use `flatten` first to turn nested object fields into columns,
 or `dumpcache` to preserve the original types in Parquet.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| -o, --output | str | `dump_<timestamp>.csv` | File path to save the CSV data. Optional - if not specified, a default timestamped filename is automatically generated. |
+| --format | str | `csv` | `csv` or `jsonl`; JSONL uses the same type rules as `show`. |
+| -o, --output | str | (automatic) | Destination path; defaults to `dump_<timestamp>.csv` or `.jsonl` for the selected format. |
 | -s, --separator | char | `,` | Field separator character for the output CSV file. |
 
 Example:
@@ -790,6 +875,7 @@ $ qlt load data.csv - dump                                  # Saves to dump_<tim
 $ qlt load data.csv - head 100 - dump -o results.csv
 $ qlt load data.csv - head 100 - dump --output results.csv
 $ qlt load data.csv - head 100 - dump -o results.csv -s ';'
+$ qlt load events.jsonl - filter 'status >= 500' - dump --format jsonl -o errors.jsonl
 ```
 
 #### `dumpcache`
@@ -830,12 +916,12 @@ contextual error at evaluation time.
 
 | Operation | Accepted input and output schema | Null/error behavior | Evaluation and memory |
 |---|---|---|---|
-| `load` | CSV/TSV/gzip CSV, same-family JSONL/NDJSON, or Parquet; outputs inferred/preserved columns | Missing files, mixed families, malformed records, and incompatible schemas fail before/at scan | Lazy scan after full NDJSON validation; bounded discovery rejects late fields |
+| `load` | CSV/TSV/gzip CSV, same-family JSONL/NDJSON, or Parquet; finite stdin with explicit format | Strict validation by default; `--rejects` explicitly isolates rejected records | Lazy scan after CSV/NDJSON validation; stdin/gzip/reject filtering use temporary disk |
 | `select` | Existing names, 1-based indices, and ranges; output contains selected columns in requested order | Missing names, invalid/out-of-range/oversized ranges fail with usage/schema error | Lazy projection; schema-only validation |
 | `isin` | Scalar column; output preserves schema and matching rows | Numeric/boolean values are parsed to the column type; nulls do not match; empty values produce an empty frame; invalid typed values and missing columns error | Lazy filter; schema-only validation |
 | `contains` | String/coercible column plus literal substring; output preserves schema and matching rows | Scalars are string-coerced; nested values use JSON text; nulls do not match; missing columns and invalid options error | Lazy filter; schema-only validation |
 | `grep` | Regex over all or named columns; output preserves schema and matching rows | Nulls stringify as non-matches; invalid regex/columns error | Lazy filter; schema-only validation |
-| `sed` | Regex replacement over all or one column; output keeps names (all-column mode may stringify values) | Nulls remain null; global mode skips nested columns and explicit nested targets error | Lazy expression; schema-only validation |
+| `sed` | Regex replacement over String columns, or one explicit scalar column | Nulls remain null; global mode preserves other types; explicit nested targets error | Lazy expression; schema-only validation |
 | `head` | Any dtype; output keeps schema and at most N first rows | N must be non-negative; nulls unchanged | Lazy limit; bounded output evaluation |
 | `tail` | Any dtype; output keeps schema and at most N last rows | N must be non-negative; nulls unchanged | Lazy tail barrier; upstream must be consumed to find final rows |
 | `sort` | Existing sortable columns; output preserves schema and row values | Missing columns error; null order follows Polars | Lazy sort barrier; Polars may maintain input-proportional state |
@@ -856,9 +942,9 @@ contextual error at evaluation time.
 | `headers` | Any schema; outputs names (plain one-per-line or formatted) | Empty schema is valid; no row evaluation required | Finalizer/schema inspection only |
 | `stats` | Supported Polars dtypes; outputs one summary table per column | Null counts are reported; unsupported measures use `-`; empty/all-null inputs do not panic | Finalizer aggregate barrier; may use input-sized memory |
 | `showquery` | Any LazyFrame; outputs logical/optimized plan text | No row conversion; plan errors are returned | Inspection finalizer; does not collect rows |
-| `show` | Any schema; outputs machine-readable CSV including header | Conversion/write errors are returned; stdout contains data only | Lazy CSV sink to an execution-owned temporary artifact, then bounded 64KiB copying |
+| `show` | Any supported schema; CSV with header or JSONL | Conversion/write errors are returned; stdout contains data only | Lazy sink to a temporary artifact, then bounded copying |
 | `showtable` | Any schema; bounded formatted preview with shape | Truncates rows/cells; rendering errors are returned | Intrinsic bounded-preview finalizer |
-| `dump` | Any schema; writes CSV/TSV with header | Existing target rejected; staged atomic write cleans failures | Streaming-capable sink/finalizer; target is never overwritten |
+| `dump` | Any supported schema; writes CSV/TSV with header or JSONL | Existing target rejected; staged atomic write cleans failures | Streaming-capable sink/finalizer; target is never overwritten |
 | `dumpcache` | Any schema including nested/timezone values; writes Snappy Parquet | Existing target rejected; extension normalized to `.parquet`; failures clean staging | Typed Parquet finalizer; evaluates and writes cache |
 
 ### Automation
@@ -883,7 +969,7 @@ $ qlt run <config_file_path.yaml> [files...] [options]
 | --show-plan STAGE | str | Build the selected process, join, or concat stage and print its logical/optimized plan without evaluating rows or running finalizers. Dynamic branch stages are rejected. |
 | --var name=value | repeated | Supply a value for a declared typed parameter. |
 | --stage STAGE | str | Execute this stage and its required data/control dependencies. Ancestor finalizers are suppressed and unrelated inputs are not opened. |
-| -o, --output | str | CSV destination for the selected stage or unique terminal non-branch stage. Overrides its single `dump`, or writes its frame when it has none. Relative to the caller working directory; existing files are rejected. |
+| -o, --output | str | Destination for the selected stage or unique terminal non-branch stage. Overrides its single `dump` and retains its format, or adds CSV output when it has none. Relative to the caller working directory; existing files are rejected. |
 
 
 ```bash
@@ -934,11 +1020,17 @@ numeric options keep the CLI defaults, and unknown fields are errors.
 
 | Step | Fields |
 |---|---|
-| `load` | `paths` (optional if CLI input files are supplied), `source-column`, `separator`, `low-memory`, `no-headers`, `chunk-size`, `infer-schema-length` |
+| `load` | `paths` (optional with CLI input files or `stdin-format`), `source-column`, `separator`, `low-memory`, `no-headers`, `chunk-size`, `infer-schema-length`, `all-strings`, `schema` (column-to-type mapping), `stdin-format`, `rejects` |
 | `select` | `columns` |
+| `filter` | `expression` |
+| `derive` | `output`, `expression` |
+| `aggregate` | `metrics` (metric string or sequence), optional `by` |
+| `array-contains` | `column`, `value` (string; parsed against the element type) |
+| `array-get` | `column`, `index`, optional `output` |
+| `explode` | `columns` |
 | `cast` | `column`, `type`; optional datetime fields `strict`, `input-format`, `epoch-unit`, `timezone`, `ambiguous`, `nonexistent` |
 | `bucket` | `column`, `interval`; optional `output` and the same datetime fields |
-| `delta` | `column`; optional `output` |
+| `delta` | `column`; optional `output`, `by` |
 | `extract` | `column`, `pattern` |
 | `flatten`, `uniq`, `stats`, `showtable`, `showquery` | `{}` |
 | `parse-size` | `column` |
@@ -953,9 +1045,9 @@ numeric options keep the CLI defaults, and unknown fields are errors.
 | `changetz` | `column`, required `from-tz`, `to-tz`; optional `input-format`, `output-format`, `epoch-unit`, `strict`, `ambiguous`, `nonexistent`, `timezone` (YAML only) |
 | `renamecol` | `old`, `new` |
 | `timeslice` | `column`, at least one of `start` or `end`; optional datetime fields |
-| `show` | optional `debug` (accepted, no effect on artifact output) |
+| `show` | optional `format` (`csv` or `jsonl`), `debug` |
 | `headers` | optional `plain` |
-| `dump` | optional `output`, `separator` (default comma) |
+| `dump` | optional `output`, `separator` (default comma), `format` (`csv` or `jsonl`) |
 | `dumpcache` | optional `output` |
 | `partition` | `column`; optional `output-dir` (default `./partitions`) |
 | `calc` | `column` and exactly one true flag: `sum`, `avg`, `min`, `max`, `median`, `std` |
@@ -1162,7 +1254,7 @@ qlt run examples/timeline.yaml --var input=linux.csv --var time-column=timestamp
   --var start=2024-01-01T00:00:00Z --var end=2024-01-31T23:59:59Z --var output=period.csv
 ```
 
-The same recipe is used by the example smoke tests. Inputs are structured log exports;
+Inputs are structured log exports;
 raw Linux syslog/access-log text must first be converted to CSV or JSONL with a timestamp
 column. No cross-source normalization is performed.
 
@@ -1176,11 +1268,11 @@ Not all commands stream. Before running a pipeline on a large file, check the me
 
 | Mode | Commands | Notes |
 |------|----------|-------|
-| **Streaming-capable** | `show`, `dump`, `dumpcache` | Prefer these sinks for large inputs; `show` uses bounded memory while its temporary CSV artifact consumes disk proportional to rendered output |
+| **Streaming-capable** | `show`, `dump`, `dumpcache` | Prefer these sinks for large inputs; `show` uses temporary disk proportional to rendered output |
 | **Bounded / lazy** | `head`, `headers`, `showtable`, `showquery` | `head` limits output; `headers` inspects schema only; `showtable` previews a bounded number of rows; plans do not collect |
-| **Lazy / Polars-optimized** | `select`, `isin`, `contains`, `grep`, `sed`, `renamecol`, `cast`, `parse-size`, `bucket`, `delta`, `extract`, `flatten`, `changetz`, `timeslice` | Pushdown or per-chunk UDFs; usually safe |
+| **Lazy / Polars-optimized** | `select`, `filter`, `derive`, `array-contains`, `array-get`, `explode`, `isin`, `contains`, `grep`, `sed`, `renamecol`, `cast`, `parse-size`, `bucket`, `delta`, `extract`, `flatten`, `changetz`, `timeslice` | `explode` can increase row count; grouped `delta` keeps group state |
 | **Global barriers** ⚠️ | `sort`, `uniq`, `count`, `tail` | Polars may maintain input-proportional state to produce a global result |
-| **Aggregate operations** | `timeinfo`, `stats`, `calc` | Read all selected rows; group cardinality and the chosen statistic determine memory requirements |
+| **Aggregate operations** | `aggregate`, `timeinfo`, `stats`, `calc` | Read all selected rows; group cardinality and the chosen statistic determine memory requirements |
 | **Global / disk-backed finalizers** ⚠️ | `partition` | Scans the complete input through a schema-preserving Parquet spool and bounded batches; output directory is fully staged before publication |
 
 > **Warning:** Running a global barrier or aggregate finalizer on a multi-GB file may require substantial input-proportional state. `partition` bounds in-memory writer state but consumes disk proportional to the input and output. Use `head`, `timeslice`, or `isin` to reduce the dataset first.
@@ -1221,7 +1313,8 @@ $ qlt load huge.parquet - isin category "important" - dump -o result.csv
 
 ### Temporary files and cleanup
 
-Gzip expansion, `show`, run materialization, and partition staging use temporary disk.
+Gzip expansion, stdin, rejected-record filtering, `show`, run materialization, and
+partition staging use temporary disk.
 `dump`/`dumpcache` stage beside their destination so completed files can be published
 without overwriting existing data. Partition staging includes the complete output
 directory as well as its intermediate Parquet. Available disk must cover these files
@@ -1255,11 +1348,6 @@ cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
-
-Keep regression tests focused on distinct behavior and failure modes; prefer direct
-Rust tests and reserve CLI subprocesses for process-level behavior. Keep this README
-as the single project guide, focused on usage and necessary contributor commands.
-Put task reports, migration history and machine-specific measurements in commit messages.
 
 ## License
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

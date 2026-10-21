@@ -47,7 +47,7 @@ pub fn render_command_help(name: &str) -> Option<String> {
                 + "after the config path are supplied to that step.\n"
                 + "  --check                 Parse and statically validate the run document without reading input data or writing output\n"
                 + "  --var name=value        Supply a value for a declared typed parameter (repeatable)\n"
-                + "  --output, -o PATH       CSV destination. If the YAML has a dump, this path replaces it; otherwise this is the dump path. Relative paths are from the run file directory. Existing files are rejected.\n"
+                + "  --output, -o PATH       Output destination, relative to the caller. Replaces the selected stage's single dump path and retains its format; defaults to CSV when adding an output. Existing files are rejected.\n"
                 + "  --show-plan STAGE       Print a selected process, join, or concat stage plan without evaluating rows or running finalizers. Dynamic branch stages are rejected.\n"
                 + "A parameter path default is relative to the run file; a --var path is relative to the caller.\n"
                 + "Parameter placeholders are whole YAML values: {\"$param\": name}; partial interpolation is rejected.\n",

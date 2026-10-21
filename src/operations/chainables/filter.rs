@@ -680,7 +680,7 @@ fn arithmetic(op: &str, l: Val, r: Val) -> Result<Val, QuiltError> {
             || large_integer_literal(&r)
         {
             return Err(parse_err(
-                "Float64 arithmetic on integer inputs may lose precision above 2^53; use floating columns or add explicit cast support",
+                "Float64 arithmetic on integer inputs may lose precision above 2^53; use cast <column> float before derive to opt into floating-point arithmetic",
             ));
         }
         let e1 = as_expr(l);
