@@ -9,6 +9,71 @@ use serde_json::{json, Value};
 use std::io::Write;
 
 #[test]
+fn serde_internal_names_remain_literal_json_keys_through_csv_and_parquet() {
+    let root = tempfile::tempdir().unwrap();
+    let number_key = "$serde_json::private::Number";
+    let raw_key = "$serde_json::private::RawValue";
+    let source = write(
+        root.path(),
+        "internal-names.jsonl",
+        concat!(
+            r#"{"$serde_json::private::Number":"123","payload":{"$serde_json::private::Number":"not a number","$serde_json::private::RawValue":"{\"x\":1}"},"items":[{"$serde_json::private::Number":"0042"}],"ratio":1.25,"id":18446744073709551615}"#,
+            "\n",
+            r#"{"ratio":-2e2,"id":9007199254740993,"items":[],"payload":{"$serde_json::private::RawValue":"literal","$serde_json::private::Number":"-1"},"$serde_json::private::Number":"different"}"#,
+            "\n"
+        ),
+    );
+    let data = frame(&["load", source.to_str().unwrap()]);
+    assert_eq!(
+        data.column("payload")
+            .unwrap()
+            .struct_()
+            .unwrap()
+            .field_by_name(number_key)
+            .unwrap()
+            .str()
+            .unwrap()
+            .get(0),
+        Some("not a number")
+    );
+    assert_eq!(
+        data.column("id").unwrap().u64().unwrap().get(0),
+        Some(u64::MAX)
+    );
+    assert_eq!(
+        data.column("ratio").unwrap().f64().unwrap().get(0),
+        Some(1.25)
+    );
+    assert_eq!(
+        data.column("ratio").unwrap().f64().unwrap().get(1),
+        Some(-200.0)
+    );
+    let shown = text(&["load", source.to_str().unwrap()]);
+    let records = rows(&shown);
+    assert_eq!(records[0][number_key], "123");
+    // Typed maps provide an independent oracle without Value's reserved-key decoding.
+    let payload: std::collections::BTreeMap<String, String> =
+        serde_json::from_str(&records[0]["payload"]).unwrap();
+    assert_eq!(payload[number_key], "not a number");
+    assert_eq!(payload[raw_key], "{\"x\":1}");
+    let items: Vec<std::collections::BTreeMap<String, String>> =
+        serde_json::from_str(&records[0]["items"]).unwrap();
+    assert_eq!(items[0][number_key], "0042");
+    assert_eq!(records[1]["id"], "9007199254740993");
+    let cache = root.path().join("internal-names.parquet");
+    execute(&[
+        "load",
+        source.to_str().unwrap(),
+        "-",
+        "dumpcache",
+        "-o",
+        cache.to_str().unwrap(),
+    ])
+    .unwrap();
+    assert_eq!(text(&["load", cache.to_str().unwrap()]), shown);
+}
+
+#[test]
 fn existing_bracketed_paths_remain_literal_across_readers() {
     let root = tempfile::tempdir().unwrap();
     let literal = write(root.path(), "Security[1].jsonl", "{\"id\":1}\n");
@@ -126,6 +191,8 @@ fn unrepresentable_or_invalid_records_fail_before_producing_output() {
         (b"{\"v\":{}}\n{}\n", "nullable empty"),
         (b"{\"v\":\"\xff\"}\n", "UTF-8"),
         (b"[]\n", "must be objects"),
+        (br#"{"v":"\uDC00"}"#, "surrogate"),
+        (b"{\"v\":1e400}\n", "range"),
     ];
     for (input, message) in cases {
         let path = write(root.path(), "invalid.jsonl", input);
@@ -133,6 +200,12 @@ fn unrepresentable_or_invalid_records_fail_before_producing_output() {
         assert!(error.contains(message), "{error}");
         assert!(error.contains("invalid.jsonl"));
     }
+    let deep = write(
+        root.path(),
+        "deep.jsonl",
+        format!("{{\"v\":{}0{}}}\n", "[".repeat(128), "]".repeat(128)),
+    );
+    assert!(failure(&["load", deep.to_str().unwrap()]).contains("recursion limit"));
     assert!(failure(&[
         "load",
         fixture("jsonl-quality-invalid.jsonl").to_str().unwrap()

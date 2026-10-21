@@ -1,7 +1,8 @@
 use crate::error::QuiltError;
 use polars::prelude::*;
 use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
-use serde_json::Value;
+use serde::{Deserialize, Deserializer};
+use serde_json::{value::RawValue, Number};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -56,47 +57,22 @@ enum JsonType {
 }
 
 impl JsonType {
-    fn infer(value: &Value) -> Result<Self, String> {
-        Ok(match value {
-            Value::Null => Self::Null,
-            Value::Bool(_) => Self::Bool,
-            Value::String(_) => Self::String,
-            Value::Number(number) => {
-                if let Some(value) = number.as_i64() {
-                    Self::Integer {
-                        negative: value < 0,
-                        wide: false,
-                    }
-                } else if number.as_u64().is_some() {
-                    Self::Integer {
-                        negative: false,
-                        wide: true,
-                    }
-                } else if number.is_f64() && number.as_f64().is_some_and(f64::is_finite) {
-                    Self::Float
-                } else {
-                    return Err("number outside supported Int64/UInt64/Float64 range".into());
-                }
-            }
-            Value::Array(values) => {
-                let mut inner = Self::Unknown;
-                for value in values {
-                    inner.merge(Self::infer(value)?, "[]", false)?;
-                }
-                Self::List(Box::new(inner))
-            }
-            Value::Object(fields) => Self::Object(
-                fields
-                    .iter()
-                    .map(|(name, value)| {
-                        Self::infer(value)
-                            .map(|dtype| (name.clone(), dtype))
-                            .map_err(|error| format!("{name}: {error}"))
-                    })
-                    .collect::<Result<_, _>>()?,
-                false,
-            ),
-        })
+    fn number(number: &Number) -> Result<Self, String> {
+        if let Some(value) = number.as_i64() {
+            Ok(Self::Integer {
+                negative: value < 0,
+                wide: false,
+            })
+        } else if number.as_u64().is_some() {
+            Ok(Self::Integer {
+                negative: false,
+                wide: true,
+            })
+        } else if number.is_f64() && number.as_f64().is_some_and(f64::is_finite) {
+            Ok(Self::Float)
+        } else {
+            Err("number outside supported Int64/UInt64/Float64 range".into())
+        }
     }
 
     fn merge(&mut self, mut other: Self, path: &str, bounded: bool) -> Result<(), String> {
@@ -206,59 +182,89 @@ fn diagnostic(path: &Path, line: usize, message: impl std::fmt::Display) -> Quil
     )
 }
 
-// Traverse each record without building a second JSON tree. serde_json::Value
-// intentionally keeps only the last occurrence of an object key, so this pass
-// must run before Value parsing to make duplicate keys observable.
-struct UniqueKeys {
+// Dispatch on borrowed JSON tokens instead of Value's private number/raw-value
+// map protocol. Actual object keys always remain keys, regardless of spelling.
+struct SchemaVisitor {
     path: String,
+    depth: usize,
 }
 
-impl<'de> DeserializeSeed<'de> for UniqueKeys {
-    type Value = ();
-
-    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
-        deserializer.deserialize_any(self)
+impl SchemaVisitor {
+    fn infer(self, value: &RawValue) -> Result<JsonType, serde_json::Error> {
+        let input = value.get();
+        let token = input.as_bytes()[0];
+        // RawValue skips containers iteratively; preserve serde_json's usual
+        // recursion bound for our recursive schema traversal.
+        if matches!(token, b'{' | b'[') && self.depth >= 128 {
+            return Err(serde::de::Error::custom(format!(
+                "{}: recursion limit exceeded",
+                self.path
+            )));
+        }
+        let mut parser = serde_json::Deserializer::from_str(input);
+        let dtype = match token {
+            b'{' => parser.deserialize_map(self)?,
+            b'[' => parser.deserialize_seq(self)?,
+            b'"' => parser.deserialize_str(self)?,
+            b't' | b'f' => parser.deserialize_bool(self)?,
+            b'n' => parser.deserialize_unit(self)?,
+            _ => {
+                let number: Number = serde_json::from_str(input)?;
+                return JsonType::number(&number)
+                    .map_err(|error| serde::de::Error::custom(format!("{}: {error}", self.path)));
+            }
+        };
+        parser.end()?;
+        Ok(dtype)
     }
 }
 
-impl<'de> Visitor<'de> for UniqueKeys {
-    type Value = ();
+impl<'de> DeserializeSeed<'de> for SchemaVisitor {
+    type Value = JsonType;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<JsonType, D::Error> {
+        let value = <&RawValue>::deserialize(deserializer)?;
+        self.infer(value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl<'de> Visitor<'de> for SchemaVisitor {
+    type Value = JsonType;
 
     fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         f.write_str("a JSON value")
     }
-    fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<(), E> {
-        Ok(())
+    fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<JsonType, E> {
+        Ok(JsonType::Bool)
     }
-    fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<(), E> {
-        Ok(())
+    fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<JsonType, E> {
+        Ok(JsonType::String)
     }
-    fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<(), E> {
-        Ok(())
+    fn visit_unit<E: serde::de::Error>(self) -> Result<JsonType, E> {
+        Ok(JsonType::Null)
     }
-    fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<(), E> {
-        Ok(())
-    }
-    fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<(), E> {
-        Ok(())
-    }
-    fn visit_unit<E: serde::de::Error>(self) -> Result<(), E> {
-        Ok(())
-    }
-    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<JsonType, A::Error> {
+        let mut inner = JsonType::Unknown;
         let mut index = 0usize;
-        while seq
-            .next_element_seed(UniqueKeys {
-                path: format!("{}[{index}]", self.path),
+        loop {
+            let path = format!("{}[{index}]", self.path);
+            let Some(dtype) = seq.next_element_seed(SchemaVisitor {
+                path: path.clone(),
+                depth: self.depth + 1,
             })?
-            .is_some()
-        {
+            else {
+                break;
+            };
+            inner
+                .merge(dtype, &path, false)
+                .map_err(serde::de::Error::custom)?;
             index += 1;
         }
-        Ok(())
+        Ok(JsonType::List(Box::new(inner)))
     }
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<JsonType, A::Error> {
         let mut seen = HashSet::new();
+        let mut fields = Vec::new();
         while let Some(key) = map.next_key::<String>()? {
             let child = format!("{}[{key:?}]", self.path);
             if !seen.insert(key.clone()) {
@@ -266,16 +272,25 @@ impl<'de> Visitor<'de> for UniqueKeys {
                     "duplicate object key {key:?} at {child}"
                 )));
             }
-            map.next_value_seed(UniqueKeys { path: child })?;
+            let dtype = map.next_value_seed(SchemaVisitor {
+                path: child,
+                depth: self.depth + 1,
+            })?;
+            fields.push((key, dtype));
         }
-        Ok(())
+        Ok(JsonType::Object(fields, false))
     }
 }
 
-fn validate_unique_keys(input: &str) -> Result<(), serde_json::Error> {
+fn infer_record(input: &str) -> Result<JsonType, serde_json::Error> {
     let mut deserializer = serde_json::Deserializer::from_str(input);
-    UniqueKeys { path: "$".into() }.deserialize(&mut deserializer)?;
-    deserializer.end()
+    let dtype = SchemaVisitor {
+        path: "$".into(),
+        depth: 1,
+    }
+    .deserialize(&mut deserializer)?;
+    deserializer.end()?;
+    Ok(dtype)
 }
 
 /// One record at a time: memory is proportional to the union schema plus the
@@ -297,18 +312,15 @@ pub(super) fn schema(
             if line.trim().is_empty() {
                 continue;
             }
-            validate_unique_keys(&line).map_err(|error| diagnostic(path, index + 1, error))?;
-            let value: Value =
-                serde_json::from_str(&line).map_err(|error| diagnostic(path, index + 1, error))?;
-            if !value.is_object() {
+            let incoming =
+                infer_record(&line).map_err(|error| diagnostic(path, index + 1, error))?;
+            if !matches!(incoming, JsonType::Object(..)) {
                 return Err(diagnostic(
                     path,
                     index + 1,
                     "NDJSON records must be objects",
                 ));
             }
-            let incoming =
-                JsonType::infer(&value).map_err(|error| diagnostic(path, index + 1, error))?;
             local
                 .merge(incoming, "", limit.is_some_and(|n| records >= n))
                 .map_err(|error| diagnostic(path, index + 1, error))?;
