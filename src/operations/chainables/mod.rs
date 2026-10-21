@@ -1,4 +1,5 @@
 pub mod aggregate;
+pub mod arrays;
 pub mod bucket;
 pub mod cast;
 pub mod changetz;
