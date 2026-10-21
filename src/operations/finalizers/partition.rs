@@ -198,8 +198,10 @@ where
 fn discover_partition_names(
     spool: &Path,
     colname: &str,
-) -> Result<HashMap<String, String>, QuiltError> {
-    let mut keys = BTreeMap::<String, String>::new();
+) -> Result<HashMap<Vec<u8>, String>, QuiltError> {
+    // Typed identities are canonical binary encodings; display strings are
+    // used only for filenames.
+    let mut keys = HashMap::<Vec<u8>, (String, usize)>::new();
     for_each_partition_batch(spool, |batch| {
         let column = batch.column(colname).map_err(|error| {
             QuiltError::schema(
@@ -215,20 +217,29 @@ fn discover_partition_names(
                     format!("failed to read partition value: {error}"),
                 )
             })?;
-            let raw = partition_value(value.clone());
-            keys.entry(partition_identity(value)).or_insert(raw);
+            let identity = partition_identity(value.clone())?;
+            let first_seen = keys.len();
+            keys.entry(identity)
+                .or_insert_with(|| (partition_value(value), first_seen));
         }
         Ok(())
     })?;
 
-    let mut sorted_keys = keys.into_iter().collect::<Vec<_>>();
-    sorted_keys.sort_by(|left, right| left.1.cmp(&right.1).then(left.0.cmp(&right.0)));
+    // Stable sorting preserves first-seen order for distinct typed values
+    // whose display strings are identical, keeping suffix allocation
+    // deterministic for a deterministic input stream.
+    let mut keys = keys.into_iter().collect::<Vec<_>>();
+    keys.sort_by(
+        |(_, (left_name, left_index)), (_, (right_name, right_index))| {
+            left_name.cmp(right_name).then(left_index.cmp(right_index))
+        },
+    );
     // Reserve final, bounded names globally. A generated suffix can itself be
     // a value's natural sanitized name (for example `a_b-2`), and Windows
     // treats case-only differences as the same path.
     let mut used = HashSet::<String>::new();
-    let mut names = HashMap::with_capacity(sorted_keys.len());
-    for (identity, raw) in sorted_keys {
+    let mut names = HashMap::with_capacity(keys.len());
+    for (identity, (raw, _first_seen)) in keys {
         let base = sanitize_filename(&raw);
         let mut ordinal = 1usize;
         loop {
@@ -248,7 +259,7 @@ fn discover_partition_names(
 fn write_partition_batches(
     spool: &Path,
     colname: &str,
-    partition_names: &HashMap<String, String>,
+    partition_names: &HashMap<Vec<u8>, String>,
     writers: &mut PartitionWriterPool<'_>,
     mut metrics: Option<&mut PartitionMetrics>,
 ) -> Result<(), QuiltError> {
@@ -272,19 +283,21 @@ fn write_partition_batches(
                     format!("failed to read partition value: {error}"),
                 )
             })?;
+            let name = partition_names
+                .get(&partition_identity(value)?)
+                .ok_or_else(|| {
+                    QuiltError::operation(
+                        "partition",
+                        "partition key disappeared between discovery and writing",
+                    )
+                })?;
             rows_by_partition
-                .entry(partition_identity(value))
+                .entry(name.clone())
                 .or_default()
                 .push(row as IdxSize);
         }
 
-        for (identity, rows) in rows_by_partition {
-            let name = partition_names.get(&identity).ok_or_else(|| {
-                QuiltError::operation(
-                    "partition",
-                    "partition key disappeared between discovery and writing",
-                )
-            })?;
+        for (name, rows) in rows_by_partition {
             let mut group = batch
                 .take(&IdxCa::from_vec(PlSmallStr::EMPTY, rows))
                 .map_err(|error| {
@@ -293,7 +306,7 @@ fn write_partition_batches(
                         format!("failed to gather partition rows: {error}"),
                     )
                 })?;
-            writers.write_batch(name, &mut group)?;
+            writers.write_batch(&name, &mut group)?;
         }
         Ok(())
     });
@@ -303,8 +316,156 @@ fn write_partition_batches(
     result
 }
 
-fn partition_identity(value: AnyValue<'_>) -> String {
-    format!("{}\0{}", value.dtype(), partition_value(value))
+fn partition_identity(value: AnyValue<'_>) -> Result<Vec<u8>, QuiltError> {
+    let mut identity = Vec::new();
+    encode_partition_value(value, &mut identity)?;
+    Ok(identity)
+}
+
+fn encode_partition_value(value: AnyValue<'_>, output: &mut Vec<u8>) -> Result<(), QuiltError> {
+    let value = value.as_borrowed();
+    let category_text = match &value {
+        AnyValue::Categorical(_, _) | AnyValue::Enum(_, _) => Some(
+            value
+                .get_str()
+                .ok_or_else(unsupported_partition_value)?
+                .to_owned(),
+        ),
+        _ => None,
+    };
+    match value {
+        AnyValue::Null => output.push(0),
+        AnyValue::Boolean(value) => output.extend_from_slice(&[1, u8::from(value)]),
+        AnyValue::Int8(value) => encode_scalar(output, 2, value.to_le_bytes()),
+        AnyValue::Int16(value) => encode_scalar(output, 3, value.to_le_bytes()),
+        AnyValue::Int32(value) => encode_scalar(output, 4, value.to_le_bytes()),
+        AnyValue::Int64(value) => encode_scalar(output, 5, value.to_le_bytes()),
+        AnyValue::Int128(value) => encode_scalar(output, 6, value.to_le_bytes()),
+        AnyValue::UInt8(value) => encode_scalar(output, 7, value.to_le_bytes()),
+        AnyValue::UInt16(value) => encode_scalar(output, 8, value.to_le_bytes()),
+        AnyValue::UInt32(value) => encode_scalar(output, 9, value.to_le_bytes()),
+        AnyValue::UInt64(value) => encode_scalar(output, 10, value.to_le_bytes()),
+        AnyValue::UInt128(value) => encode_scalar(output, 11, value.to_le_bytes()),
+        AnyValue::Float16(value) => {
+            let bits = if value.is_nan() {
+                0x7e00
+            } else if value.to_bits() & 0x7fff == 0 {
+                0
+            } else {
+                value.to_bits()
+            };
+            encode_scalar(output, 12, bits.to_le_bytes());
+        }
+        AnyValue::Float32(value) => {
+            let bits = if value.is_nan() {
+                0x7fc0_0000
+            } else if value == 0.0 {
+                0
+            } else {
+                value.to_bits()
+            };
+            encode_scalar(output, 13, bits.to_le_bytes());
+        }
+        AnyValue::Float64(value) => {
+            let bits = if value.is_nan() {
+                0x7ff8_0000_0000_0000
+            } else if value == 0.0 {
+                0
+            } else {
+                value.to_bits()
+            };
+            encode_scalar(output, 14, bits.to_le_bytes());
+        }
+        AnyValue::String(value) => encode_bytes(output, 15, value.as_bytes()),
+        AnyValue::Binary(value) => encode_bytes(output, 16, value),
+        AnyValue::Date(value) => encode_scalar(output, 17, value.to_le_bytes()),
+        AnyValue::Datetime(value, unit, timezone) => {
+            output.push(18);
+            output.extend_from_slice(&value.to_le_bytes());
+            encode_time_unit(unit, output);
+            match timezone {
+                Some(timezone) => encode_bytes(output, 1, timezone.as_str().as_bytes()),
+                None => output.push(0),
+            }
+        }
+        AnyValue::Duration(value, unit) => {
+            output.push(19);
+            output.extend_from_slice(&value.to_le_bytes());
+            encode_time_unit(unit, output);
+        }
+        AnyValue::Time(value) => encode_scalar(output, 20, value.to_le_bytes()),
+        AnyValue::Categorical(_, _) => {
+            let value = category_text
+                .as_deref()
+                .ok_or_else(unsupported_partition_value)?;
+            encode_bytes(output, 21, value.as_bytes());
+        }
+        AnyValue::Enum(_, _) => {
+            let value = category_text
+                .as_deref()
+                .ok_or_else(unsupported_partition_value)?;
+            encode_bytes(output, 22, value.as_bytes());
+        }
+        AnyValue::List(values) => {
+            output.push(23);
+            encode_len(output, values.len());
+            for item in values.iter() {
+                encode_partition_value(item, output)?;
+            }
+        }
+        AnyValue::Struct(index, array, fields) => {
+            output.push(24);
+            encode_len(output, fields.len());
+            for item in AnyValue::Struct(index, array, fields)._iter_struct_av() {
+                encode_partition_value(item, output)?;
+            }
+        }
+        AnyValue::StructOwned(values) => {
+            output.push(24);
+            encode_len(output, values.0.len());
+            for item in values.0 {
+                encode_partition_value(item, output)?;
+            }
+        }
+        AnyValue::Decimal(value, scale, precision) => {
+            output.push(25);
+            output.extend_from_slice(&value.to_le_bytes());
+            encode_len(output, scale);
+            encode_len(output, precision);
+        }
+        _ => return Err(unsupported_partition_value()),
+    }
+    Ok(())
+}
+
+fn encode_scalar<const N: usize>(output: &mut Vec<u8>, tag: u8, bytes: [u8; N]) {
+    output.push(tag);
+    output.extend_from_slice(&bytes);
+}
+
+fn encode_bytes(output: &mut Vec<u8>, tag: u8, bytes: &[u8]) {
+    output.push(tag);
+    encode_len(output, bytes.len());
+    output.extend_from_slice(bytes);
+}
+
+fn encode_len(output: &mut Vec<u8>, len: usize) {
+    output.extend_from_slice(&(len as u64).to_le_bytes());
+}
+
+fn encode_time_unit(unit: TimeUnit, output: &mut Vec<u8>) {
+    output.push(match unit {
+        TimeUnit::Nanoseconds => 0,
+        TimeUnit::Microseconds => 1,
+        TimeUnit::Milliseconds => 2,
+    });
+}
+
+fn unsupported_partition_value() -> QuiltError {
+    QuiltError::operation(
+        "partition",
+        "partition column contains a value type without a lossless identity encoding",
+    )
 }
 
 struct PartitionWriterPool<'a> {
@@ -906,6 +1067,224 @@ mod tests {
             assert!(contents.starts_with("part,value\n"));
             assert_eq!(contents.lines().count(), 2);
         }
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn typed_partition_identity_keeps_values_with_same_display_separate() {
+        fn assert_payloads(files: &[PathBuf], expected: &[&str]) {
+            let mut actual = files
+                .iter()
+                .map(|file| {
+                    let contents = fs::read_to_string(file).unwrap();
+                    let mut lines = contents.lines();
+                    assert!(lines.next().unwrap().ends_with(",value"));
+                    let row = lines.next().unwrap();
+                    assert!(lines.next().is_none());
+                    row.rsplit(',').next().unwrap().to_string()
+                })
+                .collect::<Vec<_>>();
+            let mut expected = expected
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect::<Vec<_>>();
+            actual.sort();
+            expected.sort();
+            assert_eq!(actual, expected);
+        }
+
+        fn assert_grouped_payloads(files: &[PathBuf], expected: &[&str]) {
+            assert_eq!(files.len(), 1);
+            let contents = fs::read_to_string(&files[0]).unwrap();
+            let mut lines = contents.lines();
+            assert!(lines.next().unwrap().ends_with(",value"));
+            let mut actual = lines
+                .map(|row| row.rsplit(',').next().unwrap().to_string())
+                .collect::<Vec<_>>();
+            let mut expected = expected
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect::<Vec<_>>();
+            actual.sort();
+            expected.sort();
+            assert_eq!(actual, expected);
+        }
+
+        fn assert_dictionary_partition(parent: &Path, label: &str, dtype: DataType) {
+            let row_count = PARTITION_BATCH_ROWS + 1;
+            let parts = (0..row_count)
+                .map(|row| if row % 2 == 0 { "a" } else { "b" })
+                .collect::<Vec<_>>();
+            let values = (0..row_count as i64).collect::<Vec<_>>();
+            let frame = DataFrame::new_infer_height(vec![
+                Series::new("part".into(), parts)
+                    .cast(&dtype)
+                    .unwrap()
+                    .into(),
+                Series::new("value".into(), values).into(),
+            ])
+            .unwrap()
+            .lazy();
+            let target = parent.join(label);
+            let FinalizerResult::Files(files) =
+                partition(&frame, "part", target.to_str().unwrap()).unwrap()
+            else {
+                panic!("partition must return file paths");
+            };
+            assert_eq!(files.len(), 2);
+            let total_rows = files
+                .iter()
+                .map(|file| fs::read_to_string(file).unwrap().lines().count() - 1)
+                .sum::<usize>();
+            assert_eq!(total_rows, row_count);
+            let mut seen_keys = HashSet::new();
+            for file in files {
+                let contents = fs::read_to_string(file).unwrap();
+                let mut lines = contents.lines();
+                assert_eq!(lines.next(), Some("part,value"));
+                let rows = lines.collect::<Vec<_>>();
+                let key = rows[0].split_once(',').unwrap().0;
+                assert!(key == "a" || key == "b");
+                assert!(rows.iter().all(|row| row.starts_with(&format!("{key},"))));
+                seen_keys.insert(key.to_string());
+                let mut expected = String::from("part,value\n");
+                for row in 0..row_count {
+                    if (row % 2 == 0 && key == "a") || (row % 2 == 1 && key == "b") {
+                        expected.push_str(&format!("{key},{row}\n"));
+                    }
+                }
+                assert_eq!(contents, expected);
+            }
+            assert_eq!(seen_keys, HashSet::from(["a".to_string(), "b".to_string()]));
+        }
+
+        let parent = test_parent("typed-identity");
+
+        let floats = df!(
+            "part" => &[1.2345678901f64, 1.2345678902],
+            "value" => &[1i64, 2]
+        )
+        .unwrap()
+        .lazy();
+        let float_target = parent.join("floats");
+        let FinalizerResult::Files(float_files) =
+            partition(&floats, "part", float_target.to_str().unwrap()).unwrap()
+        else {
+            panic!("partition must return file paths");
+        };
+        assert_payloads(&float_files, &["1", "2"]);
+
+        let zeroes = DataFrame::new_infer_height(vec![
+            Series::new("part".into(), &[0.0f64, -0.0]).into(),
+            Series::new("value".into(), &[4i64, 5]).into(),
+        ])
+        .unwrap()
+        .lazy();
+        let zero_target = parent.join("zeroes");
+        let FinalizerResult::Files(zero_files) =
+            partition(&zeroes, "part", zero_target.to_str().unwrap()).unwrap()
+        else {
+            panic!("partition must return file paths");
+        };
+        assert_grouped_payloads(&zero_files, &["4", "5"]);
+
+        let nan_values = [
+            f64::from_bits(0x7ff8_0000_0000_0001),
+            f64::from_bits(0x7ff8_0000_0000_0002),
+        ];
+        let nans = DataFrame::new_infer_height(vec![
+            Series::new("part".into(), &nan_values).into(),
+            Series::new("value".into(), &[6i64, 7]).into(),
+        ])
+        .unwrap()
+        .lazy();
+        let nan_target = parent.join("nans");
+        let FinalizerResult::Files(nan_files) =
+            partition(&nans, "part", nan_target.to_str().unwrap()).unwrap()
+        else {
+            panic!("partition must return file paths");
+        };
+        assert_grouped_payloads(&nan_files, &["6", "7"]);
+
+        let left = (0..24)
+            .map(|index| if index == 12 { 700i64 } else { index })
+            .collect::<Vec<_>>();
+        let right = (0..24)
+            .map(|index| if index == 12 { 701i64 } else { index })
+            .collect::<Vec<_>>();
+        let lists = DataFrame::new_infer_height(vec![
+            Series::new(
+                "part".into(),
+                &[
+                    Some(Series::new(PlSmallStr::EMPTY, left.as_slice())),
+                    Some(Series::new(PlSmallStr::EMPTY, right.as_slice())),
+                ],
+            )
+            .into(),
+            Series::new("value".into(), &[1i64, 2]).into(),
+        ])
+        .unwrap()
+        .lazy();
+        let list_target = parent.join("lists");
+        let FinalizerResult::Files(list_files) =
+            partition(&lists, "part", list_target.to_str().unwrap()).unwrap()
+        else {
+            panic!("partition must return file paths");
+        };
+        assert_payloads(&list_files, &["1", "2"]);
+
+        let fields = (0..24)
+            .map(|index| {
+                let values = if index == 12 {
+                    [700i64, 701]
+                } else {
+                    [index, index]
+                };
+                Series::new(format!("field-{index}").into(), &values)
+            })
+            .collect::<Vec<_>>();
+        let structs = StructChunked::from_series("part".into(), 2, fields.iter())
+            .unwrap()
+            .into_series();
+        let structs = DataFrame::new_infer_height(vec![
+            structs.into(),
+            Series::new("value".into(), &[1i64, 2]).into(),
+        ])
+        .unwrap()
+        .lazy();
+        let struct_target = parent.join("structs");
+        let FinalizerResult::Files(struct_files) =
+            partition(&structs, "part", struct_target.to_str().unwrap()).unwrap()
+        else {
+            panic!("partition must return file paths");
+        };
+        assert_payloads(&struct_files, &["1", "2"]);
+
+        let markers = df!(
+            "part" => &[Some(""), Some("_null"), None],
+            "value" => &[1i64, 2, 3]
+        )
+        .unwrap()
+        .lazy();
+        let marker_target = parent.join("markers");
+        let FinalizerResult::Files(marker_files) =
+            partition(&markers, "part", marker_target.to_str().unwrap()).unwrap()
+        else {
+            panic!("partition must return file paths");
+        };
+        assert_payloads(&marker_files, &["1", "2", "3"]);
+
+        assert_dictionary_partition(
+            &parent,
+            "categorical",
+            DataType::from_categories(Categories::global()),
+        );
+        assert_dictionary_partition(
+            &parent,
+            "enum",
+            DataType::from_frozen_categories(FrozenCategories::new(["a", "b"]).unwrap()),
+        );
+
         fs::remove_dir_all(parent).unwrap();
     }
 
