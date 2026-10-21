@@ -1,13 +1,8 @@
 use polars::prelude::*;
 
-/// Reference a schema name literally. Polars treats `*` and anchored names as
-/// selectors in `col`, so quote those names as an exact-match regex.
+/// Reference a schema name literally without `col`'s wildcard/regex selectors.
 pub(crate) fn literal_col(name: &str) -> Expr {
-    if name == "*" || (name.starts_with('^') && name.ends_with('$')) {
-        col(format!("^{}$", regex::escape(name)))
-    } else {
-        col(name)
-    }
+    Expr::Column(name.into())
 }
 
 /// Encode exactly one JSON value per cell without changing the input frame.

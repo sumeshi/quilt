@@ -118,7 +118,10 @@ fn concat_schema_mismatch_reaches_existing_inputs_and_fails_cleanly() {
         ]}),
     );
     let error = failure(&["run", config.to_str().unwrap()]);
-    assert!(error.contains("field") && error.contains("id"), "{error}");
+    assert!(
+        error.contains("mismatch") && error.contains("id") && error.contains("other"),
+        "{error}"
+    );
     assert!(!error.contains("No such file"));
 }
 

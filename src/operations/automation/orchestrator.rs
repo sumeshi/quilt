@@ -506,7 +506,7 @@ fn prepare_document(
     }) {
         Ok(prepared) => Ok(prepared),
         Err(parameter_error) => {
-            if let Ok(raw_document) = serde_yml::from_str::<RunDocument>(raw) {
+            if let Ok(raw_document) = yaml_serde::from_str::<RunDocument>(raw) {
                 if let Err(stage_error) = document::preflight(&raw_document, &HashMap::new(), path)
                 {
                     let mut diagnostics = match parameter_error {

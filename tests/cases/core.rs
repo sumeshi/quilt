@@ -97,7 +97,7 @@ fn extracted_optional_groups_and_exact_size_conversion() {
             .unwrap()
             .u64()
             .unwrap()
-            .into_iter()
+            .iter()
             .collect::<Vec<_>>(),
         [Some(1536), Some(2_000_000), None]
     );
@@ -309,7 +309,7 @@ fn delta_retains_small_unsigned_extreme_differences_and_rejects_overflow() {
             .unwrap()
             .i64()
             .unwrap()
-            .into_iter()
+            .iter()
             .collect::<Vec<_>>(),
         [None, Some(2)]
     );

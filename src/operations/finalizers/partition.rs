@@ -109,13 +109,16 @@ where
         // files independently avoids offset-slicing one growing Parquet file,
         // which would otherwise rescan preceding row-group metadata per batch.
         df.clone()
-            .sink_parquet_partitioned(
-                std::sync::Arc::new(spool.clone()),
-                None,
-                PartitionVariant::MaxSize(PARTITION_BATCH_ROWS as IdxSize),
-                ParquetWriteOptions::default(),
-                None,
-                SinkOptions::default(),
+            .sink(
+                SinkDestination::Partitioned {
+                    base_path: PlRefPath::try_from_path(&spool)?,
+                    file_path_provider: None,
+                    partition_strategy: PartitionStrategy::FileSize,
+                    max_rows_per_file: PARTITION_BATCH_ROWS as IdxSize,
+                    approximate_bytes_per_file: u64::MAX,
+                },
+                FileWriteFormat::Parquet(ParquetWriteOptions::default().into()),
+                UnifiedSinkArgs::default(),
             )
             .and_then(|frame| frame.collect_with_engine(Engine::Streaming))
             .map_err(|error| {
@@ -808,7 +811,7 @@ mod tests {
             .map(|row| format!("part-{}", row % partition_count))
             .collect::<Vec<_>>();
         let values = (0..row_count as i64).collect::<Vec<_>>();
-        let frame = DataFrame::new(vec![
+        let frame = DataFrame::new_infer_height(vec![
             Series::new("part".into(), parts).into(),
             Series::new("value".into(), values).into(),
         ])

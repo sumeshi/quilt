@@ -66,7 +66,7 @@ pub fn cast_with_config(
         let output_dtype = dtype.clone();
         literal_col(column).cast(DataType::String).map(
             move |series| {
-                let values = series.str()?.into_iter().enumerate();
+                let values = series.str()?.iter().enumerate();
                 let parsed = values
                     .map(|(row, value)| {
                         value
@@ -102,9 +102,9 @@ pub fn cast_with_config(
                 if let DataType::Datetime(_, Some(timezone)) = &output_dtype {
                     datetime.set_time_zone(timezone.clone()).map_err(|error| PolarsError::ComputeError(error.to_string().into()))?;
                 }
-                Ok(Some(datetime.into_series().into()))
+                Ok(datetime.into_series().into())
             },
-            GetOutput::from_type(dtype),
+            move |_, field| Ok(Field::new(field.name().clone(), dtype.clone())),
         )
     } else {
         let target_name = target.clone();
@@ -120,9 +120,9 @@ pub fn cast_with_config(
                         .into(),
                     )
                 })?;
-                Ok(Some(casted))
+                Ok(casted)
             },
-            GetOutput::from_type(dtype),
+            move |_, field| Ok(Field::new(field.name().clone(), dtype.clone())),
         )
     }
     .alias(column);

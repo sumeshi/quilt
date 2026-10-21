@@ -27,19 +27,21 @@ pub fn show(df: &LazyFrame, resources: &ExecutionResources) -> Result<FinalizerR
         serialize_options: SerializeOptions {
             separator: b',',
             ..Default::default()
-        },
+        }
+        .into(),
         include_header: true,
         ..Default::default()
     };
     let sink = super::csv::csv_frame(df, "show CSV")?
-        .sink_csv(
-            SinkTarget::Path(Arc::new(path.clone())),
-            options,
-            None,
-            SinkOptions::default(),
+        .sink(
+            SinkDestination::File {
+                target: SinkTarget::Path(PlRefPath::try_from_path(&path)?),
+            },
+            FileWriteFormat::Csv(options),
+            UnifiedSinkArgs::default(),
         )
         .map_err(|error| QuiltError::finalizer("show CSV", error.to_string()))?;
-    polars::prelude::collect_all([sink])
+    sink.collect()
         .map_err(|error| QuiltError::finalizer("show CSV", error.to_string()))?;
     Ok(FinalizerResult::Artifact(Arc::new(OutputArtifact::new(
         path,

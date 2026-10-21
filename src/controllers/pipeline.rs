@@ -236,9 +236,11 @@ impl Pipeline {
                 paths.sort();
                 paths.dedup();
                 let inventory =
-                    DataFrame::new(vec![Series::new(name.clone().into(), paths).into()])
-                        .map_err(|error| QuiltError::operation("timeinfo", error.to_string()))?
-                        .lazy();
+                    DataFrame::new_infer_height(vec![
+                        Series::new(name.clone().into(), paths).into()
+                    ])
+                    .map_err(|error| QuiltError::operation("timeinfo", error.to_string()))?
+                    .lazy();
                 summary = inventory
                     .join(
                         summary,

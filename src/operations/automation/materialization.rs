@@ -6,7 +6,10 @@ use crate::error::QuiltError;
 use crate::operations::automation::model::{
     BranchPredicate, MaterializePolicy, PlannedStep, ResolvedParameter, StageConfig,
 };
-use polars::prelude::{LazyFrame, ScanArgsParquet};
+use polars::prelude::{
+    FileWriteFormat, LazyFrame, PlRefPath, ScanArgsParquet, SinkDestination, SinkTarget,
+    UnifiedSinkArgs,
+};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
@@ -38,17 +41,21 @@ pub(super) fn materialize_frame(
     let path = reservation.path().to_path_buf();
     reservation.close_file();
     let sink = frame
-        .sink_parquet(
-            polars::prelude::SinkTarget::Path(std::sync::Arc::new(path.clone())),
-            polars::prelude::ParquetWriteOptions {
-                compression: polars::prelude::ParquetCompression::Snappy,
-                ..Default::default()
+        .sink(
+            SinkDestination::File {
+                target: SinkTarget::Path(PlRefPath::try_from_path(&path)?),
             },
-            None,
-            polars::prelude::SinkOptions::default(),
+            FileWriteFormat::Parquet(
+                polars::prelude::ParquetWriteOptions {
+                    compression: polars::prelude::ParquetCompression::Snappy,
+                    ..Default::default()
+                }
+                .into(),
+            ),
+            UnifiedSinkArgs::default(),
         )
         .map_err(|error| QuiltError::operation("materialize stage", error.to_string()))?;
-    polars::prelude::collect_all([sink])
+    sink.collect()
         .map_err(|error| QuiltError::operation("materialize stage", error.to_string()))?;
     owned.retain_temp_file(reservation).map_err(|error| {
         QuiltError::io(
@@ -57,13 +64,15 @@ pub(super) fn materialize_frame(
             error.to_string(),
         )
     })?;
-    let frame = LazyFrame::scan_parquet(&path, ScanArgsParquet::default()).map_err(|error| {
-        QuiltError::io(
-            "scan stage materialization",
-            Some(path.display().to_string()),
-            error.to_string(),
-        )
-    })?;
+    let frame =
+        LazyFrame::scan_parquet(PlRefPath::try_from_path(&path)?, ScanArgsParquet::default())
+            .map_err(|error| {
+                QuiltError::io(
+                    "scan stage materialization",
+                    Some(path.display().to_string()),
+                    error.to_string(),
+                )
+            })?;
     Ok((frame, owned))
 }
 

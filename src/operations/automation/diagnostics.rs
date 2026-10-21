@@ -2,8 +2,8 @@
 //! that scrubs sensitive values out of errors before they reach the caller.
 
 use crate::error::QuiltError;
-use serde_yml::Value;
 use std::collections::HashSet;
+use yaml_serde::Value;
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct DiagnosticPolicy {
@@ -25,7 +25,7 @@ impl DiagnosticPolicy {
             if value.chars().count() >= 4 {
                 forms.push(value.clone());
                 forms.push(format!("{value:?}"));
-                if let Ok(yaml) = serde_yml::to_string(&Value::String(value.clone())) {
+                if let Ok(yaml) = yaml_serde::to_string(&Value::String(value.clone())) {
                     forms.push(yaml.trim().to_string());
                 }
                 let escaped = value
@@ -290,7 +290,7 @@ pub(super) fn parse_stage_location(path: &str) -> Option<usize> {
 }
 
 pub(super) fn discover_secrets(raw: &str, overrides: &[String]) -> DiagnosticPolicy {
-    let Ok(root) = serde_yml::from_str::<Value>(raw) else {
+    let Ok(root) = yaml_serde::from_str::<Value>(raw) else {
         return DiagnosticPolicy::default();
     };
     let Some(raw_parameters) = root.get("parameters").and_then(Value::as_mapping) else {

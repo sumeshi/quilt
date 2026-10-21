@@ -41,7 +41,7 @@ pub fn delta(df: &LazyFrame, column: &str, output: Option<&str>) -> Result<LazyF
         // Decimal128 performs lossless subtraction across the complete
         // integer input range; the final strict cast makes the public result
         // Int64 and reports out-of-range values at sink time.
-        let decimal = DataType::Decimal(Some(38), Some(0));
+        let decimal = DataType::Decimal(38, 0);
         let difference = literal_col(column).cast(decimal.clone())
             - literal_col(column).cast(decimal).shift(lit(1i64));
         Ok(df

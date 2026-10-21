@@ -30,14 +30,18 @@ pub fn dumpcache(
     validate_destination(&path, "write dumpcache")?;
     atomic_path(&path, "write dumpcache", |temp| {
         df.clone()
-            .sink_parquet(
-                SinkTarget::Path(std::sync::Arc::new(temp.to_path_buf())),
-                ParquetWriteOptions {
-                    compression: ParquetCompression::Snappy,
-                    ..Default::default()
+            .sink(
+                SinkDestination::File {
+                    target: SinkTarget::Path(PlRefPath::try_from_path(temp)?),
                 },
-                None,
-                SinkOptions::default(),
+                FileWriteFormat::Parquet(
+                    ParquetWriteOptions {
+                        compression: ParquetCompression::Snappy,
+                        ..Default::default()
+                    }
+                    .into(),
+                ),
+                UnifiedSinkArgs::default(),
             )
             .and_then(|frame| frame.collect())
             .map(|_| ())

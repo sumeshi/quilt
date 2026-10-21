@@ -26,7 +26,7 @@ pub fn stats(df: &LazyFrame) -> Result<FinalizerResult, QuiltError> {
     })?;
     {
         let mut table = Table::new();
-        table.load_preset(UTF8_FULL);
+        table.load_style(UTF8_FULL);
 
         let mut header_cells = vec![Cell::new("Statistic").fg(Color::Green)];
         for name in &column_names {

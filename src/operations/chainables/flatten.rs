@@ -8,14 +8,14 @@ fn leaf_expr(expr: Expr, dtype: &DataType, prefix: &str, output: &mut Vec<(Expr,
             output.push((expr.alias(prefix), prefix.to_string()));
             return;
         }
-        for (index, field) in fields.iter().enumerate() {
+        for field in fields {
             let path = format!("{prefix}.{}", field.name);
-            leaf_expr(
-                expr.clone().struct_().field_by_index(index as i64),
-                &field.dtype,
-                &path,
-                output,
-            );
+            // Selector-based field access also expands literal `*`/regex keys.
+            let child = Expr::Function {
+                input: vec![expr.clone()],
+                function: FunctionExpr::StructExpr(StructFunction::FieldByName(field.name.clone())),
+            };
+            leaf_expr(child, &field.dtype, &path, output);
         }
     } else {
         output.push((expr.alias(prefix), prefix.to_string()));

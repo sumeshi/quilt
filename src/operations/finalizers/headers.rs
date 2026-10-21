@@ -17,7 +17,7 @@ pub fn headers(df: &LazyFrame, plain: bool) -> Result<FinalizerResult, QuiltErro
         Ok(FinalizerResult::Stdout(format!("{}\n", names.join("\n"))))
     } else {
         let mut table = Table::new();
-        table.load_preset(UTF8_FULL);
+        table.load_style(UTF8_FULL);
         table.set_header(vec!["#", "Column Name"]);
         for (index, name) in names.iter().enumerate() {
             table.add_row(vec![

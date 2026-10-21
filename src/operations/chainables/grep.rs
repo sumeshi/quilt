@@ -80,8 +80,8 @@ pub fn grep(
 
     let searched = df.clone().with_columns(search_columns);
     if is_inverted {
-        Ok(searched.filter(filter_expr.not()).drop(helper_names))
+        Ok(searched.filter(filter_expr.not()).drop(cols(helper_names)))
     } else {
-        Ok(searched.filter(filter_expr).drop(helper_names))
+        Ok(searched.filter(filter_expr).drop(cols(helper_names)))
     }
 }

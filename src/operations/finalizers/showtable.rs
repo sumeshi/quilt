@@ -75,7 +75,7 @@ pub fn render_table(df: &LazyFrame) -> Result<String, QuiltError> {
     output.push('\n');
 
     let mut table = Table::new();
-    table.load_preset(UTF8_FULL);
+    table.load_style(UTF8_FULL);
     table.set_content_arrangement(ContentArrangement::Dynamic);
     let header_cells: Vec<Cell> = colnames
         .iter()

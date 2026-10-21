@@ -58,7 +58,7 @@ pub fn timeslice(
                     // Chunk-local UDF output collection; the input LazyFrame is
                     // still pending until a finalizer evaluates it.
                     let converted: Vec<Option<String>> = ca
-                        .into_iter()
+                        .iter()
                         .enumerate()
                         .map(|(row, opt_time_str)| {
                             opt_time_str
@@ -72,17 +72,17 @@ pub fn timeslice(
                                 .map(|value| value.flatten())
                         })
                         .collect::<PolarsResult<Vec<_>>>()?;
-                    Ok(Some(
+                    Ok(
                         StringChunked::from_iter_options(
                             temporary_output_name.clone().into(),
                             converted.into_iter(),
                         )
                         .into_series()
                         .into(),
-                    ))
+                    )
                 }
             },
-            GetOutput::from_type(DataType::String),
+            |_, field| Ok(Field::new(field.name().clone(), DataType::String)),
         )
         .alias(&temporary_column);
 

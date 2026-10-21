@@ -79,7 +79,7 @@ fn preflight_collects_yaml_path_diagnostics() {
 }
 
 fn document(yaml: &str) -> RunDocument {
-    serde_yml::from_str(yaml).expect("canonical run document should deserialize")
+    yaml_serde::from_str(yaml).expect("canonical run document should deserialize")
 }
 
 #[test]
@@ -147,12 +147,12 @@ stages:
 
 #[test]
 fn schema_requires_known_fields_and_sequence_steps() {
-    assert!(serde_yml::from_str::<RunDocument>("version: 1\nunknown: true\nstages: []").is_err());
-    assert!(serde_yml::from_str::<RunDocument>(
+    assert!(yaml_serde::from_str::<RunDocument>("version: 1\nunknown: true\nstages: []").is_err());
+    assert!(yaml_serde::from_str::<RunDocument>(
         "version: 1\nstages: [{name: input, steps: [], extra: true}]"
     )
     .is_err());
-    assert!(serde_yml::from_str::<RunDocument>(
+    assert!(yaml_serde::from_str::<RunDocument>(
         "version: 1\nstages: [{name: input, steps: {load: {paths: [x]}}}]"
     )
     .is_err());
@@ -277,7 +277,7 @@ fn automation_steps_reject_wrong_yaml_scalar_types() {
         ("show", "debug: yes"),
     ] {
         assert!(
-            parse_automation_step(name, &serde_yml::from_str(yaml).unwrap()).is_err(),
+            parse_automation_step(name, &yaml_serde::from_str(yaml).unwrap()).is_err(),
             "accepted wrong type for {name}"
         );
     }
@@ -512,8 +512,11 @@ fn materialization_failure_does_not_leave_stage_artifact() {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();
     let resources = ExecutionResources::new_in(dir.to_path_buf());
-    let bad =
-        LazyFrame::scan_parquet(dir.join("missing.parquet"), ScanArgsParquet::default()).unwrap();
+    let bad = LazyFrame::scan_parquet(
+        polars::prelude::PlRefPath::try_from_path(&dir.join("missing.parquet")).unwrap(),
+        ScanArgsParquet::default(),
+    )
+    .unwrap();
     assert!(materialization::materialize_frame(bad, &resources).is_err());
     assert_eq!(resources.tracked_count(), 0);
     assert!(std::fs::read_dir(dir).unwrap().next().is_none());

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use serde_yml::Value;
 use std::path::{Path, PathBuf};
+use yaml_serde::Value;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

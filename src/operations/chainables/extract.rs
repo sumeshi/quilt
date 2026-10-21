@@ -56,7 +56,7 @@ pub fn extract(df: &LazyFrame, column: &str, pattern: &str) -> Result<LazyFrame,
                 move |series| {
                     let values = series
                         .str()?
-                        .into_iter()
+                        .iter()
                         .map(|value| {
                             value.and_then(|value| {
                                 regex.captures(value).and_then(|captures| {
@@ -67,12 +67,12 @@ pub fn extract(df: &LazyFrame, column: &str, pattern: &str) -> Result<LazyFrame,
                             })
                         })
                         .collect::<Vec<_>>();
-                    Ok(Some(Column::from(Series::new(
+                    Ok(Column::from(Series::new(
                         capture_name.clone().into(),
                         values,
-                    ))))
+                    )))
                 },
-                GetOutput::from_type(DataType::String),
+                |_, field| Ok(Field::new(field.name().clone(), DataType::String)),
             )
             .alias(group_name)
     });

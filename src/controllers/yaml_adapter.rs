@@ -25,21 +25,21 @@ impl YamlStrings {
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum YamlValues {
-    One(serde_yml::Value),
-    Many(Vec<serde_yml::Value>),
+    One(yaml_serde::Value),
+    Many(Vec<yaml_serde::Value>),
 }
 impl YamlValues {
     fn into_vec(self) -> Result<Vec<String>, QuiltError> {
         let values = match self {
-            Self::One(serde_yml::Value::Sequence(v)) => v,
+            Self::One(yaml_serde::Value::Sequence(v)) => v,
             Self::One(v) => vec![v],
             Self::Many(v) => v,
         };
         values
             .into_iter()
             .map(|v| match v {
-                serde_yml::Value::String(s) => Ok(s),
-                serde_yml::Value::Number(n) => Ok(n.to_string()),
+                yaml_serde::Value::String(s) => Ok(s),
+                yaml_serde::Value::Number(n) => Ok(n.to_string()),
                 _ => Err(QuiltError::usage(
                     "Error: values must be strings or numbers",
                 )),
@@ -265,15 +265,15 @@ struct YCalc {
 }
 
 fn yaml_args<T: for<'de> Deserialize<'de>>(
-    value: &serde_yml::Value,
+    value: &yaml_serde::Value,
     name: &str,
 ) -> Result<T, QuiltError> {
     let value = if value.is_null() {
-        serde_yml::Value::Mapping(serde_yml::Mapping::new())
+        yaml_serde::Value::Mapping(yaml_serde::Mapping::new())
     } else {
         value.clone()
     };
-    serde_yml::from_value(value).map_err(|e| {
+    yaml_serde::from_value(value).map_err(|e| {
         // Keep numeric chainable diagnostics identical across CLI and YAML
         // adapters.  The typed YAML DTO otherwise exposes serde's Rust type
         // name (`expected usize`), which is an implementation detail and
@@ -335,7 +335,7 @@ fn separator(value: Option<String>) -> Result<char, QuiltError> {
 /// Parse one canonical run-document record-processing step directly into typed arguments.
 pub fn parse_automation_step(
     name: &str,
-    value: &serde_yml::Value,
+    value: &yaml_serde::Value,
 ) -> Result<TypedCommand, QuiltError> {
     let operation = OperationId::parse(name)
         .ok_or_else(|| QuiltError::usage(format!("Error: Unknown automation command '{name}'")))?;
@@ -657,8 +657,8 @@ pub fn parse_automation_step(
 mod tests {
     use super::*;
 
-    fn yaml(source: &str) -> serde_yml::Value {
-        serde_yml::from_str(source).expect("test YAML should parse")
+    fn yaml(source: &str) -> yaml_serde::Value {
+        yaml_serde::from_str(source).expect("test YAML should parse")
     }
 
     #[test]

@@ -567,7 +567,7 @@ mod tests {
             assert_eq!(parsed[0].name(), definition.name);
             assert_eq!(parsed[0].category(), definition.category);
         }
-        let empty = serde_yml::Value::Mapping(serde_yml::Mapping::new());
+        let empty = yaml_serde::Value::Mapping(yaml_serde::Mapping::new());
         assert!(crate::controllers::command_model::parse_automation_step("run", &empty).is_err());
     }
 

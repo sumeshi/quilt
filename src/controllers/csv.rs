@@ -162,7 +162,7 @@ impl CsvController {
                 file_size.map(|s| s / 1024 / 1024).unwrap_or(0)
             ));
 
-            let reader = LazyCsvReader::new(path)
+            let reader = LazyCsvReader::new(PlRefPath::try_from_path(path)?)
                 .with_glob(false)
                 .with_separator(csv_options.parse_options.separator)
                 .with_has_header(csv_options.has_header)
@@ -276,7 +276,7 @@ impl CsvController {
             Some(total_written as u64),
         )?;
 
-        let reader = LazyCsvReader::new(&temp_path)
+        let reader = LazyCsvReader::new(PlRefPath::try_from_path(&temp_path)?)
             .with_glob(false)
             .with_separator(csv_options.parse_options.separator)
             .with_has_header(csv_options.has_header)

@@ -661,7 +661,7 @@ mod tests {
 
     #[test]
     fn show_preserves_csv_quoting_and_null_bytes() {
-        let frame = DataFrame::new(vec![Series::new(
+        let frame = DataFrame::new_infer_height(vec![Series::new(
             "value".into(),
             &[Some("a,b"), Some("quote\"x"), Some("line\nx"), None],
         )

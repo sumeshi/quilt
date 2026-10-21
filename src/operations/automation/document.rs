@@ -10,9 +10,9 @@ use super::diagnostics::{
 use super::planner;
 use crate::controllers::command_model::{parse_automation_step, CommandCategory, TypedCommand};
 use crate::error::QuiltError;
-use serde_yml::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use yaml_serde::Value;
 
 #[derive(Debug)]
 pub(super) struct PreparedRunDocument {
@@ -471,12 +471,12 @@ pub(super) fn prepare(input: DocumentInput<'_>) -> Result<PreparedRunDocument, Q
     let raw = input.raw;
     let config_path = input.path;
     let overrides = input.overrides;
-    let mut root: Value = serde_yml::from_str(raw).map_err(|e| {
+    let mut root: Value = yaml_serde::from_str(raw).map_err(|e| {
         QuiltError::automation("run", None, format!("Error parsing YAML config: {e}"))
     })?;
     let declarations: std::collections::BTreeMap<String, ParameterDeclaration> = root
         .get("parameters")
-        .and_then(|value| serde_yml::from_value(value.clone()).ok())
+        .and_then(|value| yaml_serde::from_value(value.clone()).ok())
         .unwrap_or_default();
     let config_base = config_path.parent().unwrap_or_else(|| Path::new("."));
     let mut values: HashMap<String, ResolvedParameter> = HashMap::new();
@@ -719,7 +719,7 @@ pub(super) fn prepare(input: DocumentInput<'_>) -> Result<PreparedRunDocument, Q
             }
         }
     }
-    let document: RunDocument = serde_yml::from_value(root).map_err(|e| {
+    let document: RunDocument = yaml_serde::from_value(root).map_err(|e| {
         let error = QuiltError::automation(
             "run",
             None,

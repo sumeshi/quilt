@@ -196,7 +196,7 @@ fn load_ndjson_files(
                     source_column,
                 );
             }
-            let mut frame = LazyJsonLineReader::new(path)
+            let mut frame = LazyJsonLineReader::new(PlRefPath::try_from_path(path)?)
                 .with_schema(Some(schema.clone()))
                 .with_rechunk(true)
                 .finish()
@@ -205,7 +205,7 @@ fn load_ndjson_files(
                     path: Some(path.display().to_string()),
                     message: error.to_string(),
                 })?;
-            // Polars 0.48's NDJSON reader hardcodes glob=true and has no setter.
+            // Polars' NDJSON reader hardcodes glob=true and has no setter.
             // Paths have already been expanded and validated by Quilt.
             match &mut frame.logical_plan {
                 DslPlan::Scan {
@@ -240,7 +240,7 @@ fn load_parquet_files(
 ) -> Result<LazyFrame, QuiltError> {
     if paths.len() == 1 {
         LazyFrame::scan_parquet(
-            &paths[0],
+            PlRefPath::try_from_path(&paths[0])?,
             ScanArgsParquet {
                 glob: false,
                 ..Default::default()
@@ -257,7 +257,7 @@ fn load_parquet_files(
         let mut dataframes = Vec::new();
         for path in paths {
             let df = LazyFrame::scan_parquet(
-                path,
+                PlRefPath::try_from_path(path)?,
                 ScanArgsParquet {
                     glob: false,
                     ..Default::default()

@@ -39,15 +39,17 @@ pub fn dump(
             serialize_options: SerializeOptions {
                 separator,
                 ..Default::default()
-            },
+            }
+            .into(),
             ..Default::default()
         };
         super::csv::csv_frame(df, "write dump")?
-            .sink_csv(
-                SinkTarget::Path(std::sync::Arc::new(temp.to_path_buf())),
-                options,
-                None,
-                SinkOptions::default(),
+            .sink(
+                SinkDestination::File {
+                    target: SinkTarget::Path(PlRefPath::try_from_path(temp)?),
+                },
+                FileWriteFormat::Csv(options),
+                UnifiedSinkArgs::default(),
             )
             .and_then(|frame| frame.collect())
             .map(|_| ())

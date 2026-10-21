@@ -91,7 +91,7 @@ pub fn parse_size_column(df: &LazyFrame, column: &str) -> Result<LazyFrame, Quil
     let output = literal_col(column).cast(DataType::String).map(
         move |series| {
             let casted = series.cast(&DataType::String)?;
-            let strings = casted.str()?.into_iter();
+            let strings = casted.str()?.iter();
             let bytes = strings
                 .enumerate()
                 .map(|(row, value)| {
@@ -107,12 +107,9 @@ pub fn parse_size_column(df: &LazyFrame, column: &str) -> Result<LazyFrame, Quil
                         .transpose()
                 })
                 .collect::<PolarsResult<Vec<_>>>()?;
-            Ok(Some(Column::from(Series::new(
-                output_name.clone().into(),
-                bytes,
-            ))))
+            Ok(Column::from(Series::new(output_name.clone().into(), bytes)))
         },
-        GetOutput::from_type(DataType::UInt64),
+        |_, field| Ok(Field::new(field.name().clone(), DataType::UInt64)),
     );
     Ok(df.clone().with_columns([output]))
 }

@@ -102,7 +102,7 @@ pub fn bucket_with_config(
         .map(
             move |series| {
                 let buckets = if parse_strings {
-                    let values = series.str()?.into_iter().enumerate();
+                    let values = series.str()?.iter().enumerate();
                     values.map(|(row, value)| value.map(|value| -> PolarsResult<Option<i64>> {
                         let parsed = match parse_datetime_detailed_with_diagnostics(value, &datetime, Some(&diagnostics)).map_err(|error| PolarsError::ComputeError(
                             format!("bucket column '{column_name}' row {row}: {error} (value redacted)").into()))?
@@ -124,11 +124,11 @@ pub fn bucket_with_config(
                             .map_err(|_| PolarsError::ComputeError(format!("bucket column '{column_name}' row {row}: bucket floor overflow").into()))
                     }).transpose().map(|value| value.flatten())).collect::<PolarsResult<Vec<_>>>()?
                 } else {
-                    series.datetime()?.into_iter().enumerate().map(|(row, value)| value.map(|value| {
+                    series.datetime()?.physical().iter().enumerate().map(|(row, value)| value.map(|value| {
                         floor_datetime_raw(value, interval_micros, unit).map_err(|_| PolarsError::ComputeError(format!("bucket column '{column_name}' row {row}: Bucket floor overflow").into()))
                     }).transpose()).collect::<PolarsResult<Vec<_>>>()?
                 };
-                Ok(Some(
+                Ok(
                     Int64Chunked::from_iter_options(
                         output_name.clone().into(),
                         buckets.into_iter(),
@@ -136,9 +136,9 @@ pub fn bucket_with_config(
                     .into_datetime(unit, output_timezone.clone())
                     .into_series()
                     .into(),
-                ))
+                )
             },
-            GetOutput::from_type(DataType::Datetime(unit, timezone)),
+            move |_, field| Ok(Field::new(field.name().clone(), DataType::Datetime(unit, timezone.clone()))),
         )
         .alias(output);
     Ok(df.clone().with_columns([bucketed]))

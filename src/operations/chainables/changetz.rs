@@ -103,7 +103,7 @@ pub fn changetz_with_config(
             .cast(DataType::String)
             .map(
                 move |series| {
-                    let values = series.str()?.into_iter().enumerate();
+                    let values = series.str()?.iter().enumerate();
                     let converted = values
                         .map(|(row, value)| {
                             value
@@ -130,12 +130,12 @@ pub fn changetz_with_config(
                                 .map(|value| value.flatten())
                         })
                         .collect::<PolarsResult<Vec<_>>>()?;
-                    Ok(Some(Column::from(Series::new(
+                    Ok(Column::from(Series::new(
                         output_name.clone().into(),
                         converted,
-                    ))))
+                    )))
                 },
-                GetOutput::from_type(DataType::String),
+                |_, field| Ok(Field::new(field.name().clone(), DataType::String)),
             )
             .alias(colname),
     ))

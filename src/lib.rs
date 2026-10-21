@@ -402,7 +402,7 @@ mod tests {
         ));
         let run_full = crate::controllers::command_model::parse_automation_step(
             "load",
-            &serde_yml::from_str("paths: [events.ndjson]\ninfer-schema-length: full").unwrap(),
+            &yaml_serde::from_str("paths: [events.ndjson]\ninfer-schema-length: full").unwrap(),
         )
         .unwrap();
         assert!(matches!(
@@ -460,12 +460,12 @@ mod tests {
 
         let bucket_command = parse_automation_step(
             "bucket",
-            &serde_yml::from_str("column: when\ninterval: 1h\nstrict: false").unwrap(),
+            &yaml_serde::from_str("column: when\ninterval: 1h\nstrict: false").unwrap(),
         )
         .unwrap();
         let timeslice_command = parse_automation_step(
             "timeslice",
-            &serde_yml::from_str("column: when\nstart: '2024-01-01'\nstrict: false").unwrap(),
+            &yaml_serde::from_str("column: when\nstart: '2024-01-01'\nstrict: false").unwrap(),
         )
         .unwrap();
         let (bucket_datetime, timeslice_datetime) = match (&bucket_command, &timeslice_command) {
@@ -599,7 +599,7 @@ mod tests {
     #[test]
     fn cli_and_automation_parse_to_the_same_typed_command() {
         use crate::controllers::command_model::{parse_automation_step, parse_typed_commands};
-        use serde_yml::Value;
+        use yaml_serde::Value;
 
         let cli = parse_typed_commands(
             &["grep", "--ignore-case", "needle"]
@@ -608,7 +608,7 @@ mod tests {
                 .collect::<Vec<_>>(),
         )
         .unwrap();
-        let yaml: Value = serde_yml::from_str("{pattern: needle, ignore-case: true}").unwrap();
+        let yaml: Value = yaml_serde::from_str("{pattern: needle, ignore-case: true}").unwrap();
         let automation = parse_automation_step("grep", &yaml).unwrap();
         assert_eq!(cli, vec![automation]);
     }
@@ -670,7 +670,9 @@ mod tests {
         ] {
             let source =
                 DatetimeChunked::from_naive_datetime("when".into(), [value], unit).into_series();
-            let frame = DataFrame::new(vec![source.into()]).unwrap().lazy();
+            let frame = DataFrame::new_infer_height(vec![source.into()])
+                .unwrap()
+                .lazy();
             let result = bucket(&frame, "when", "1s", None)
                 .unwrap()
                 .collect()
@@ -685,6 +687,7 @@ mod tests {
                 .unwrap()
                 .datetime()
                 .unwrap()
+                .physical()
                 .get(0);
             let expected = match unit {
                 TimeUnit::Nanoseconds => -1_000_000_000,
@@ -696,9 +699,10 @@ mod tests {
         let mut timezone_source =
             DatetimeChunked::from_naive_datetime("when".into(), [value], TimeUnit::Microseconds);
         timezone_source.set_time_zone(TimeZone::UTC).unwrap();
-        let timezone_frame = DataFrame::new(vec![timezone_source.into_series().into()])
-            .unwrap()
-            .lazy();
+        let timezone_frame =
+            DataFrame::new_infer_height(vec![timezone_source.into_series().into()])
+                .unwrap()
+                .lazy();
         let timezone_result = bucket(&timezone_frame, "when", "1s", None)
             .unwrap()
             .collect()
@@ -713,7 +717,7 @@ mod tests {
             [Some(value), None],
             TimeUnit::Milliseconds,
         );
-        let nullable_frame = DataFrame::new(vec![nullable.into_series().into()])
+        let nullable_frame = DataFrame::new_infer_height(vec![nullable.into_series().into()])
             .unwrap()
             .lazy();
         let nullable_result = bucket(&nullable_frame, "when", "1s", None)
@@ -726,6 +730,7 @@ mod tests {
                 .unwrap()
                 .datetime()
                 .unwrap()
+                .physical()
                 .get(0),
             Some(-1_000)
         );
@@ -735,6 +740,7 @@ mod tests {
                 .unwrap()
                 .datetime()
                 .unwrap()
+                .physical()
                 .get(1),
             None
         );
@@ -743,7 +749,7 @@ mod tests {
         let overflow = bucket(&nullable_frame, "when", "999999999999999999999999s", None);
         assert!(overflow.is_err());
         let nanosecond_overflow = bucket(
-            &DataFrame::new(vec![DatetimeChunked::from_naive_datetime(
+            &DataFrame::new_infer_height(vec![DatetimeChunked::from_naive_datetime(
                 "when".into(),
                 [value],
                 TimeUnit::Nanoseconds,

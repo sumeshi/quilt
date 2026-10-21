@@ -9,7 +9,7 @@ use crate::controllers::pipeline::Pipeline;
 use crate::controllers::resources::ExecutionResources;
 use crate::error::QuiltError;
 use crate::operations::automation::model::{ConcatStage, JoinStage, PlannedStep};
-use polars::prelude::{col, lit, Expr, JoinType, LazyFrame};
+use polars::prelude::{col, cols, lit, Expr, JoinType, LazyFrame};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -309,9 +309,12 @@ fn join_pair(
                 &[col(&cross_key)],
                 join_args,
             )
-            .drop([cross_key]));
+            .drop(cols([cross_key])));
     }
     let mut join_args = polars::prelude::JoinArgs::new(join_type);
+    if matches!(join_args.how, JoinType::Left) {
+        join_args.maintain_order = polars::prelude::MaintainOrderJoin::Left;
+    }
     if coalesce {
         join_args = join_args.with_coalesce(polars::prelude::JoinCoalesce::CoalesceColumns);
     }
