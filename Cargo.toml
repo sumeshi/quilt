@@ -14,7 +14,6 @@ test = false
 [dependencies]
 comfy-table = { version = "8.0" }
 unicode-width = "0.2"
-# Used for serde support for chrono
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order", "arbitrary_precision", "raw_value"] }
 yaml_serde = "0.10.7"
@@ -24,12 +23,11 @@ yaml_serde = "0.10.7"
 # - temporal: changetz/timeslice
 # - strings + regex: select/contains/sed/grep string operations
 # - is_in: membership filtering
-# - describe: showquery plan rendering
 # - parquet: parquet load + dumpcache
 # - dtype-decimal: lossless Decimal128 intermediate for integer delta
-polars = { version = "0.55.2", features = ["lazy", "csv", "json", "temporal", "timezones", "strings", "regex", "is_in", "describe", "parquet", "dtype-decimal"], default-features = false }
+polars = { version = "0.55.2", features = ["lazy", "csv", "json", "temporal", "timezones", "strings", "regex", "is_in", "parquet", "dtype-decimal"], default-features = false }
 regex = "1.9"
-chrono = { version = "0.4", features = ["serde"] }
+chrono = "0.4"
 chrono-tz = "0.10"
 log = "0.4"
 env_logger = { version = "0.11", default-features = false, features = ["regex"] }
