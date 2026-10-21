@@ -524,10 +524,11 @@ pub fn parse_automation_step(
                 column: a.column,
                 by: a
                     .by
-                    .map(|value| {
-                        crate::controllers::cli_adapter::select_columns_from_input(
-                            &value.into_vec().join(","),
-                        )
+                    .map(|value| match value {
+                        YamlStrings::One(value) => {
+                            crate::controllers::cli_adapter::select_columns_from_input(&value)
+                        }
+                        YamlStrings::Many(values) => Ok(values),
                     })
                     .transpose()?
                     .unwrap_or_default(),
@@ -801,6 +802,31 @@ mod tests {
     fn select_rejects_sort_only_fields() {
         assert!(parse_automation_step("select", &yaml("columns: [id]\ndesc: true")).is_err());
         assert!(parse_automation_step("sort", &yaml("columns: [id]\ndesc: true")).is_ok());
+    }
+
+    #[test]
+    fn timeinfo_by_preserves_literal_yaml_names_and_matches_cli_selection() {
+        let from_yaml = parse_automation_step(
+            "timeinfo",
+            &yaml("column: when\nby: [\"a,b\", xmlns:auto-ns3]"),
+        )
+        .unwrap();
+        let from_cli = crate::controllers::cli_adapter::parse_typed_commands(&[
+            "timeinfo".into(),
+            "when".into(),
+            "--by".into(),
+            "\"a,b\",xmlns:auto-ns3".into(),
+        ])
+        .unwrap()
+        .remove(0);
+        assert_eq!(from_yaml, from_cli);
+        assert_eq!(
+            from_yaml,
+            TypedCommand::TimeInfo(TimeInfoArgs {
+                column: "when".into(),
+                by: vec!["a,b".into(), "xmlns:auto-ns3".into()],
+            })
+        );
     }
 
     #[test]

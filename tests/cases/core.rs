@@ -286,7 +286,7 @@ fn source_inventory_includes_filtered_files_but_does_not_override_reused_names()
     write(
         root.path(),
         "a.jsonl",
-        "{\"when\":\"2026-10-15T12:00:00Z\",\"host\":\"a\"}\n",
+        "{\"when\":\"2026-10-15T12:00:00Z\",\"host\":\"a\",\"a,b\":\"literal\"}\n",
     );
     write(root.path(), "empty.jsonl", "");
     let pattern = root.path().join("*.jsonl");
@@ -351,6 +351,36 @@ fn source_inventory_includes_filtered_files_but_does_not_override_reused_names()
         ),
         (1, "a", "1")
     );
+    let cli = text(&[
+        "load",
+        pattern.to_str().unwrap(),
+        "-",
+        "cast",
+        "when",
+        "datetime",
+        "-",
+        "timeinfo",
+        "when",
+        "--by",
+        "\"a,b\"",
+        "-",
+        "show",
+    ]);
+    let recipe = document(
+        root.path(),
+        "quoted-timeinfo.yaml",
+        serde_json::json!({
+            "version": 1,
+            "stages": [{"name": "summary", "steps": [
+                {"load": {"paths": [pattern]}},
+                {"cast": {"column": "when", "type": "datetime"}},
+                {"timeinfo": {"column": "when", "by": ["a,b"]}},
+                {"show": {}}
+            ]}]
+        }),
+    );
+    assert_eq!(cli, text(&["run", recipe.to_str().unwrap()]));
+    assert_eq!(rows(&cli)[0]["a,b"], "literal");
 }
 
 #[test]

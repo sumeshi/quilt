@@ -535,7 +535,7 @@ fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
             Ok(TypedCommand::TimeInfo(TimeInfoArgs {
                 column: a[0].clone(),
                 by: val(&raw, "by")
-                    .map(|value| split_values(&value))
+                    .map(|value| select_columns_from_input(&value))
                     .transpose()?
                     .unwrap_or_default(),
             }))
