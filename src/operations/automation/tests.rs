@@ -1,11 +1,10 @@
 use super::diagnostics::location_matches;
 use super::*;
-use crate::controllers::command_model::parse_automation_step;
+use crate::controllers::command_model::{parse_automation_step, TypedCommand};
 use crate::controllers::pipeline::PipelineState;
 use crate::controllers::resources::ExecutionResources;
 use crate::operations::automation::model::{ParameterOrigin, ResolvedParameter};
 use polars::prelude::{IntoLazy, LazyFrame, ScanArgsParquet};
-use serde_yml::Value;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{
@@ -84,50 +83,43 @@ fn document(yaml: &str) -> RunDocument {
 }
 
 #[test]
-fn canonical_v1_supports_all_stage_kinds_and_repeated_steps() {
-    let doc = document(
-        r#"
-version: 1
-stages:
-  - name: input
-    steps:
-      - load: {paths: [input.csv]}
-      - grep: {pattern: ERROR}
-      - grep: {pattern: WARN}
-  - name: left
-    from: input
-    steps: [{select: {columns: [id]}}]
-  - name: right
-    from: input
-    steps: [{select: {columns: [id, value]}}]
-  - name: joined
-    join: {inputs: [left, right], how: inner, on: [id], coalesce: true}
-  - name: combined
-    concat: {inputs: [left, right], how: vertical}
-  - name: selected
-    branch:
-      input: joined
-      when: {row-count: {greater-than: 0}}
-      then: [left]
-      else: [right]
-"#,
-    );
-    assert_eq!(doc.version, 1);
-    assert_eq!(doc.stages.len(), 6);
-    assert_eq!(doc.stages[0].name(), "input");
-    assert!(matches!(doc.stages[3], StageConfig::Join(_)));
-    assert!(matches!(doc.stages[4], StageConfig::Concat(_)));
-    assert!(matches!(doc.stages[5], StageConfig::Branch(_)));
-    let ProcessStage { steps, .. } = match &doc.stages[0] {
-        StageConfig::Process(stage) => stage,
-        _ => panic!("expected process stage"),
+fn preflight_retains_typed_repeated_steps_and_resolves_paths() {
+    let doc = document("version: 1\nstages: [{name: input, steps: [{load: {paths: [input.csv]}}, {grep: {pattern: ERROR}}, {grep: {pattern: WARN}}, {dump: {output: result.csv}}]}, {name: inherited, from: input, steps: [{load: {}}]}]");
+    let plan = document::preflight(&doc, &HashMap::new(), Path::new("rules/run.yaml")).unwrap();
+    let StageConfig::Process(process) = &plan.stages["input"] else {
+        panic!("expected process")
     };
     assert_eq!(
-        document::parse_steps(&Value::Sequence(steps.clone()))
-            .unwrap()
-            .len(),
-        3
+        process
+            .steps
+            .iter()
+            .map(|step| (step.index, step.command.name()))
+            .collect::<Vec<_>>(),
+        [(0, "load"), (1, "grep"), (2, "grep"), (3, "dump")]
     );
+    let TypedCommand::Load(load) = &process.steps[0].command else {
+        panic!("expected load")
+    };
+    assert_eq!(load.paths, [Path::new("rules/input.csv")]);
+    assert!(!process.steps[0].load_paths_omitted);
+    let TypedCommand::Grep(first) = &process.steps[1].command else {
+        panic!("expected grep")
+    };
+    let TypedCommand::Grep(second) = &process.steps[2].command else {
+        panic!("expected grep")
+    };
+    assert_eq!((&*first.pattern, &*second.pattern), ("ERROR", "WARN"));
+    let TypedCommand::Dump(dump) = &process.steps[3].command else {
+        panic!("expected dump")
+    };
+    assert_eq!(
+        dump.output.as_deref().map(Path::new),
+        Some(Path::new("rules/result.csv"))
+    );
+    let StageConfig::Process(inherited) = &plan.stages["inherited"] else {
+        panic!("expected process")
+    };
+    assert!(inherited.steps[0].load_paths_omitted);
 }
 
 #[test]
@@ -149,11 +141,8 @@ stages:
     steps: [{load: {paths: [input.csv]}}]
 "#,
     );
-    let (order, configs) = planner::collect_stage_configs(&doc.stages).unwrap();
-    assert_eq!(
-        planner::resolve_stage_execution_order(&order, &configs).unwrap(),
-        ["input", "shared", "output", "other"]
-    );
+    let plan = document::preflight(&doc, &HashMap::new(), Path::new("run.yaml")).unwrap();
+    assert_eq!(plan.order, ["input", "shared", "output", "other"]);
 }
 
 #[test]
@@ -173,13 +162,12 @@ fn schema_requires_known_fields_and_sequence_steps() {
 fn duplicate_names_cycles_and_invalid_steps_are_rejected_before_execution() {
     let duplicate =
         document("version: 1\nstages: [{name: same, steps: []}, {name: same, steps: []}]");
-    assert!(planner::collect_stage_configs(&duplicate.stages).is_err());
+    assert!(document::preflight(&duplicate, &HashMap::new(), Path::new("run.yaml")).is_err());
 
     let cycle = document(
         "version: 1\nstages: [{name: a, from: b, steps: []}, {name: b, from: a, steps: []}]",
     );
-    let (order, configs) = planner::collect_stage_configs(&cycle.stages).unwrap();
-    assert!(planner::resolve_stage_execution_order(&order, &configs).is_err());
+    assert!(document::preflight(&cycle, &HashMap::new(), Path::new("run.yaml")).is_err());
 
     let invalid =
         document("version: 1\nstages: [{name: input, steps: [{load: {paths: [x], typo: true}}]}]");
@@ -278,7 +266,6 @@ fn public_run_rejects_static_shapes_before_nonexistent_input_io() {
             "{name}: expected '{expected}', got {rendered}"
         );
     }
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -296,13 +283,27 @@ fn automation_steps_reject_wrong_yaml_scalar_types() {
     }
 }
 
+fn planned(yaml: &str) -> planner::ExecutionPlan {
+    let prepared = document::prepare(document::DocumentInput {
+        raw: yaml,
+        path: Path::new("run.yaml"),
+        overrides: &[],
+    })
+    .unwrap();
+    document::preflight(
+        &prepared.document,
+        &prepared.parameters,
+        Path::new("run.yaml"),
+    )
+    .unwrap()
+}
+
 #[test]
 fn auto_materialization_keeps_serial_barriers_lazy() {
-    let doc = document(
+    let doc = planned(
             "version: 1\nstages: [{name: input, steps: [{load: {paths: [input.csv]}}, {sort: {columns: [id]}}]}]",
         );
-    let (order, configs) = planner::collect_stage_configs(&doc.stages).unwrap();
-    let decisions = materialization::materialization_decisions(&order, &configs);
+    let decisions = materialization::materialization_decisions(&doc.order, &doc.stages);
     let decision = decisions.get("input").unwrap();
     assert!(!decision.materialize);
     assert_eq!(decision.reason, "auto:serial-lazy");
@@ -310,30 +311,27 @@ fn auto_materialization_keeps_serial_barriers_lazy() {
 
 #[test]
 fn parameter_only_branch_does_not_force_input_materialization() {
-    let doc = document(
-            "version: 1\nstages: [{name: input, steps: []}, {name: chosen, branch: {input: input, when: {parameter: {name: enabled, equal: true}}, then: [input]}}]",
+    let doc = planned(
+            "version: 1\nparameters: {enabled: {type: bool, default: true}}\nstages: [{name: input, steps: []}, {name: chosen, branch: {input: input, when: {parameter: {name: enabled, equal: true}}, then: [output]}}, {name: output, from: input, steps: []}]",
         );
-    let (order, configs) = planner::collect_stage_configs(&doc.stages).unwrap();
-    let decisions = materialization::materialization_decisions(&order, &configs);
+    let decisions = materialization::materialization_decisions(&doc.order, &doc.stages);
     assert!(!decisions.get("input").unwrap().materialize);
 }
 
 #[test]
 fn only_row_evaluating_finalizers_trigger_reuse_materialization() {
-    let one = document(
+    let one = planned(
             "version: 1\nstages: [{name: one, steps: [{load: {paths: [input.csv]}}, {show: {}}, {headers: {}}]}]",
         );
-    let (order, configs) = planner::collect_stage_configs(&one.stages).unwrap();
-    let decision = materialization::materialization_decisions(&order, &configs)
+    let decision = materialization::materialization_decisions(&one.order, &one.stages)
         .remove("one")
         .unwrap();
     assert!(!decision.materialize);
 
-    let two = document(
+    let two = planned(
             "version: 1\nstages: [{name: two, steps: [{load: {paths: [input.csv]}}, {show: {}}, {show: {}}]}]",
         );
-    let (order, configs) = planner::collect_stage_configs(&two.stages).unwrap();
-    let decision = materialization::materialization_decisions(&order, &configs)
+    let decision = materialization::materialization_decisions(&two.order, &two.stages)
         .remove("two")
         .unwrap();
     assert!(decision.materialize);
@@ -398,7 +396,6 @@ fn run_fanout_materializes_one_probed_source_evaluation() {
     )
     .unwrap();
     assert_eq!(probe.load(Ordering::SeqCst), 2);
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -449,7 +446,6 @@ fn always_has_one_stage_artifact_and_serial_auto_has_none() {
     )
     .unwrap();
     assert_eq!(auto_probe.tracked_count(), 0);
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -489,7 +485,6 @@ fn row_count_branch_reuses_one_materialized_source_evaluation() {
         .file_name()
         .to_string_lossy()
         .contains("qlt-stage-materialized")));
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -510,7 +505,6 @@ fn completed_materialization_releases_its_input_owner() {
     assert!(second_path.exists());
     drop(second_resources);
     assert!(!second_path.exists());
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -523,7 +517,6 @@ fn materialization_failure_does_not_leave_stage_artifact() {
     assert!(materialization::materialize_frame(bad, &resources).is_err());
     assert_eq!(resources.tracked_count(), 0);
     assert!(std::fs::read_dir(dir).unwrap().next().is_none());
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -558,7 +551,6 @@ fn cli_output_overrides_yaml_dump_path() {
     assert!(cli_output.exists());
     assert!(!yaml_output.exists());
     assert_eq!(std::fs::read_to_string(cli_output).unwrap(), "id\n1\n");
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -593,7 +585,6 @@ fn yaml_show_plus_cli_output_reuses_one_source_evaluation() {
     .unwrap();
     assert_eq!(probe.load(Ordering::SeqCst), 1);
     assert_eq!(std::fs::read_to_string(output).unwrap(), "id\n1\n");
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -601,7 +592,6 @@ fn parameter_branch_excludes_unselected_output_route() {
     let doc = document(
             "version: 1\nparameters: {use_left: {type: bool, default: true}}\nstages: [{name: input, steps: []}, {name: route, branch: {input: input, when: {parameter: {name: use_left, equal: true}}, then: [left], else: [right]}}, {name: left, from: input, steps: [{show: {}}]}, {name: right, from: input, steps: [{show: {}}]}]",
         );
-    let (order, configs) = planner::collect_stage_configs(&doc.stages).unwrap();
     let values = HashMap::from([(
         "use_left".to_string(),
         ResolvedParameter {
@@ -611,9 +601,10 @@ fn parameter_branch_excludes_unselected_output_route() {
             secret: false,
         },
     )]);
+    let plan = document::preflight(&doc, &values, Path::new("run.yaml")).unwrap();
     let decisions = materialization::materialization_decisions_with_output(
-        &order,
-        &configs,
+        &plan.order,
+        &plan.stages,
         true,
         Some(&values),
         Path::new("."),
@@ -652,5 +643,4 @@ fn check_and_show_plan_leave_config_directory_artifact_free() {
     assert_eq!(std::fs::read_dir(dir).unwrap().count(), 2);
     run_show_plan(config.to_str().unwrap(), "input", None, &[]).unwrap();
     assert_eq!(std::fs::read_dir(dir).unwrap().count(), 2);
-    let _ = std::fs::remove_dir_all(dir);
 }

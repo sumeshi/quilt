@@ -1,18 +1,30 @@
 //! Typed DAG planning boundary for run documents.
 
 use crate::error::QuiltError;
-use crate::operations::automation::model::{RunDocument, StageConfig};
+use crate::operations::automation::model::{PlannedStep, StageConfig};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug)]
 pub(super) struct ExecutionPlan {
     pub order: Vec<String>,
-    pub stages: HashMap<String, StageConfig>,
+    pub stages: HashMap<String, StageConfig<PlannedStep>>,
 }
 
-pub(super) fn build(document: &RunDocument) -> Result<ExecutionPlan, QuiltError> {
-    let (stage_names, stages) = collect_stage_configs(&document.stages)
-        .map_err(|error| QuiltError::automation("run", None, error))?;
+pub(super) fn build(input: &[StageConfig<PlannedStep>]) -> Result<ExecutionPlan, QuiltError> {
+    let mut stage_names = Vec::with_capacity(input.len());
+    let mut stages = HashMap::with_capacity(input.len());
+    for stage in input {
+        let name = stage.name().to_string();
+        if stages.contains_key(&name) {
+            return Err(QuiltError::automation(
+                "run",
+                None,
+                format!("Duplicate stage name '{name}'."),
+            ));
+        }
+        stage_names.push(name.clone());
+        stages.insert(name, stage.clone());
+    }
     let order = resolve_stage_execution_order(&stage_names, &stages).map_err(|error| {
         QuiltError::automation(
             "run",
@@ -44,35 +56,11 @@ pub(super) fn select(plan: &mut ExecutionPlan, selected: &str) -> Result<(), Qui
     for (name, stage) in &mut plan.stages {
         if name != selected {
             if let StageConfig::Process(process) = stage {
-                process
-                    .steps
-                    .retain(|step| !super::orchestrator::is_finalizer(step));
+                process.steps.retain(|step| !step.is_finalizer());
             }
         }
     }
     Ok(())
-}
-
-pub(super) fn collect_stage_configs(
-    stages: &[StageConfig],
-) -> Result<(Vec<String>, HashMap<String, StageConfig>), String> {
-    let mut stage_order = Vec::with_capacity(stages.len());
-    let mut stage_configs = HashMap::with_capacity(stages.len());
-
-    for stage_config in stages {
-        let stage_name = stage_config.name().to_string();
-        if stage_configs.contains_key(&stage_name) {
-            return Err(format!("Duplicate stage name '{stage_name}'."));
-        }
-        stage_order.push(stage_name.clone());
-        stage_configs.insert(stage_name, stage_config.clone());
-    }
-
-    Ok((stage_order, stage_configs))
-}
-
-fn get_stage_dependencies(stage_config: &StageConfig) -> Vec<String> {
-    stage_config.dependencies()
 }
 
 /// Build the dependency graph used for ordering and cycle checks.
@@ -83,11 +71,11 @@ fn get_stage_dependencies(stage_config: &StageConfig) -> Vec<String> {
 /// so that a target cannot run before its branch has selected a route.
 fn stage_order_dependencies(
     stage_order: &[String],
-    stage_configs: &HashMap<String, StageConfig>,
+    stage_configs: &HashMap<String, StageConfig<PlannedStep>>,
 ) -> Result<HashMap<String, Vec<String>>, String> {
     let mut dependencies = stage_configs
         .iter()
-        .map(|(name, config)| (name.clone(), get_stage_dependencies(config)))
+        .map(|(name, config)| (name.clone(), config.dependencies()))
         .collect::<HashMap<_, _>>();
 
     for (branch_name, config) in stage_configs {
@@ -122,7 +110,6 @@ fn stage_order_dependencies(
 
 fn visit_stage(
     stage_name: &str,
-    stage_order: &[String],
     stage_dependencies: &HashMap<String, Vec<String>>,
     visiting: &mut HashSet<String>,
     visited: &mut HashSet<String>,
@@ -147,28 +134,19 @@ fn visit_stage(
                 "Stage '{stage_name}' depends on missing stage '{dep}'."
             ));
         }
-        visit_stage(
-            dep,
-            stage_order,
-            stage_dependencies,
-            visiting,
-            visited,
-            resolved,
-        )?;
+        visit_stage(dep, stage_dependencies, visiting, visited, resolved)?;
     }
 
     visiting.remove(stage_name);
     visited.insert(stage_name.to_string());
     resolved.push(stage_name.to_string());
 
-    // keep signature stable for future ordering rules
-    let _ = stage_order;
     Ok(())
 }
 
-pub(super) fn resolve_stage_execution_order(
+fn resolve_stage_execution_order(
     stage_order: &[String],
-    stage_configs: &HashMap<String, StageConfig>,
+    stage_configs: &HashMap<String, StageConfig<PlannedStep>>,
 ) -> Result<Vec<String>, String> {
     let stage_dependencies = stage_order_dependencies(stage_order, stage_configs)?;
     let mut visiting = HashSet::new();
@@ -178,7 +156,6 @@ pub(super) fn resolve_stage_execution_order(
     for stage_name in stage_order {
         visit_stage(
             stage_name,
-            stage_order,
             &stage_dependencies,
             &mut visiting,
             &mut visited,
@@ -187,19 +164,4 @@ pub(super) fn resolve_stage_execution_order(
     }
 
     Ok(resolved)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::build;
-    use crate::operations::automation::model::RunDocument;
-
-    #[test]
-    fn planner_rejects_duplicate_stage_names() {
-        let document: RunDocument = serde_yml::from_str(
-            "version: 1\nstages: [{name: same, steps: []}, {name: same, steps: []}]",
-        )
-        .unwrap();
-        assert!(build(&document).is_err());
-    }
 }

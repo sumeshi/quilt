@@ -2,7 +2,7 @@
 
 use super::super::model::{
     BranchPredicate, ParameterDeclaration, ParameterLiteral, ParameterOrigin, ParameterType,
-    ResolvedParameter, RunDocument, StageConfig,
+    PlannedStep, ProcessStage, ResolvedParameter, RunDocument, StageConfig,
 };
 use super::diagnostics::{
     parse_stage_location, parse_step_location, sensitive_location, DiagnosticPolicy,
@@ -34,49 +34,52 @@ pub(super) fn diagnostic(
     )
 }
 
-pub(super) fn parse_steps(steps: &Value) -> Result<Vec<(usize, String, Value)>, QuiltError> {
-    match steps {
-        Value::Sequence(sequence) => {
-            let mut parsed_steps = Vec::with_capacity(sequence.len());
+fn parse_step(step: &Value, index: usize) -> Result<(&str, &Value), QuiltError> {
+    let mapping = step.as_mapping().ok_or_else(|| {
+        QuiltError::usage(format!(
+            "Step {} must be a single-entry mapping like '- grep: {{...}}'.",
+            index + 1
+        ))
+    })?;
+    if mapping.len() != 1 {
+        return Err(QuiltError::usage(format!(
+            "Step {} must contain exactly one command entry, found {}.",
+            index + 1,
+            mapping.len()
+        )));
+    }
+    let (name, args) = mapping.iter().next().unwrap();
+    let name = name.as_str().ok_or_else(|| {
+        QuiltError::usage(format!("Step {} command name must be a string.", index + 1))
+    })?;
+    Ok((name, args))
+}
 
-            for (index, step) in sequence.iter().enumerate() {
-                match step {
-                    Value::Mapping(mapping) if mapping.len() == 1 => {
-                        if let Some((command_name_val, command_args_val)) = mapping.iter().next() {
-                            let command_name = command_name_val.as_str().ok_or_else(|| {
-                                QuiltError::usage(format!(
-                                    "Step {} command name must be a string.",
-                                    index + 1
-                                ))
-                            })?;
-                            parsed_steps.push((
-                                index,
-                                command_name.to_string(),
-                                command_args_val.clone(),
-                            ));
-                        }
-                    }
-                    Value::Mapping(mapping) => {
-                        return Err(QuiltError::usage(format!(
-                            "Step {} must contain exactly one command entry, found {}.",
-                            index + 1,
-                            mapping.len()
-                        )));
-                    }
-                    _ => {
-                        return Err(QuiltError::usage(format!(
-                            "Step {} must be a single-entry mapping like '- grep: {{...}}'.",
-                            index + 1
-                        )));
-                    }
+fn resolve_command_paths(command: &mut TypedCommand, config_path: &Path) {
+    let base = config_path.parent().unwrap_or_else(|| Path::new("."));
+    match command {
+        TypedCommand::Load(args) => {
+            for path in &mut args.paths {
+                if path.is_relative() {
+                    *path = base.join(&*path);
                 }
             }
-
-            Ok(parsed_steps)
         }
-        _ => Err(QuiltError::usage(
-            "Process stage 'steps' must be a sequence.",
-        )),
+        TypedCommand::Dump(crate::controllers::command_model::DumpArgs {
+            output: Some(path),
+            ..
+        })
+        | TypedCommand::DumpCache(crate::controllers::command_model::DumpCacheArgs {
+            output: Some(path),
+        }) => {
+            if Path::new(path).is_relative() && path != "-" {
+                *path = base.join(&*path).to_string_lossy().into_owned();
+            }
+        }
+        TypedCommand::Partition(args) if Path::new(&args.output_dir).is_relative() => {
+            args.output_dir = base.join(&args.output_dir).to_string_lossy().into_owned();
+        }
+        _ => {}
     }
 }
 
@@ -194,8 +197,9 @@ pub(super) fn preflight(
     document: &RunDocument,
     parameters: &HashMap<String, ResolvedParameter>,
     config_path: &Path,
-) -> Result<(), QuiltError> {
+) -> Result<planner::ExecutionPlan, QuiltError> {
     let mut diagnostics = Vec::new();
+    let mut stages = Vec::with_capacity(document.stages.len());
     let mut names = HashMap::new();
     for (index, stage) in document.stages.iter().enumerate() {
         let stage_path = format!("stages[{index}]");
@@ -238,58 +242,74 @@ pub(super) fn preflight(
         }
         match stage {
             StageConfig::Process(process) => {
+                let mut steps = Vec::with_capacity(process.steps.len());
                 let mut finalizer_seen = false;
                 for (step_index, raw_step) in process.steps.iter().enumerate() {
-                    match parse_steps(&Value::Sequence(vec![raw_step.clone()])) {
-                        Ok(parsed) => {
-                            if let Some((_, command, args)) = parsed.into_iter().next() {
-                                match parse_automation_step(&command, &args) {
-                                    Ok(typed) => {
-                                        if let TypedCommand::Bucket(bucket) = &typed {
-                                            if let Err(error) = crate::operations::chainables::bucket::validate_interval(&bucket.interval) {
-                                                diagnostics.push(diagnostic(config_path, format!("{stage_path}.steps[{step_index}].bucket.interval"), error.to_string()));
-                                            }
-                                        }
-                                        if finalizer_seen
-                                            && !matches!(
-                                                typed.category(),
-                                                CommandCategory::Finalizer
-                                            )
-                                        {
-                                            diagnostics.push(diagnostic(
-                                                config_path,
-                                                format!(
-                                                    "{stage_path}.steps[{step_index}].{command}"
-                                                ),
-                                                "record step cannot follow a finalizer",
-                                            ));
-                                        }
-                                        finalizer_seen |=
-                                            matches!(typed.category(), CommandCategory::Finalizer);
-                                    }
-                                    Err(error) => diagnostics.push(diagnostic(
+                    let (command, args) = match parse_step(raw_step, step_index) {
+                        Ok(parsed) => parsed,
+                        Err(error) => {
+                            diagnostics.push(diagnostic(
+                                config_path,
+                                format!("{stage_path}.steps[{step_index}]"),
+                                error.to_string(),
+                            ));
+                            continue;
+                        }
+                    };
+                    match parse_automation_step(command, args) {
+                        Ok(mut typed) => {
+                            if let TypedCommand::Bucket(bucket) = &typed {
+                                if let Err(error) =
+                                    crate::operations::chainables::bucket::validate_interval(
+                                        &bucket.interval,
+                                    )
+                                {
+                                    diagnostics.push(diagnostic(
                                         config_path,
-                                        step_field_path(
-                                            &stage_path,
-                                            step_index,
-                                            &command,
-                                            &args,
-                                            &error.to_string(),
-                                        ),
+                                        format!("{stage_path}.steps[{step_index}].bucket.interval"),
                                         error.to_string(),
-                                    )),
+                                    ));
                                 }
                             }
+                            if finalizer_seen && typed.category() != CommandCategory::Finalizer {
+                                diagnostics.push(diagnostic(
+                                    config_path,
+                                    format!("{stage_path}.steps[{step_index}].{command}"),
+                                    "record step cannot follow a finalizer",
+                                ));
+                            }
+                            finalizer_seen |= typed.category() == CommandCategory::Finalizer;
+                            let load_paths_omitted = matches!(typed, TypedCommand::Load(_))
+                                && args.get("paths").is_none();
+                            resolve_command_paths(&mut typed, config_path);
+                            steps.push(PlannedStep {
+                                index: step_index,
+                                command: typed,
+                                load_paths_omitted,
+                            });
                         }
                         Err(error) => diagnostics.push(diagnostic(
                             config_path,
-                            format!("{stage_path}.steps[{step_index}]"),
+                            step_field_path(
+                                &stage_path,
+                                step_index,
+                                command,
+                                args,
+                                &error.to_string(),
+                            ),
                             error.to_string(),
                         )),
                     }
                 }
+                stages.push(StageConfig::Process(ProcessStage {
+                    name: process.name.clone(),
+                    source: process.source.clone(),
+                    steps,
+                    materialize: process.materialize,
+                }));
             }
             StageConfig::Join(join) => {
+                stages.push(StageConfig::Join(join.clone()));
                 if join.join.inputs.len() < 2 {
                     diagnostics.push(diagnostic(
                         config_path,
@@ -357,6 +377,7 @@ pub(super) fn preflight(
                 }
             }
             StageConfig::Concat(concat) => {
+                stages.push(StageConfig::Concat(concat.clone()));
                 if concat.concat.inputs.len() < 2 {
                     diagnostics.push(diagnostic(
                         config_path,
@@ -379,6 +400,7 @@ pub(super) fn preflight(
                 }
             }
             StageConfig::Branch(branch) => {
+                stages.push(StageConfig::Branch(branch.clone()));
                 let predicate_error = match &branch.branch.when {
                     BranchPredicate::RowCount { .. } => branch.branch.when.evaluate(0),
                     BranchPredicate::Parameter { .. } => branch
@@ -434,13 +456,14 @@ pub(super) fn preflight(
             }
         }
     }
-    if let Err(error) = planner::build(document) {
-        diagnostics.push(diagnostic(config_path, "stages", error.to_string()));
-    }
-    if diagnostics.is_empty() {
-        Ok(())
-    } else {
-        Err(QuiltError::validation(diagnostics))
+    match planner::build(&stages) {
+        Ok(plan) if diagnostics.is_empty() => Ok(plan),
+        result => {
+            if let Err(error) = result {
+                diagnostics.push(diagnostic(config_path, "stages", error.to_string()));
+            }
+            Err(QuiltError::validation(diagnostics))
+        }
     }
 }
 

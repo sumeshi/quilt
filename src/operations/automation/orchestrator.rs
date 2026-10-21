@@ -1,7 +1,7 @@
 //! Public run boundary. All execution remains on the shared typed executor
 //! and `PipelineState`; this module owns the explicit invocation context.
 
-use super::super::model::{BranchPredicate, RunDocument, StageConfig};
+use super::super::model::{BranchPredicate, PlannedStep, RunDocument, StageConfig};
 use super::diagnostics;
 use super::diagnostics::DiagnosticPolicy;
 use super::document;
@@ -15,7 +15,6 @@ use crate::controllers::pipeline::{Pipeline, PipelineState};
 use crate::controllers::resources::ExecutionResources;
 use crate::error::QuiltError;
 use polars::prelude::LazyFrame;
-use serde_yml::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
@@ -65,9 +64,8 @@ pub(super) fn run_impl(
             diagnostics
                 .sanitize_step_error(error, diagnostics.sensitive_locations.contains("version"))
         })?;
-        document::preflight(&run_document, &parameters, config_path)
+        let mut plan = document::preflight(&run_document, &parameters, config_path)
             .map_err(|error| diagnostics.sanitize_preflight_error(error))?;
-        let mut plan = planner::build(&run_document)?;
         if let Some(stage) = selected_stage {
             planner::select(&mut plan, stage)?;
         }
@@ -192,7 +190,6 @@ pub(super) fn run_impl(
                 .first()
                 .and_then(|source_name| stage_results.get(source_name));
             let mut process_step_context = executor::ExecuteStepContext {
-                config_path,
                 cli_input_files: cli_input_files.as_ref(),
                 results: &mut finalizer_results,
                 diagnostics: &diagnostics,
@@ -437,7 +434,7 @@ pub(super) fn run_impl(
 }
 
 fn release_dependencies(
-    stage: &StageConfig,
+    stage: &StageConfig<PlannedStep>,
     remaining: &mut HashMap<String, usize>,
     stages: &mut HashMap<String, Pipeline>,
 ) {
@@ -451,28 +448,12 @@ fn release_dependencies(
     }
 }
 
-fn step_command_name(step: &Value) -> Option<&str> {
-    step.as_mapping()?.keys().next()?.as_str()
-}
-
-pub(super) fn is_finalizer(step: &Value) -> bool {
-    step_command_name(step)
-        .and_then(|name| {
-            crate::controllers::command_model::command_specs()
-                .iter()
-                .find(|spec| spec.name == name)
-        })
-        .is_some_and(|spec| {
-            spec.category == crate::controllers::command_model::CommandCategory::Finalizer
-        })
-}
-
-fn stage_dump_count(stage: &StageConfig) -> usize {
+fn stage_dump_count(stage: &StageConfig<PlannedStep>) -> usize {
     match stage {
         StageConfig::Process(process) => process
             .steps
             .iter()
-            .filter(|step| step_command_name(step) == Some("dump"))
+            .filter(|step| matches!(step.command, TypedCommand::Dump(_)))
             .count(),
         _ => 0,
     }
@@ -480,7 +461,7 @@ fn stage_dump_count(stage: &StageConfig) -> usize {
 
 fn output_stage(
     order: &[String],
-    stages: &HashMap<String, StageConfig>,
+    stages: &HashMap<String, StageConfig<PlannedStep>>,
     selected: Option<&str>,
 ) -> Result<String, QuiltError> {
     if let Some(selected) = selected {
@@ -570,7 +551,11 @@ fn report_completed_files(
     }
 }
 
-fn stage_io_summary(stage: &StageConfig, name: &str, diagnostics: &DiagnosticPolicy) -> String {
+fn stage_io_summary(
+    stage: &StageConfig<PlannedStep>,
+    name: &str,
+    diagnostics: &DiagnosticPolicy,
+) -> String {
     if diagnostics.frame_is_sensitive(name) {
         return "I/O=<redacted>".into();
     }
@@ -580,40 +565,29 @@ fn stage_io_summary(stage: &StageConfig, name: &str, diagnostics: &DiagnosticPol
     process
         .steps
         .iter()
-        .filter_map(|step| {
-            let command = step_command_name(step)?;
-            if !matches!(command, "load" | "dump" | "dumpcache" | "partition") {
-                return None;
-            }
-            let value = step.as_mapping()?.values().next()?;
-            Some(format!(
-                "{command}={}",
-                serde_yml::to_string(value).unwrap_or_default().trim()
-            ))
+        .filter_map(|step| match &step.command {
+            TypedCommand::Load(args) => Some(format!("load={:?}", args.paths)),
+            TypedCommand::Dump(args) => Some(format!(
+                "dump={:?}",
+                args.output.as_deref().unwrap_or("<automatic>")
+            )),
+            TypedCommand::DumpCache(args) => Some(format!(
+                "dumpcache={:?}",
+                args.output.as_deref().unwrap_or("<automatic>")
+            )),
+            TypedCommand::Partition(args) => Some(format!("partition={:?}", args.output_dir)),
+            _ => None,
         })
         .collect::<Vec<_>>()
         .join("; ")
 }
 
-fn apply_cli_dump_override(steps: &mut [Value], path: &str) {
+fn apply_cli_dump_override(steps: &mut [PlannedStep], path: &str) {
     for step in steps.iter_mut().rev() {
-        let Some(mapping) = step.as_mapping_mut() else {
-            continue;
-        };
-        let key = Value::String("dump".into());
-        let Some(args) = mapping.get_mut(&key) else {
-            continue;
-        };
-        let mut output = match args {
-            Value::Mapping(existing) => existing.clone(),
-            _ => serde_yml::Mapping::new(),
-        };
-        output.insert(
-            Value::String("output".into()),
-            Value::String(path.to_string()),
-        );
-        *args = Value::Mapping(output);
-        return;
+        if let TypedCommand::Dump(args) = &mut step.command {
+            args.output = Some(path.to_string());
+            return;
+        }
     }
 }
 
@@ -664,9 +638,8 @@ pub(super) fn run_show_plan_impl(
             diagnostics
                 .sanitize_step_error(error, diagnostics.sensitive_locations.contains("version"))
         })?;
-        document::preflight(&prepared.document, &prepared.parameters, &config_path)
+        let mut plan = document::preflight(&prepared.document, &prepared.parameters, &config_path)
             .map_err(|error| diagnostics.sanitize_preflight_error(error))?;
-        let mut plan = planner::build(&prepared.document)?;
         planner::select(&mut plan, stage_name)?;
         diagnostics.propagate(&plan.order, &plan.stages);
         let cli_input_files = cli_input_files
@@ -679,7 +652,6 @@ pub(super) fn run_show_plan_impl(
             })
             .transpose()?;
         let mut context = executor::ExecuteStepContext {
-            config_path: &config_path,
             cli_input_files: cli_input_files.as_ref(),
             results: &mut Vec::new(),
             diagnostics: &diagnostics,
@@ -744,7 +716,7 @@ pub(super) fn run_show_plan_impl(
 
 pub(super) fn build_plan_stage(
     name: &str,
-    stages: &HashMap<String, StageConfig>,
+    stages: &HashMap<String, StageConfig<PlannedStep>>,
     cache: &mut HashMap<String, LazyFrame>,
     visiting: &mut HashSet<String>,
     context: &mut executor::ExecuteStepContext<'_>,
@@ -778,32 +750,19 @@ pub(super) fn build_plan_stage(
             let filtered = process
                 .steps
                 .iter()
-                .filter(|step| {
-                    step.as_mapping()
-                        .and_then(|mapping| mapping.keys().next())
-                        .and_then(|key| key.as_str())
-                        .and_then(|key| {
-                            crate::controllers::command_model::command_specs()
-                                .iter()
-                                .find(|spec| spec.name == key)
-                        })
-                        .is_none_or(|spec| {
-                            spec.category
-                                != crate::controllers::command_model::CommandCategory::Finalizer
-                        })
-                })
+                .filter(|step| !step.is_finalizer())
                 .cloned()
                 .collect::<Vec<_>>();
-            executor::execute_steps(
-                name,
-                &Value::Sequence(filtered),
-                dependencies
+            executor::execute_process(executor::ProcessRequest {
+                stage_name: name,
+                steps: &filtered,
+                input: dependencies
                     .first()
                     .and_then(|dependency| inputs.get(dependency))
                     .map(|pipeline| pipeline.frame().clone()),
                 context,
-                false,
-            )?
+                materialize: false,
+            })?
             .ok_or_else(|| {
                 QuiltError::usage(format!("run stage '{name}' did not produce a frame"))
             })?

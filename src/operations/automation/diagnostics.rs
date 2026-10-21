@@ -52,7 +52,9 @@ impl DiagnosticPolicy {
         order: &[String],
         stages: &std::collections::HashMap<
             String,
-            crate::operations::automation::model::StageConfig,
+            crate::operations::automation::model::StageConfig<
+                crate::operations::automation::model::PlannedStep,
+            >,
         >,
     ) {
         for name in order {

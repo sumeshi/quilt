@@ -115,14 +115,14 @@ pub enum MaterializePolicy {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(untagged)]
-pub enum StageConfig {
-    Process(ProcessStage),
+pub enum StageConfig<S = Value> {
+    Process(ProcessStage<S>),
     Join(JoinStage),
     Concat(ConcatStage),
     Branch(BranchStage),
 }
 
-impl StageConfig {
+impl<S> StageConfig<S> {
     pub(super) fn name(&self) -> &str {
         match self {
             Self::Process(v) => &v.name,
@@ -143,13 +143,29 @@ impl StageConfig {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
-pub struct ProcessStage {
+pub struct ProcessStage<S = Value> {
     pub name: String,
     #[serde(rename = "from")]
     pub source: Option<String>,
-    pub steps: Vec<Value>,
+    pub steps: Vec<S>,
     #[serde(default)]
     pub materialize: MaterializePolicy,
+}
+
+/// A validated command with its original YAML position. Filtering a plan must
+/// preserve this index for diagnostics and secret redaction.
+#[derive(Debug, Clone)]
+pub(super) struct PlannedStep {
+    pub index: usize,
+    pub command: crate::controllers::command_model::TypedCommand,
+    /// A load without paths inherits upstream data or positional input files.
+    pub load_paths_omitted: bool,
+}
+
+impl PlannedStep {
+    pub fn is_finalizer(&self) -> bool {
+        self.command.category() == crate::controllers::command_model::CommandCategory::Finalizer
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

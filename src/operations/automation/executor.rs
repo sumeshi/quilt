@@ -2,22 +2,18 @@
 
 use super::diagnostics::DiagnosticPolicy;
 use super::materialization;
-use crate::controllers::command_model::{
-    parse_automation_step, CommandCategory, DumpArgs, TypedCommand,
-};
+use crate::controllers::command_model::{CommandCategory, TypedCommand};
 use crate::controllers::executor::CommandExecutor;
 use crate::controllers::log::LogController;
 use crate::controllers::pipeline::Pipeline;
 use crate::controllers::resources::ExecutionResources;
 use crate::error::QuiltError;
-use crate::operations::automation::model::{ConcatStage, JoinStage};
+use crate::operations::automation::model::{ConcatStage, JoinStage, PlannedStep};
 use polars::prelude::{col, lit, Expr, JoinType, LazyFrame};
-use serde_yml::Value;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub(super) struct ExecuteStepContext<'a> {
-    pub(super) config_path: &'a Path,
     pub(super) cli_input_files: Option<&'a Vec<PathBuf>>,
     pub(super) results: &'a mut Vec<crate::operations::finalizers::FinalizerResult>,
     pub(super) diagnostics: &'a DiagnosticPolicy,
@@ -27,22 +23,10 @@ pub(super) struct ExecuteStepContext<'a> {
 
 pub(super) struct ProcessRequest<'steps, 'a, 'context> {
     pub stage_name: &'steps str,
-    pub steps: &'steps [Value],
+    pub steps: &'steps [PlannedStep],
     pub input: Option<LazyFrame>,
     pub context: &'context mut ExecuteStepContext<'a>,
     pub materialize: bool,
-}
-
-pub(super) fn execute_process(
-    request: ProcessRequest<'_, '_, '_>,
-) -> Result<Option<LazyFrame>, QuiltError> {
-    execute_steps(
-        request.stage_name,
-        &Value::Sequence(request.steps.to_vec()),
-        request.input,
-        request.context,
-        request.materialize,
-    )
 }
 
 pub(crate) fn step_error(
@@ -72,80 +56,48 @@ fn is_stdout_result(result: &crate::operations::finalizers::FinalizerResult) -> 
     )
 }
 
-pub(super) fn execute_steps(
-    stage_name: &str,
-    steps: &Value,
-    mut stage_output_df: Option<LazyFrame>,
-    step_context: &mut ExecuteStepContext<'_>,
-    materialize: bool,
+pub(super) fn execute_process(
+    request: ProcessRequest<'_, '_, '_>,
 ) -> Result<Option<LazyFrame>, QuiltError> {
-    let parsed_steps = super::document::parse_steps(steps)?;
-    let mut finalizer_seen = false;
+    let ProcessRequest {
+        stage_name,
+        steps,
+        input: mut stage_output_df,
+        context: step_context,
+        materialize,
+    } = request;
     let mut materialized = false;
 
-    for (step_index, raw_command_name, command_args_val) in parsed_steps {
-        let command_name = raw_command_name.as_str();
+    for step in steps {
+        let step_index = step.index;
+        let command_name = step.command.name();
         LogController::debug(&format!("Applying step {step_index}: {command_name}"));
-
-        let has_yaml_paths = command_args_val
-            .as_mapping()
-            .map(|mapping| {
-                mapping.contains_key(Value::String("path".to_string()))
-                    || mapping.contains_key(Value::String("paths".to_string()))
-            })
-            .unwrap_or(false);
-        if command_name == "load" && !has_yaml_paths && stage_output_df.is_some() {
+        if step.load_paths_omitted && stage_output_df.is_some() {
             LogController::debug("Skipping load because stage data already exists");
             continue;
         }
-
-        let command_args = if command_name == "load" && !has_yaml_paths {
-            let mut value = command_args_val.clone();
-            if let Some(mapping) = value.as_mapping_mut() {
-                let files = step_context.cli_input_files.ok_or_else(|| {
-                    step_error(
-                        stage_name,
-                        step_index,
-                        command_name,
-                        QuiltError::usage(format!(
-                            "No data source specified for load in stage '{stage_name}'."
-                        )),
-                    )
-                })?;
-                if files.is_empty() {
-                    return Err(step_error(
-                        stage_name,
-                        step_index,
-                        command_name,
-                        QuiltError::usage(format!(
-                            "No data source specified for load in stage '{stage_name}'."
-                        )),
-                    ));
-                }
-                mapping.insert(
-                    Value::String("paths".to_string()),
-                    Value::Sequence(
-                        files
-                            .iter()
-                            .map(|path| Value::String(path.to_string_lossy().into_owned()))
-                            .collect(),
-                    ),
-                );
-            }
-            value
-        } else {
-            command_args_val
-        };
         let sensitive_step = step_context
             .diagnostics
             .step_is_sensitive(stage_name, step_index);
-
-        let mut command = parse_automation_step(command_name, &command_args).map_err(|error| {
-            step_context.diagnostics.sanitize_step_error(
-                step_error(stage_name, step_index, command_name, error),
-                sensitive_step,
-            )
-        })?;
+        let mut command = step.command.clone();
+        if let TypedCommand::Load(load) = &mut command {
+            if step.load_paths_omitted {
+                load.paths = step_context
+                    .cli_input_files
+                    .filter(|files| !files.is_empty())
+                    .ok_or_else(|| {
+                        step_error(
+                            stage_name,
+                            step_index,
+                            command_name,
+                            QuiltError::usage(format!(
+                                "No data source specified for load in stage '{stage_name}'."
+                            )),
+                        )
+                    })?
+                    .clone();
+            }
+        }
 
         if materialize && !materialized && matches!(command.category(), CommandCategory::Finalizer)
         {
@@ -162,79 +114,6 @@ pub(super) fn execute_steps(
                 step_context.resources = resources;
                 materialized = true;
             }
-        }
-
-        if finalizer_seen && !matches!(command.category(), CommandCategory::Finalizer) {
-            return Err(step_context.diagnostics.sanitize_step_error(
-                step_error(
-                    stage_name,
-                    step_index,
-                    command_name,
-                    QuiltError::usage(format!(
-                        "Record step '{command_name}' cannot follow a finalizer in stage '{stage_name}'."
-                    )),
-                ),
-                sensitive_step,
-            ));
-        }
-
-        if let TypedCommand::Load(load) = &mut command {
-            for path in &mut load.paths {
-                if path.is_relative() {
-                    let config_relative = step_context
-                        .config_path
-                        .parent()
-                        .unwrap_or_else(|| Path::new("."))
-                        .join(&*path);
-                    *path = config_relative;
-                }
-            }
-        }
-        if let TypedCommand::Dump(DumpArgs {
-            output: Some(path), ..
-        }) = &mut command
-        {
-            let path_buf = PathBuf::from(&*path);
-            if path_buf.is_relative() && path_buf != Path::new("-") {
-                *path = step_context
-                    .config_path
-                    .parent()
-                    .unwrap_or_else(|| Path::new("."))
-                    .join(path_buf)
-                    .to_string_lossy()
-                    .into_owned();
-            }
-        }
-        if let TypedCommand::DumpCache(crate::controllers::command_model::DumpCacheArgs {
-            output: Some(path),
-        }) = &mut command
-        {
-            let path_buf = PathBuf::from(&*path);
-            if path_buf.is_relative() && path_buf != Path::new("-") {
-                *path = step_context
-                    .config_path
-                    .parent()
-                    .unwrap_or_else(|| Path::new("."))
-                    .join(path_buf)
-                    .to_string_lossy()
-                    .into_owned();
-            }
-        }
-        if let TypedCommand::Partition(args) = &mut command {
-            let path_buf = PathBuf::from(&args.output_dir);
-            if path_buf.is_relative() {
-                args.output_dir = step_context
-                    .config_path
-                    .parent()
-                    .unwrap_or_else(|| Path::new("."))
-                    .join(path_buf)
-                    .to_string_lossy()
-                    .into_owned();
-            }
-        }
-
-        if matches!(command.category(), CommandCategory::Finalizer) {
-            finalizer_seen = true;
         }
 
         if !matches!(command, TypedCommand::Load(_)) && stage_output_df.is_none() {
@@ -511,19 +390,22 @@ mod tests {
     use super::{execute_process, ExecuteStepContext, ProcessRequest};
     use crate::controllers::resources::ExecutionResources;
     use polars::{df, prelude::IntoLazy};
-    use serde_yml::Value;
-    use std::path::Path;
 
     #[test]
     fn process_preserves_artifact_resource_ownership() {
         let resources = ExecutionResources::new();
         let mut results = Vec::new();
         let diagnostics = DiagnosticPolicy::default();
-        let steps = vec![serde_yml::from_str::<Value>("{show: {debug: false}}").unwrap()];
+        let steps = vec![crate::operations::automation::model::PlannedStep {
+            index: 0,
+            command: crate::controllers::command_model::TypedCommand::Show(
+                crate::controllers::command_model::ShowArgs { debug: false },
+            ),
+            load_paths_omitted: false,
+        }];
 
         let output = {
             let mut context = ExecuteStepContext {
-                config_path: Path::new("run.yaml"),
                 cli_input_files: None,
                 results: &mut results,
                 diagnostics: &diagnostics,

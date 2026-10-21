@@ -4,10 +4,9 @@
 use crate::controllers::resources::ExecutionResources;
 use crate::error::QuiltError;
 use crate::operations::automation::model::{
-    BranchPredicate, MaterializePolicy, ResolvedParameter, StageConfig,
+    BranchPredicate, MaterializePolicy, PlannedStep, ResolvedParameter, StageConfig,
 };
 use polars::prelude::{LazyFrame, ScanArgsParquet};
-use serde_yml::Value;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
@@ -68,7 +67,7 @@ pub(super) fn materialize_frame(
     Ok((frame, owned))
 }
 
-fn stage_materialize_policy(stage: &StageConfig) -> MaterializePolicy {
+fn stage_materialize_policy(stage: &StageConfig<PlannedStep>) -> MaterializePolicy {
     match stage {
         StageConfig::Process(stage) => stage.materialize,
         StageConfig::Join(stage) => stage.materialize,
@@ -80,7 +79,7 @@ fn stage_materialize_policy(stage: &StageConfig) -> MaterializePolicy {
 #[cfg(test)]
 pub(super) fn materialization_decisions(
     stage_order: &[String],
-    stage_configs: &HashMap<String, StageConfig>,
+    stage_configs: &HashMap<String, StageConfig<PlannedStep>>,
 ) -> HashMap<String, MaterializationDecision> {
     materialization_decisions_with_output(stage_order, stage_configs, false, None, Path::new("."))
         .unwrap()
@@ -88,7 +87,7 @@ pub(super) fn materialization_decisions(
 
 pub(super) fn materialization_decisions_with_output(
     stage_order: &[String],
-    stage_configs: &HashMap<String, StageConfig>,
+    stage_configs: &HashMap<String, StageConfig<PlannedStep>>,
     output_consumer: bool,
     parameters: Option<&HashMap<String, ResolvedParameter>>,
     parameter_base: &Path,
@@ -169,12 +168,11 @@ pub(super) fn materialization_decisions_with_output(
                     .steps
                     .iter()
                     .filter(|step| {
-                        super::orchestrator::is_finalizer(step)
+                        step.is_finalizer()
                             && !matches!(
-                                step.as_mapping()
-                                    .and_then(|mapping| mapping.keys().next())
-                                    .and_then(Value::as_str),
-                                Some("headers" | "showquery")
+                                step.command,
+                                crate::controllers::command_model::TypedCommand::Headers(_)
+                                    | crate::controllers::command_model::TypedCommand::ShowQuery(_)
                             )
                     })
                     .count(),
@@ -213,7 +211,7 @@ pub(super) fn materialization_decisions_with_output(
 impl MaterializationPlan {
     pub(super) fn for_run(
         order: &[String],
-        stages: &HashMap<String, StageConfig>,
+        stages: &HashMap<String, StageConfig<PlannedStep>>,
         has_output: bool,
         parameters: Option<&HashMap<String, ResolvedParameter>>,
         base: &Path,
@@ -237,20 +235,21 @@ impl MaterializationPlan {
 mod tests {
     use super::MaterializationPlan;
     use crate::operations::automation::model::{MaterializePolicy, ProcessStage, StageConfig};
-    use serde_yml::Value;
     use std::collections::HashMap;
     use std::path::Path;
 
     #[test]
     fn never_policy_remains_non_materialized() {
-        let mut stages = HashMap::new();
+        let mut stages =
+            HashMap::<String, StageConfig<crate::operations::automation::model::PlannedStep>>::new(
+            );
         stages.insert(
             "input".into(),
             StageConfig::Process(ProcessStage {
                 name: "input".into(),
                 source: None,
                 materialize: MaterializePolicy::Never,
-                steps: vec![Value::Mapping(Default::default())],
+                steps: Vec::new(),
             }),
         );
         let plan =

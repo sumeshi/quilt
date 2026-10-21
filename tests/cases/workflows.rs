@@ -2,6 +2,41 @@ use crate::support::*;
 use serde_json::json;
 
 #[test]
+fn typed_steps_preserve_repeated_filters_inherited_inputs_and_dump_options() {
+    let root = tempfile::tempdir().unwrap();
+    let source = write(
+        root.path(),
+        "input.csv",
+        "value,kind\nalpha beta,one\nalpha,two\nbeta,three\n",
+    );
+    let mut workflow = json!({"version":1,"stages":[
+        {"name":"input","steps":[{"load":{}},{"grep":{"pattern":"alpha"}},{"grep":{"pattern":"beta"}}]},
+        {"name":"output","from":"input","steps":[{"load":{}},{"dump":{"output":"yaml.csv","separator":";"}}]}
+    ]});
+    let config = document(root.path(), "typed.yaml", workflow.clone());
+    let target = root.path().join("cli.csv");
+    execute(&[
+        "run",
+        config.to_str().unwrap(),
+        source.to_str().unwrap(),
+        "--output",
+        target.to_str().unwrap(),
+    ])
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(target).unwrap(),
+        "value;kind\nalpha beta;one\n"
+    );
+    assert!(!root.path().join("yaml.csv").exists());
+
+    // Explicit empty paths must fail rather than inherit the upstream frame.
+    workflow["stages"][1]["steps"][0]["load"] = json!({"paths":[]});
+    let config = document(root.path(), "explicit.yaml", workflow);
+    failure(&["run", config.to_str().unwrap(), source.to_str().unwrap()]);
+    assert!(!root.path().join("yaml.csv").exists());
+}
+
+#[test]
 fn dag_forward_references_join_and_fanout_concat_keep_values_and_order() {
     let root = tempfile::tempdir().unwrap();
     let left = write(root.path(), "left.csv", "*\n1\n2\n");
