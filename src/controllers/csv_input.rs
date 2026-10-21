@@ -888,7 +888,7 @@ mod tests {
             )
             .err()
             .unwrap();
-            let rendered = format!("{error:?}");
+            let rendered = error.to_string();
             assert!(rendered.contains("line 1"), "{rendered}");
             assert!(rendered.contains(expected_message), "{rendered}");
             assert!(
@@ -1018,7 +1018,7 @@ mod tests {
         )
         .err()
         .unwrap();
-        let rendered = format!("{err:?}");
+        let rendered = err.to_string();
         assert!(rendered.contains("line 3"), "{rendered}");
         assert!(rendered.contains("all-strings"), "{rendered}");
         assert!(
@@ -1102,7 +1102,7 @@ mod tests {
             },
             &resources,
         );
-        let rendered = format!("{:?}", result.err().unwrap());
+        let rendered = result.err().unwrap().to_string();
         assert!(rendered.contains("line 3"), "{rendered}");
         assert!(
             rendered.contains("malformed quoting cannot be quarantined safely"),
