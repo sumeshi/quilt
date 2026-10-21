@@ -1,6 +1,6 @@
 # Quilt
 [![MIT License](http://img.shields.io/badge/license-MIT-blue.svg?style=flat)](LICENSE)
-[![CI/CD Pipeline](https://github.com/sumeshi/quilt/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/sumeshi/quilt/actions/workflows/release.yml)
+[![CI](https://github.com/sumeshi/quilt/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sumeshi/quilt/actions/workflows/ci.yml)
 
 ![quilt](https://github.com/user-attachments/assets/06953756-430c-49d3-98bd-11c4b16c8bea)
 

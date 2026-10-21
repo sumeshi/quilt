@@ -1,7 +1,7 @@
 name: Release
 
 # Fires only when you publish a GitHub Release (you push, tag, and create the
-# release yourself). This workflow just builds the binaries and attaches them
+# release yourself). This workflow builds, checks the binaries and attaches them
 # to that release.
 on:
   release:
@@ -41,7 +41,16 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --locked --release --target ${{ matrix.target }}
+
+      - name: Smoke test release binary
+        shell: bash
+        run: |
+          binary="target/${{ matrix.target }}/release/qlt"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            binary+=".exe"
+          fi
+          "$binary" load tests/fixtures/jsonl-quality.jsonl - flatten - head 1 - show
 
       - name: Package binary
         shell: bash
