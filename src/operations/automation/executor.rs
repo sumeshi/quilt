@@ -7,6 +7,7 @@ use crate::controllers::command_model::{
 };
 use crate::controllers::executor::CommandExecutor;
 use crate::controllers::log::LogController;
+use crate::controllers::pipeline::Pipeline;
 use crate::controllers::resources::ExecutionResources;
 use crate::error::QuiltError;
 use crate::operations::automation::model::{ConcatStage, JoinStage};
@@ -319,7 +320,7 @@ pub(super) fn execute_steps(
 pub(super) fn execute_concat_stage(
     stage_name: &str,
     stage_config: &ConcatStage,
-    stage_results: &HashMap<String, LazyFrame>,
+    stage_results: &HashMap<String, Pipeline>,
 ) -> Result<LazyFrame, String> {
     let sources_vec = &stage_config.concat.inputs;
     if sources_vec.len() < 2 {
@@ -332,7 +333,7 @@ pub(super) fn execute_concat_stage(
     let mut missing_sources = Vec::new();
     for source_name in sources_vec {
         if let Some(source_df) = stage_results.get(source_name) {
-            dataframes_to_concat.push(source_df.clone());
+            dataframes_to_concat.push(source_df.frame().clone());
         } else {
             missing_sources.push(source_name.as_str());
         }
@@ -446,7 +447,7 @@ fn join_pair(
 pub(super) fn execute_join_stage(
     stage_name: &str,
     stage_config: &JoinStage,
-    stage_results: &HashMap<String, LazyFrame>,
+    stage_results: &HashMap<String, Pipeline>,
 ) -> Result<LazyFrame, String> {
     let sources = &stage_config.join.inputs;
     if sources.len() < 2 {
@@ -462,7 +463,7 @@ pub(super) fn execute_join_stage(
                 "Could not find source DataFrame '{source_name}' for join stage '{stage_name}'."
             )
         })?;
-        dataframes.push(df.clone());
+        dataframes.push(df.frame().clone());
     }
     let how_str = stage_config
         .join

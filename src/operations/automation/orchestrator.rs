@@ -78,10 +78,7 @@ pub(super) fn run_impl(
             "Executing run document with {} stage entries",
             run_document.stages.len()
         ));
-        let mut stage_results: HashMap<String, LazyFrame> = HashMap::new();
-        let mut resources_by_stage = HashMap::<String, ExecutionResources>::new();
-        let mut source_inventories =
-            HashMap::<String, crate::controllers::pipeline::SourceInventory>::new();
+        let mut stage_results = HashMap::<String, Pipeline>::new();
         if output_path_str == Some("-") {
             return Err(QuiltError::usage(
                 "run --output requires a file path; use a show step for stdout",
@@ -132,8 +129,7 @@ pub(super) fn run_impl(
             .collect::<Vec<_>>()
             .join(", ");
         eprintln!("run: stages [{selected}]; disk intermediates [{disk}]");
-        let mut last_processed_df: Option<(LazyFrame, ExecutionResources)> = None;
-        let mut last_source_inventory = None;
+        let mut last_processed = None;
         let mut remaining_consumers = HashMap::<String, usize>::new();
         for stage in stage_configs.values() {
             for dependency in stage.dependencies() {
@@ -151,8 +147,6 @@ pub(super) fn run_impl(
                     &stage_configs[&stage_name],
                     &mut remaining_consumers,
                     &mut stage_results,
-                    &mut resources_by_stage,
-                    &mut source_inventories,
                 );
                 continue;
             }
@@ -187,23 +181,16 @@ pub(super) fn run_impl(
                         skipped_stages.insert(target.clone());
                     }
                 }
-                release_dependencies(
-                    stage_config,
-                    &mut remaining_consumers,
-                    &mut stage_results,
-                    &mut resources_by_stage,
-                    &mut source_inventories,
-                );
+                release_dependencies(stage_config, &mut remaining_consumers, &mut stage_results);
                 continue;
             }
 
             LogController::debug("Processing stage");
 
-            let current_stage_input_df = stage_config
+            let current_stage_input = stage_config
                 .dependencies()
                 .first()
-                .and_then(|source_name| stage_results.get(source_name))
-                .cloned();
+                .and_then(|source_name| stage_results.get(source_name));
             let mut process_step_context = executor::ExecuteStepContext {
                 config_path,
                 cli_input_files: cli_input_files.as_ref(),
@@ -213,14 +200,11 @@ pub(super) fn run_impl(
                     stage_config
                         .dependencies()
                         .iter()
-                        .filter_map(|dependency| resources_by_stage.get(dependency).cloned())
+                        .filter_map(|dependency| stage_results.get(dependency))
+                        .map(Pipeline::resources)
                         .collect(),
                 ),
-                source_inventory: stage_config
-                    .dependencies()
-                    .first()
-                    .and_then(|source| source_inventories.get(source))
-                    .cloned(),
+                source_inventory: current_stage_input.and_then(Pipeline::source_inventory),
             };
 
             let mut stage_output_df = match stage_config {
@@ -241,7 +225,7 @@ pub(super) fn run_impl(
                     executor::execute_process(executor::ProcessRequest {
                         stage_name: &stage_name,
                         steps,
-                        input: current_stage_input_df.clone(),
+                        input: current_stage_input.map(|pipeline| pipeline.frame().clone()),
                         context: &mut process_step_context,
                         materialize: materialization.should_materialize(&stage_name),
                     })?
@@ -271,14 +255,16 @@ pub(super) fn run_impl(
                     // output. Prevent an input frame from becoming an
                     // unrelated fallback --output result when both routes
                     // are empty.
-                    last_processed_df = None;
-                    let input_df = current_stage_input_df.ok_or_else(|| {
-                        QuiltError::automation(
-                            &stage_name,
-                            None,
-                            "Branch stage requires a valid input stage",
-                        )
-                    })?;
+                    last_processed = None;
+                    let input_df = current_stage_input
+                        .map(|pipeline| pipeline.frame().clone())
+                        .ok_or_else(|| {
+                            QuiltError::automation(
+                                &stage_name,
+                                None,
+                                "Branch stage requires a valid input stage",
+                            )
+                        })?;
                     let condition_result = match &branch.branch.when {
                         BranchPredicate::RowCount { .. } => {
                             let rows = input_df
@@ -341,14 +327,14 @@ pub(super) fn run_impl(
                 }
             };
 
-            if matches!(
+            let source_inventory = if matches!(
                 stage_config,
                 StageConfig::Process(_) | StageConfig::Branch(_)
             ) {
-                if let Some(inventory) = process_step_context.source_inventory.take() {
-                    source_inventories.insert(stage_name.clone(), inventory);
-                }
-            }
+                process_step_context.source_inventory.take()
+            } else {
+                None
+            };
             let mut stage_resources = process_step_context.resources.clone();
             drop(process_step_context);
 
@@ -368,27 +354,21 @@ pub(super) fn run_impl(
                     stage_resources = resources;
                 }
             }
-            if let Some(df_to_store) = &stage_output_df {
-                stage_results.insert(stage_name.clone(), df_to_store.clone());
-                resources_by_stage.insert(stage_name.clone(), stage_resources.clone());
+            if let Some(frame) = stage_output_df {
+                let pipeline =
+                    Pipeline::new(frame, stage_resources).with_source_inventory(source_inventory);
                 if !matches!(stage_config, StageConfig::Branch(_))
                     && output_stage.as_ref().is_none_or(|name| name == &stage_name)
                 {
-                    last_processed_df = Some((df_to_store.clone(), stage_resources.clone()));
-                    last_source_inventory = source_inventories.get(&stage_name).cloned();
+                    last_processed = Some(pipeline.clone());
                 }
+                stage_results.insert(stage_name.clone(), pipeline);
                 LogController::debug("Finished processing stage; result stored");
             } else {
                 LogController::warn("Stage did not produce a DataFrame");
             }
             executed += 1;
-            release_dependencies(
-                stage_config,
-                &mut remaining_consumers,
-                &mut stage_results,
-                &mut resources_by_stage,
-                &mut source_inventories,
-            );
+            release_dependencies(stage_config, &mut remaining_consumers, &mut stage_results);
             if remaining_consumers
                 .get(&stage_name)
                 .copied()
@@ -396,14 +376,12 @@ pub(super) fn run_impl(
                 == 0
             {
                 stage_results.remove(&stage_name);
-                resources_by_stage.remove(&stage_name);
-                source_inventories.remove(&stage_name);
             }
         }
 
         LogController::info("Run document execution processing finished");
         if let Some(absolute_path) = cli_output_path.filter(|_| !dump_overridden) {
-            if let Some((final_df_to_dump, resources)) = last_processed_df {
+            if let Some(pipeline) = last_processed {
                 LogController::info("Saving final run output");
                 if let Some(parent) = absolute_path.parent() {
                     if !parent.exists() {
@@ -416,8 +394,7 @@ pub(super) fn run_impl(
                         })?;
                     }
                 }
-                let mut output_executor =
-                    CommandExecutor::from_frame_with_resources(final_df_to_dump, resources);
+                let mut output_executor = CommandExecutor::from_pipeline(pipeline);
                 output_executor
                     .execute(&TypedCommand::Dump(DumpArgs {
                         output: Some(absolute_path.to_string_lossy().into_owned()),
@@ -438,11 +415,8 @@ pub(super) fn run_impl(
                 );
             }
         } else if output_path_str.is_none() {
-            if let Some((final_df_state, resources)) = last_processed_df {
-                *controller = PipelineState::Loaded(Box::new(
-                    Pipeline::new(final_df_state, resources)
-                        .with_source_inventory(last_source_inventory),
-                ));
+            if let Some(pipeline) = last_processed {
+                *controller = PipelineState::Loaded(Box::new(pipeline));
             }
             LogController::debug(
             "Run document finished. Output handled by YAML finalizer steps or by main CLI flow if no explicit output/show in YAML.",
@@ -465,17 +439,13 @@ pub(super) fn run_impl(
 fn release_dependencies(
     stage: &StageConfig,
     remaining: &mut HashMap<String, usize>,
-    frames: &mut HashMap<String, LazyFrame>,
-    resources: &mut HashMap<String, ExecutionResources>,
-    inventories: &mut HashMap<String, crate::controllers::pipeline::SourceInventory>,
+    stages: &mut HashMap<String, Pipeline>,
 ) {
     for dependency in stage.dependencies() {
         if let Some(count) = remaining.get_mut(&dependency) {
             *count -= 1;
             if *count == 0 {
-                frames.remove(&dependency);
-                resources.remove(&dependency);
-                inventories.remove(&dependency);
+                stages.remove(&dependency);
             }
         }
     }
@@ -713,7 +683,7 @@ pub(super) fn run_show_plan_impl(
             cli_input_files: cli_input_files.as_ref(),
             results: &mut Vec::new(),
             diagnostics: &diagnostics,
-            resources: crate::controllers::resources::ExecutionResources::new_plan(),
+            resources: ExecutionResources::new_plan(),
             source_inventory: None,
         };
         let frame = build_plan_stage(
@@ -797,7 +767,10 @@ pub(super) fn build_plan_stage(
     for dependency in &dependencies {
         inputs.insert(
             dependency.clone(),
-            build_plan_stage(dependency, stages, cache, visiting, context)?,
+            Pipeline::new(
+                build_plan_stage(dependency, stages, cache, visiting, context)?,
+                context.resources.clone(),
+            ),
         );
     }
     let frame = match stage {
@@ -826,7 +799,8 @@ pub(super) fn build_plan_stage(
                 &Value::Sequence(filtered),
                 dependencies
                     .first()
-                    .and_then(|dependency| inputs.get(dependency).cloned()),
+                    .and_then(|dependency| inputs.get(dependency))
+                    .map(|pipeline| pipeline.frame().clone()),
                 context,
                 false,
             )?
