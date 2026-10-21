@@ -1,5 +1,5 @@
 use chrono::{DateTime, Local};
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 pub struct LogController;
 impl LogController {
     pub fn debug(msg: &str) {
@@ -13,10 +13,6 @@ impl LogController {
     pub fn warn(msg: &str) {
         let timestamp = Self::get_timestamp();
         warn!("[{timestamp}] {msg}");
-    }
-    pub fn error(msg: &str) {
-        let timestamp = Self::get_timestamp();
-        error!("[{timestamp}] {msg}");
     }
     fn get_timestamp() -> String {
         let now: DateTime<Local> = Local::now();

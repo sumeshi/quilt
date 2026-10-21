@@ -65,7 +65,6 @@ impl ParserDiagnostics {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedDateTime {
     pub value: NaiveDateTime,
-    pub family: ParserFamily,
     pub authoritative_offset: bool,
 }
 
@@ -267,13 +266,6 @@ fn fuzzy_formats(value: &str) -> Vec<(NaiveDateTime, ParserFamily)> {
     parsed
 }
 
-pub fn parse_datetime_detailed(
-    value: &str,
-    config: &DateTimeConfig,
-) -> Result<Option<ParsedDateTime>, String> {
-    parse_datetime_detailed_with_diagnostics(value, config, None)
-}
-
 pub fn parse_datetime_detailed_with_diagnostics(
     value: &str,
     config: &DateTimeConfig,
@@ -292,7 +284,6 @@ pub fn parse_datetime_detailed_with_diagnostics(
                 }
                 Some(ParsedDateTime {
                     value,
-                    family: ParserFamily::ExplicitFormat,
                     authoritative_offset,
                 })
             })
@@ -304,7 +295,6 @@ pub fn parse_datetime_detailed_with_diagnostics(
         }
         return Ok(Some(ParsedDateTime {
             value: value.naive_utc(),
-            family: ParserFamily::Rfc3339,
             authoritative_offset: true,
         }));
     }
@@ -318,7 +308,6 @@ pub fn parse_datetime_detailed_with_diagnostics(
         }
         return Ok(Some(ParsedDateTime {
             value,
-            family,
             authoritative_offset: false,
         }));
     }
@@ -332,7 +321,6 @@ pub fn parse_datetime_detailed_with_diagnostics(
             }
             Some(ParsedDateTime {
                 value,
-                family: ParserFamily::Epoch,
                 authoritative_offset: false,
             })
         });
@@ -349,19 +337,11 @@ pub fn parse_datetime_detailed_with_diagnostics(
             }
             Ok(Some(ParsedDateTime {
                 value: *value,
-                family: *family,
                 authoritative_offset: false,
             }))
         }
         _ => Err("datetime is ambiguous; provide --input-format".into()),
     }
-}
-
-pub fn parse_datetime(
-    value: &str,
-    config: &DateTimeConfig,
-) -> Result<Option<NaiveDateTime>, String> {
-    Ok(parse_datetime_detailed(value, config)?.map(|parsed| parsed.value))
 }
 
 pub fn localize(
@@ -454,9 +434,16 @@ mod tests {
     use super::*;
     use chrono::Timelike;
 
+    fn parsed_value(value: &str, config: &DateTimeConfig) -> Result<Option<NaiveDateTime>, String> {
+        Ok(
+            parse_datetime_detailed_with_diagnostics(value, config, None)?
+                .map(|parsed| parsed.value),
+        )
+    }
+
     #[test]
     fn parses_offsets_and_iso_as_microsecond_naive_utc() {
-        let value = parse_datetime(
+        let value = parsed_value(
             "2024-01-02T03:04:05.123456+09:00",
             &DateTimeConfig::default(),
         )
@@ -464,7 +451,7 @@ mod tests {
         .unwrap();
         assert_eq!(value.to_string(), "2024-01-01 18:04:05.123456");
         assert_eq!(
-            parse_datetime("2024-01-02", &DateTimeConfig::default())
+            parsed_value("2024-01-02", &DateTimeConfig::default())
                 .unwrap()
                 .unwrap()
                 .time(),
@@ -474,9 +461,9 @@ mod tests {
 
     #[test]
     fn strict_disables_fuzzy_and_numeric_dates_are_ambiguous() {
-        let fuzzy = parse_datetime("01/02/2024", &DateTimeConfig::default());
+        let fuzzy = parsed_value("01/02/2024", &DateTimeConfig::default());
         assert!(fuzzy.unwrap_err().contains("ambiguous"));
-        let strict = parse_datetime(
+        let strict = parsed_value(
             "01/02/2024",
             &DateTimeConfig {
                 strict: true,
@@ -484,7 +471,7 @@ mod tests {
             },
         );
         assert!(strict.unwrap_err().contains("strict"));
-        let explicit = parse_datetime(
+        let explicit = parsed_value(
             "01/02/2024",
             &DateTimeConfig {
                 input_format: Some("%d/%m/%Y".into()),
@@ -504,7 +491,7 @@ mod tests {
             (EpochUnit::Milliseconds, "-1"),
             (EpochUnit::Microseconds, "-1"),
         ] {
-            let parsed = parse_datetime(
+            let parsed = parsed_value(
                 value,
                 &DateTimeConfig {
                     epoch_unit: Some(unit),
@@ -521,7 +508,7 @@ mod tests {
                 assert_eq!(parsed.to_string(), expected);
             }
         }
-        assert!(parse_datetime(
+        assert!(parsed_value(
             "1",
             &DateTimeConfig {
                 epoch_unit: Some(EpochUnit::Nanoseconds),

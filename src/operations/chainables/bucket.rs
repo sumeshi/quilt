@@ -21,15 +21,6 @@ pub fn validate_interval(interval: &str) -> Result<(), QuiltError> {
     })
 }
 
-pub fn bucket(
-    df: &LazyFrame,
-    column: &str,
-    interval: &str,
-    output: Option<&str>,
-) -> Result<LazyFrame, QuiltError> {
-    bucket_with_config(df, column, interval, output, DateTimeConfig::default())
-}
-
 pub fn bucket_with_config(
     df: &LazyFrame,
     column: &str,

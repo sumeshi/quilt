@@ -39,17 +39,6 @@ impl CommandExecutor {
         }
     }
 
-    pub fn from_frame(frame: polars::prelude::LazyFrame) -> Self {
-        Self::from_frame_with_resources(frame, ExecutionResources::new())
-    }
-
-    pub fn from_frame_with_resources(
-        frame: polars::prelude::LazyFrame,
-        resources: ExecutionResources,
-    ) -> Self {
-        Self::from_pipeline(Pipeline::new(frame, resources))
-    }
-
     pub fn from_pipeline(pipeline: Pipeline) -> Self {
         Self {
             controller: PipelineState::Loaded(Box::new(pipeline)),
@@ -72,10 +61,6 @@ impl CommandExecutor {
         &mut self,
     ) -> Vec<crate::operations::finalizers::FinalizerResult> {
         std::mem::take(&mut self.results)
-    }
-
-    pub fn resources(&self) -> ExecutionResources {
-        self.controller.resources()
     }
 
     pub fn execute_plan(&mut self, commands: &[TypedCommand]) -> Result<CommandResult, QuiltError> {
@@ -281,22 +266,13 @@ impl CommandExecutor {
                     &args.datetime,
                 )?;
             }
-            TypedCommand::Show(ShowArgs { debug, format }) => {
+            TypedCommand::Show(ShowArgs { format }) => {
                 let pipeline = self.controller.loaded("show")?;
                 let result = match format {
                     OutputFormat::Csv => pipeline.show_result()?,
                     OutputFormat::Jsonl => pipeline.show_jsonl_result()?,
                 };
-                self.results.push(if *debug {
-                    match result {
-                        crate::operations::finalizers::FinalizerResult::Stdout(text) => {
-                            crate::operations::finalizers::FinalizerResult::Stderr(text)
-                        }
-                        other => other,
-                    }
-                } else {
-                    result
-                });
+                self.results.push(result);
             }
             TypedCommand::ShowTable(_) => {
                 self.results
@@ -538,7 +514,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, QuiltError::Usage { .. }));
         assert_eq!(
-            executor.resources().tracked_count(),
+            executor.controller.resources().tracked_count(),
             resources.tracked_count()
         );
     }
@@ -554,7 +530,6 @@ mod tests {
             .unwrap();
         assert!(matches!(
             executor.execute(&TypedCommand::Show(ShowArgs {
-                debug: false,
                 format: Default::default()
             })),
             Ok(CommandResult::Finalizer(_))
@@ -600,7 +575,6 @@ mod tests {
             .unwrap();
         assert!(executor
             .execute(&TypedCommand::Show(ShowArgs {
-                debug: false,
                 format: Default::default()
             }))
             .is_err());

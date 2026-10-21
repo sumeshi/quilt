@@ -4,7 +4,6 @@ use polars::prelude::*;
 use quilt::controllers::{
     command_model::parse_typed_commands, executor::CommandExecutor, resources::ExecutionResources,
 };
-use quilt::operations::initializers::load::load_with_ndjson_inference_with_resources;
 use serde_json::{json, Value};
 use std::io::Write;
 
@@ -533,19 +532,14 @@ fn gzip_members_integrity_and_execution_owned_spools() {
     assert!(paths.iter().all(|p| !p.exists()));
     std::fs::write(&source, &bytes[..bytes.len() - 5]).unwrap();
     let resources = ExecutionResources::new_in(spool_dir.clone());
-    assert!(load_with_ndjson_inference_with_resources(
-        &[source],
-        ",",
-        false,
-        false,
-        None,
-        None,
-        None,
-        &resources
-    )
-    .err()
-    .unwrap()
-    .to_string()
-    .contains("decompress gzip"));
+    let command = parse_typed_commands(&["load".into(), source.to_string_lossy().into_owned()])
+        .unwrap()
+        .remove(0);
+    let mut executor = CommandExecutor::new_with_resources(resources);
+    assert!(executor
+        .execute(&command)
+        .unwrap_err()
+        .to_string()
+        .contains("decompress gzip"));
     assert_eq!(std::fs::read_dir(spool_dir).unwrap().count(), 0);
 }

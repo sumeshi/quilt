@@ -24,9 +24,7 @@ pub fn execute(args: &[&str]) -> Result<CommandExecutor, QuiltError> {
 pub fn output(results: &[FinalizerResult]) -> String {
     let mut bytes = Vec::new();
     for result in results {
-        if !matches!(result, FinalizerResult::Stderr(_)) {
-            write_stdout(result, &mut bytes).unwrap();
-        }
+        write_stdout(result, &mut bytes).unwrap();
     }
     String::from_utf8(bytes).unwrap()
 }
@@ -64,13 +62,8 @@ pub fn frame(args: &[&str]) -> DataFrame {
     for command in &commands {
         executor.execute(command).unwrap();
     }
-    executor
-        .into_pipeline()
-        .unwrap()
-        .into_parts()
-        .0
-        .collect()
-        .unwrap()
+    let pipeline = executor.into_pipeline().unwrap();
+    pipeline.frame().clone().collect().unwrap()
 }
 
 pub fn write(root: &Path, name: &str, contents: impl AsRef<[u8]>) -> PathBuf {

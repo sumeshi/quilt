@@ -19,10 +19,6 @@ fn integral_dtype(dtype: &DataType) -> bool {
     )
 }
 
-pub fn delta(df: &LazyFrame, column: &str, output: Option<&str>) -> Result<LazyFrame, QuiltError> {
-    delta_with_groups(df, column, output, &[])
-}
-
 /// Add a delta column, resetting the previous-row comparison at each group.
 /// Rows retain their input order within each group; the result itself remains
 /// in its original order.
@@ -140,7 +136,10 @@ mod tests {
         let frame = df!("t" => [0i64, 2]).unwrap().lazy().with_columns([
             literal_col("t").cast(DataType::Datetime(TimeUnit::Milliseconds, None))
         ]);
-        let out = delta(&frame, "t", None).unwrap().collect().unwrap();
+        let out = delta_with_groups(&frame, "t", None, &[])
+            .unwrap()
+            .collect()
+            .unwrap();
         let value = out
             .column("t_delta")
             .unwrap()

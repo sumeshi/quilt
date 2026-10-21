@@ -11,8 +11,7 @@ use std::sync::Arc;
 /// the remaining records and reject late fields instead of dropping them.
 pub const DEFAULT_NDJSON_INFER_SCHEMA_LENGTH: Option<usize> = None;
 
-/// Optional input behaviors used by the command layer. Existing callers can keep
-/// using the compatibility wrappers below.
+/// Optional input behaviors used by the command layer.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LoadOptions<'a> {
     pub stdin_format: Option<&'a str>,
@@ -66,53 +65,6 @@ pub(crate) fn expand_input_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>, Quil
     }
 
     Ok(expanded_paths)
-}
-
-pub fn load(
-    paths: &[PathBuf],
-    separator: &str,
-    low_memory: bool,
-    no_headers: bool,
-    chunk_size: Option<usize>,
-    resources: &ExecutionResources,
-) -> Result<LazyFrame, QuiltError> {
-    load_with_options(
-        paths,
-        separator,
-        low_memory,
-        no_headers,
-        chunk_size,
-        DEFAULT_NDJSON_INFER_SCHEMA_LENGTH,
-        None,
-        LoadOptions::default(),
-        resources,
-    )
-}
-
-/// Load input with full NDJSON validation and lossless integer inference.
-/// `infer_schema_length == None` discovers all fields; bounded discovery rejects late fields.
-#[allow(clippy::too_many_arguments)]
-pub fn load_with_ndjson_inference_with_resources(
-    paths: &[PathBuf],
-    separator: &str,
-    low_memory: bool,
-    no_headers: bool,
-    chunk_size: Option<usize>,
-    infer_schema_length: Option<usize>,
-    source_column: Option<&str>,
-    resources: &ExecutionResources,
-) -> Result<LazyFrame, QuiltError> {
-    load_with_options(
-        paths,
-        separator,
-        low_memory,
-        no_headers,
-        chunk_size,
-        infer_schema_length,
-        source_column,
-        LoadOptions::default(),
-        resources,
-    )
 }
 
 /// Load with stdin selection and optional NDJSON quarantine.

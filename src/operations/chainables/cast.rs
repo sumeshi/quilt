@@ -5,10 +5,6 @@ use crate::operations::datetime::{
 };
 use polars::prelude::*;
 
-pub fn cast(df: &LazyFrame, column: &str, target: &str) -> Result<LazyFrame, QuiltError> {
-    cast_with_config(df, column, target, &DateTimeConfig::default())
-}
-
 pub fn cast_with_config(
     df: &LazyFrame,
     column: &str,

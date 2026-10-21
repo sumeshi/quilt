@@ -1,8 +1,8 @@
 use crate::controllers::nested::literal_col;
 use crate::error::QuiltError;
 use crate::operations::datetime::{
-    localize, localize_local, parse_ambiguous_policy, parse_datetime_detailed_with_diagnostics,
-    AmbiguousPolicy, DateTimeConfig, NonexistentPolicy, ParserDiagnostics,
+    localize, localize_local, parse_datetime_detailed_with_diagnostics, DateTimeConfig,
+    ParserDiagnostics,
 };
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
@@ -31,37 +31,6 @@ fn convert_timezone(
     let target = utc.with_timezone(&target);
     let format = output_format.unwrap_or("%Y-%m-%dT%H:%M:%S%.6f%:z");
     Ok(target.format(format).to_string())
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn changetz(
-    df: &LazyFrame,
-    colname: &str,
-    from_tz: &str,
-    to_tz: &str,
-    input_format: Option<&str>,
-    output_format: Option<&str>,
-    ambiguous_time: Option<&str>,
-    nonexistent_time: Option<&str>,
-) -> Result<LazyFrame, QuiltError> {
-    let config = DateTimeConfig {
-        input_format: input_format.map(ToOwned::to_owned),
-        ambiguous: ambiguous_time
-            .map(parse_ambiguous_policy)
-            .transpose()
-            .map_err(QuiltError::usage)?
-            .unwrap_or(AmbiguousPolicy::Error),
-        nonexistent: nonexistent_time
-            .map(crate::operations::datetime::parse_nonexistent_policy)
-            .transpose()
-            .map_err(QuiltError::usage)?
-            .unwrap_or(NonexistentPolicy::Error),
-        options_present: input_format.is_some()
-            || ambiguous_time.is_some()
-            || nonexistent_time.is_some(),
-        ..DateTimeConfig::default()
-    };
-    changetz_with_config(df, colname, from_tz, to_tz, output_format, config)
 }
 
 pub fn changetz_with_config(

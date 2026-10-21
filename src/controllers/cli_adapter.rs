@@ -606,7 +606,6 @@ fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
         OperationId::Show => {
             args(&raw, 0, Some(0), "show")?;
             Ok(TypedCommand::Show(ShowArgs {
-                debug: flag(&raw, "debug"),
                 format: val(&raw, "format")
                     .as_deref()
                     .map(OutputFormat::parse)

@@ -9,7 +9,6 @@ use crate::operations::finalizers::{
 };
 use crate::operations::initializers::load;
 use polars::prelude::*;
-use std::path::PathBuf;
 
 /// A valid lazy pipeline and the resources that keep its managed inputs and
 /// intermediate artifacts alive. Cloning a pipeline intentionally clones both.
@@ -53,10 +52,6 @@ impl PipelineState {
             ))),
         }
     }
-    pub fn replace_with_frame(&mut self, frame: LazyFrame) {
-        let resources = self.resources();
-        *self = Self::Loaded(Box::new(Pipeline::new(frame, resources)));
-    }
     pub fn into_pipeline(self) -> Option<Pipeline> {
         match self {
             Self::Loaded(p) => Some(*p),
@@ -86,49 +81,9 @@ impl Pipeline {
         self.source_inventory = inventory;
         self
     }
-    pub fn set_source_inventory(&mut self, inventory: Option<SourceInventory>) {
-        self.source_inventory = inventory;
-    }
     pub fn into_parts(self) -> (LazyFrame, ExecutionResources) {
         (self.frame, self.resources)
     }
-    #[allow(clippy::too_many_arguments)]
-    pub fn load(
-        paths: &[PathBuf],
-        separator: &str,
-        low_memory: bool,
-        no_headers: bool,
-        chunk_size: Option<usize>,
-        infer_schema_length: Option<usize>,
-        source_column: Option<&str>,
-        resources: ExecutionResources,
-    ) -> Result<Self, QuiltError> {
-        let frame = load::load_with_ndjson_inference_with_resources(
-            paths,
-            separator,
-            low_memory,
-            no_headers,
-            chunk_size,
-            infer_schema_length,
-            source_column,
-            &resources,
-        )?;
-        let inventory = source_column
-            .map(|name| {
-                load::expand_input_paths(paths).map(|paths| {
-                    (
-                        name.to_owned(),
-                        paths
-                            .iter()
-                            .map(|path| path.to_string_lossy().into_owned())
-                            .collect(),
-                    )
-                })
-            })
-            .transpose()?;
-        Ok(Self::new(frame, resources).with_source_inventory(inventory))
-    }
-
     pub fn load_args(
         args: &crate::controllers::arguments::LoadArgs,
         resources: ExecutionResources,
@@ -262,11 +217,6 @@ impl Pipeline {
         datetime: crate::operations::datetime::DateTimeConfig,
     ) -> Result<&mut Self, QuiltError> {
         self.frame = bucket::bucket_with_config(&self.frame, colname, interval, output, datetime)?;
-        Ok(self)
-    }
-
-    pub fn delta(&mut self, colname: &str, output: Option<&str>) -> Result<&mut Self, QuiltError> {
-        self.frame = delta::delta(&self.frame, colname, output)?;
         Ok(self)
     }
 

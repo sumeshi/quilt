@@ -14,15 +14,26 @@ mod tests {
     #[test]
     fn cast_returns_classified_error_and_successful_chain_remains_usable() {
         let frame = df!("value" => &["1", "2"]).unwrap().lazy();
-        let cast = crate::operations::chainables::cast::cast(&frame, "value", "int").unwrap();
+        let cast = crate::operations::chainables::cast::cast_with_config(
+            &frame,
+            "value",
+            "int",
+            &Default::default(),
+        )
+        .unwrap();
         let selected = crate::operations::chainables::head::head(&cast, 1).unwrap();
         assert_eq!(selected.collect().unwrap().height(), 1);
 
         let bad = df!("value" => &["not-an-int"]).unwrap().lazy();
-        let error = crate::operations::chainables::cast::cast(&bad, "value", "int")
-            .unwrap()
-            .collect()
-            .expect_err("invalid conversion should surface at finalization");
+        let error = crate::operations::chainables::cast::cast_with_config(
+            &bad,
+            "value",
+            "int",
+            &Default::default(),
+        )
+        .unwrap()
+        .collect()
+        .expect_err("invalid conversion should surface at finalization");
         assert!(error.to_string().contains("conversion"));
         assert!(error.to_string().contains("value"));
     }
@@ -35,12 +46,15 @@ mod tests {
         };
         assert!(matches!(separator_error, QuiltError::Usage { .. }));
 
-        let missing_path = crate::operations::initializers::load::load(
+        let missing_path = crate::operations::initializers::load::load_with_options(
             &[std::path::PathBuf::from("/definitely/missing.csv")],
             ",",
             false,
             false,
             None,
+            None,
+            None,
+            Default::default(),
             &crate::controllers::resources::ExecutionResources::new(),
         );
         assert!(matches!(missing_path, Err(QuiltError::Io { .. })));
@@ -50,15 +64,13 @@ mod tests {
             crate::operations::chainables::select::select(&frame, &["missing".to_string()]);
         assert!(matches!(missing_column, Err(QuiltError::Schema { .. })));
 
-        let timezone_error = crate::operations::chainables::changetz::changetz(
+        let timezone_error = crate::operations::chainables::changetz::changetz_with_config(
             &frame,
             "when",
             "Not/A_Timezone",
             "UTC",
-            Some("auto"),
-            Some("auto"),
-            Some("earliest"),
             None,
+            Default::default(),
         );
         assert!(matches!(timezone_error, Err(QuiltError::Usage { .. })));
 
@@ -102,8 +114,8 @@ mod tests {
     }
 
     #[test]
-    fn finalizer_atomic_write_cleans_failed_temporary_output() {
-        use crate::operations::finalizers::atomic_write;
+    fn atomic_path_cleans_failed_staging_and_preserves_existing_destination() {
+        use crate::operations::finalizers::atomic_path;
         use std::fs;
 
         let root = std::env::temp_dir().join(format!(
@@ -116,7 +128,7 @@ mod tests {
         ));
         fs::create_dir(&root).unwrap();
         let target = root.join("result.csv");
-        let failure = atomic_write(&target, "test atomic write", |_file| {
+        let failure = atomic_path(&target, "test atomic write", |_path| {
             Err(QuiltError::finalizer(
                 "test atomic write",
                 "injected failure",
@@ -137,7 +149,7 @@ mod tests {
         ));
         fs::create_dir(&root).unwrap();
         let target = root.join("result.csv");
-        let race = atomic_write(&target, "test atomic race", |_file| {
+        let race = atomic_path(&target, "test atomic race", |_path| {
             fs::write(&target, "preset\n").unwrap();
             Ok(())
         });
@@ -506,7 +518,7 @@ mod tests {
 
     #[test]
     fn delta_integral_dtype_precision_and_null_contract() {
-        use crate::operations::chainables::delta::delta;
+        use crate::operations::chainables::delta::delta_with_groups;
         let high = (1i64 << 53) + 1;
         let frame = df!(
             "signed" => &[high, high + 2, high - 1],
@@ -515,9 +527,9 @@ mod tests {
         )
         .unwrap()
         .lazy();
-        let plan = delta(&frame, "signed", None).unwrap();
-        let plan = delta(&plan, "unsigned", None).unwrap();
-        let plan = delta(&plan, "nullable", None).unwrap();
+        let plan = delta_with_groups(&frame, "signed", None, &[]).unwrap();
+        let plan = delta_with_groups(&plan, "unsigned", None, &[]).unwrap();
+        let plan = delta_with_groups(&plan, "nullable", None, &[]).unwrap();
         let result = plan.collect().unwrap();
         assert_eq!(
             result.column("signed_delta").unwrap().dtype(),
@@ -552,8 +564,11 @@ mod tests {
         let float_frame = df!("f32" => &[1.0f32, 2.5], "f64" => &[1.0f64, 2.5])
             .unwrap()
             .lazy();
-        let float_frame = delta(&float_frame, "f32", None).unwrap();
-        let float_frame = delta(&float_frame, "f64", None).unwrap().collect().unwrap();
+        let float_frame = delta_with_groups(&float_frame, "f32", None, &[]).unwrap();
+        let float_frame = delta_with_groups(&float_frame, "f64", None, &[])
+            .unwrap()
+            .collect()
+            .unwrap();
         assert_eq!(
             float_frame.column("f32_delta").unwrap().dtype(),
             &DataType::Float32
@@ -631,7 +646,10 @@ mod tests {
         use crate::controllers::executor::CommandExecutor;
 
         let frame = df!("value" => &[1i64, 2]).unwrap().lazy();
-        let mut executor = CommandExecutor::from_frame(frame);
+        let mut executor = CommandExecutor::from_pipeline(Pipeline::new(
+            frame,
+            crate::controllers::resources::ExecutionResources::new(),
+        ));
         executor
             .execute(&TypedCommand::Headers(
                 crate::controllers::command_model::HeadersArgs { plain: true },
@@ -640,7 +658,6 @@ mod tests {
         executor
             .execute(&TypedCommand::Show(
                 crate::controllers::command_model::ShowArgs {
-                    debug: false,
                     format: Default::default(),
                 },
             ))
@@ -664,15 +681,18 @@ mod tests {
 
     #[test]
     fn delta_rejects_uint64_values_outside_lossless_int64_policy() {
-        use crate::operations::chainables::delta::delta;
+        use crate::operations::chainables::delta::delta_with_groups;
         let frame = df!("value" => &[0u64, u64::MAX]).unwrap().lazy();
-        let error = delta(&frame, "value", None).unwrap().collect().unwrap_err();
+        let error = delta_with_groups(&frame, "value", None, &[])
+            .unwrap()
+            .collect()
+            .unwrap_err();
         assert!(error.to_string().contains("Int64") || error.to_string().contains("conversion"));
     }
 
     #[test]
     fn bucket_preserves_datetime_units_and_floors_negative_values() {
-        use crate::operations::chainables::bucket::{bucket, validate_interval};
+        use crate::operations::chainables::bucket::{bucket_with_config, validate_interval};
         let value = chrono::NaiveDateTime::parse_from_str(
             "1969-12-31 23:59:59.999999",
             "%Y-%m-%d %H:%M:%S%.f",
@@ -688,7 +708,7 @@ mod tests {
             let frame = DataFrame::new_infer_height(vec![source.into()])
                 .unwrap()
                 .lazy();
-            let result = bucket(&frame, "when", "1s", None)
+            let result = bucket_with_config(&frame, "when", "1s", None, Default::default())
                 .unwrap()
                 .collect()
                 .unwrap();
@@ -718,10 +738,11 @@ mod tests {
             DataFrame::new_infer_height(vec![timezone_source.into_series().into()])
                 .unwrap()
                 .lazy();
-        let timezone_result = bucket(&timezone_frame, "when", "1s", None)
-            .unwrap()
-            .collect()
-            .unwrap();
+        let timezone_result =
+            bucket_with_config(&timezone_frame, "when", "1s", None, Default::default())
+                .unwrap()
+                .collect()
+                .unwrap();
         assert_eq!(
             timezone_result.column("when_bucket").unwrap().dtype(),
             &DataType::Datetime(TimeUnit::Microseconds, Some(TimeZone::UTC))
@@ -735,10 +756,11 @@ mod tests {
         let nullable_frame = DataFrame::new_infer_height(vec![nullable.into_series().into()])
             .unwrap()
             .lazy();
-        let nullable_result = bucket(&nullable_frame, "when", "1s", None)
-            .unwrap()
-            .collect()
-            .unwrap();
+        let nullable_result =
+            bucket_with_config(&nullable_frame, "when", "1s", None, Default::default())
+                .unwrap()
+                .collect()
+                .unwrap();
         assert_eq!(
             nullable_result
                 .column("when_bucket")
@@ -761,9 +783,15 @@ mod tests {
         );
 
         assert!(validate_interval("999999999999999999999999s").is_err());
-        let overflow = bucket(&nullable_frame, "when", "999999999999999999999999s", None);
+        let overflow = bucket_with_config(
+            &nullable_frame,
+            "when",
+            "999999999999999999999999s",
+            None,
+            Default::default(),
+        );
         assert!(overflow.is_err());
-        let nanosecond_overflow = bucket(
+        let nanosecond_overflow = bucket_with_config(
             &DataFrame::new_infer_height(vec![DatetimeChunked::from_naive_datetime(
                 "when".into(),
                 [value],
@@ -776,6 +804,7 @@ mod tests {
             "when",
             "999999999999999999999999s",
             None,
+            Default::default(),
         );
         assert!(nanosecond_overflow.is_err());
 
@@ -785,7 +814,8 @@ mod tests {
         )
         .unwrap()
         .lazy();
-        let collision = bucket(&collision_frame, "when", "1s", None);
+        let collision =
+            bucket_with_config(&collision_frame, "when", "1s", None, Default::default());
         assert!(collision.is_err());
     }
 
@@ -805,16 +835,22 @@ mod tests {
         .unwrap()
         .lazy();
         let cases = [
-            ("cast", cast::cast(&frame, "value", "int").unwrap()),
+            (
+                "cast",
+                cast::cast_with_config(&frame, "value", "int", &Default::default()).unwrap(),
+            ),
             (
                 "parse-size",
                 parse_size::parse_size_column(&frame, "size").unwrap(),
             ),
             (
                 "bucket",
-                bucket::bucket(&frame, "when", "1d", None).unwrap(),
+                bucket::bucket_with_config(&frame, "when", "1d", None, Default::default()).unwrap(),
             ),
-            ("delta", delta::delta(&frame, "number", None).unwrap()),
+            (
+                "delta",
+                delta::delta_with_groups(&frame, "number", None, &[]).unwrap(),
+            ),
             (
                 "extract",
                 extract::extract(&frame, "message", r"id=(?P<id>\w+)").unwrap(),
@@ -836,9 +872,7 @@ mod tests {
 
     #[test]
     fn ndjson_inference_default_is_full_and_bounded_rejects_late_fields() {
-        use crate::operations::initializers::load::{
-            load, load_with_ndjson_inference_with_resources,
-        };
+        use crate::operations::initializers::load::load_with_options;
         let resources = crate::controllers::resources::ExecutionResources::new();
         use std::fs;
         let path = std::env::temp_dir().join(format!(
@@ -855,18 +889,7 @@ mod tests {
         }
         contents.push_str("{\"id\":1,\"late\":true}\n");
         fs::write(&path, contents).unwrap();
-        let default_schema = load(
-            std::slice::from_ref(&path),
-            ",",
-            false,
-            false,
-            None,
-            &resources,
-        )
-        .unwrap()
-        .collect_schema()
-        .unwrap();
-        let full_schema = load_with_ndjson_inference_with_resources(
+        let default_schema = load_with_options(
             std::slice::from_ref(&path),
             ",",
             false,
@@ -874,12 +897,13 @@ mod tests {
             None,
             None,
             None,
+            Default::default(),
             &resources,
         )
         .unwrap()
         .collect_schema()
         .unwrap();
-        let bounded = load_with_ndjson_inference_with_resources(
+        let bounded = load_with_options(
             std::slice::from_ref(&path),
             ",",
             false,
@@ -887,6 +911,7 @@ mod tests {
             None,
             Some(1_000),
             None,
+            Default::default(),
             &resources,
         );
         assert!(bounded
@@ -896,6 +921,5 @@ mod tests {
             .contains("inference limit"));
         fs::remove_file(path).unwrap();
         assert_eq!(default_schema.get("late"), Some(&DataType::Boolean));
-        assert_eq!(full_schema.get("late"), Some(&DataType::Boolean));
     }
 }

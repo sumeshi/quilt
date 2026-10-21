@@ -814,8 +814,7 @@ Writes the result to standard output. `--format csv` (default) includes the head
 takes no positional arguments. It is the implicit finalizer when a chain ends without one.
 The full output is first written to a temporary file, then copied to stdout in bounded
 chunks. This avoids emitting rows before lazy evaluation has succeeded, but uses disk
-proportional to the rendered output. `--debug` is accepted and currently has no effect;
-use `showquery` to inspect the query plan.
+proportional to the rendered output. Use `showquery` to inspect the query plan.
 
 Object and list columns are encoded as JSON strings inside CSV cells, with
 normal CSV quoting. Null cells remain empty; empty lists are `[]`. Duration values at any nesting level
@@ -1045,7 +1044,7 @@ numeric options keep the CLI defaults, and unknown fields are errors.
 | `changetz` | `column`, required `from-tz`, `to-tz`; optional `input-format`, `output-format`, `epoch-unit`, `strict`, `ambiguous`, `nonexistent`, `timezone` (YAML only) |
 | `renamecol` | `old`, `new` |
 | `timeslice` | `column`, at least one of `start` or `end`; optional datetime fields |
-| `show` | optional `format` (`csv` or `jsonl`), `debug` |
+| `show` | optional `format` (`csv` or `jsonl`) |
 | `headers` | optional `plain` |
 | `dump` | optional `output`, `separator` (default comma), `format` (`csv` or `jsonl`) |
 | `dumpcache` | optional `output` |

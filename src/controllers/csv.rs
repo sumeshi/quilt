@@ -2,13 +2,12 @@ use crate::controllers::csv_input::{read_csv_lazy, CsvInputOptions, CsvScanSetti
 use crate::controllers::log::LogController;
 use crate::controllers::resources::ExecutionResources;
 use crate::error::QuiltError;
-use crate::operations::initializers::rejected::{RejectedReport, SharedRejectedReport};
+use crate::operations::initializers::rejected::SharedRejectedReport;
 use polars::prelude::*;
 use rayon::prelude::*; // Re-enabled for parallel processing
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 // Performance optimization constants
 const OPTIMAL_CHUNK_SIZE: usize = 8192; // Optimized chunk size for CSV reading
 const PARALLEL_THRESHOLD: usize = 2; // Minimum files to use parallel processing
@@ -121,62 +120,6 @@ impl CsvController {
         Self {
             paths: paths.to_vec(),
         }
-    }
-    pub fn get_dataframe_with_resources(
-        &self,
-        separator: &str,
-        low_memory: bool,
-        no_headers: bool,
-        chunk_size: Option<usize>,
-        resources: &ExecutionResources,
-    ) -> Result<LazyFrame, QuiltError> {
-        self.get_dataframe_with_options(
-            separator,
-            low_memory,
-            no_headers,
-            chunk_size,
-            resources,
-            &CsvInputOptions::default(),
-        )
-    }
-    pub fn get_dataframe_with_options(
-        &self,
-        separator: &str,
-        low_memory: bool,
-        no_headers: bool,
-        chunk_size: Option<usize>,
-        resources: &ExecutionResources,
-        input_options: &CsvInputOptions,
-    ) -> Result<LazyFrame, QuiltError> {
-        let report = input_options
-            .rejects
-            .as_ref()
-            .map(|p| RejectedReport::new(p).map(|r| Arc::new(Mutex::new(r))))
-            .transpose()?;
-        let frame = self.get_dataframe_with_shared_report(
-            separator,
-            low_memory,
-            no_headers,
-            chunk_size,
-            resources,
-            input_options,
-            report.clone(),
-            None,
-        )?;
-        if let Some(report) = report {
-            let report = Arc::try_unwrap(report)
-                .map_err(|_| QuiltError::Operation {
-                    operation: "publish rejects report".into(),
-                    message: "report is still in use".into(),
-                })?
-                .into_inner()
-                .map_err(|_| QuiltError::Operation {
-                    operation: "publish rejects report".into(),
-                    message: "report lock is poisoned".into(),
-                })?;
-            report.publish()?;
-        }
-        Ok(frame)
     }
     // Preserve the load module's established call boundary; the private file
     // reading path itself uses CsvReadRequest to keep its argument count small.
@@ -459,7 +402,16 @@ mod tests {
         ));
         let resources = ExecutionResources::new();
         let frame = CsvController::new(&[path])
-            .get_dataframe_with_resources(",", false, false, None, &resources)
+            .get_dataframe_with_shared_report(
+                ",",
+                false,
+                false,
+                None,
+                &resources,
+                &CsvInputOptions::default(),
+                None,
+                None,
+            )
             .unwrap();
         let plan = frame.describe_plan().unwrap();
         assert!(plan.contains("CSV SCAN") || plan.contains("Csv SCAN"));

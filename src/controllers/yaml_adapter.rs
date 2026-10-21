@@ -228,8 +228,6 @@ struct YTimeSlice {
 #[serde(deny_unknown_fields)]
 struct YShow {
     format: Option<String>,
-    #[serde(default)]
-    debug: bool,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -709,7 +707,6 @@ pub fn parse_automation_step(
         OperationId::Show => {
             let a: YShow = yaml_args(value, name)?;
             Ok(TypedCommand::Show(ShowArgs {
-                debug: a.debug,
                 format: a
                     .format
                     .as_deref()

@@ -1043,9 +1043,21 @@ mod tests {
             rejects: Some(report_path.clone()),
             ..Default::default()
         };
-        let frame = crate::controllers::csv::CsvController::new(&[file.path().to_path_buf()])
-            .get_dataframe_with_options(",", false, false, None, &resources, &options)
-            .unwrap();
+        let frame = crate::operations::initializers::load::load_with_options(
+            &[file.path().to_path_buf()],
+            ",",
+            false,
+            false,
+            None,
+            None,
+            None,
+            crate::operations::initializers::load::LoadOptions {
+                csv_options: Some(&options),
+                ..Default::default()
+            },
+            &resources,
+        )
+        .unwrap();
         let df = frame.collect().unwrap();
         assert_eq!(df.height(), 2);
         let report = std::fs::read_to_string(&report_path).unwrap();
@@ -1076,8 +1088,20 @@ mod tests {
             rejects: Some(report_path.clone()),
             ..Default::default()
         };
-        let result = crate::controllers::csv::CsvController::new(&[file.path().to_path_buf()])
-            .get_dataframe_with_options(",", false, false, None, &resources, &options);
+        let result = crate::operations::initializers::load::load_with_options(
+            &[file.path().to_path_buf()],
+            ",",
+            false,
+            false,
+            None,
+            None,
+            None,
+            crate::operations::initializers::load::LoadOptions {
+                csv_options: Some(&options),
+                ..Default::default()
+            },
+            &resources,
+        );
         let rendered = format!("{:?}", result.err().unwrap());
         assert!(rendered.contains("line 3"), "{rendered}");
         assert!(

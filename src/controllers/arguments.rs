@@ -141,7 +141,6 @@ pub struct RenameColArgs {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShowArgs {
-    pub debug: bool,
     pub format: OutputFormat,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]

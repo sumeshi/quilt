@@ -248,10 +248,16 @@ fn datetime_execution_resolves_dst_and_rejects_redacted_row_errors() {
         .unwrap()
         .lazy()
         .with_column(col("when").cast(DataType::Datetime(TimeUnit::Microseconds, None)));
-    assert!(chainables::bucket::bucket(&extreme, "when", "7s", None)
-        .unwrap()
-        .collect()
-        .is_err());
+    assert!(chainables::bucket::bucket_with_config(
+        &extreme,
+        "when",
+        "7s",
+        None,
+        Default::default()
+    )
+    .unwrap()
+    .collect()
+    .is_err());
 }
 
 #[test]
@@ -407,7 +413,7 @@ fn csv_tsv_and_gzip_feed_the_same_typed_pipeline() {
 #[test]
 fn delta_retains_small_unsigned_extreme_differences_and_rejects_overflow() {
     let input = df!("id" => [u64::MAX-2, u64::MAX]).unwrap().lazy();
-    let result = chainables::delta::delta(&input, "id", None)
+    let result = chainables::delta::delta_with_groups(&input, "id", None, &[])
         .unwrap()
         .collect()
         .unwrap();
@@ -422,8 +428,10 @@ fn delta_retains_small_unsigned_extreme_differences_and_rejects_overflow() {
         [None, Some(2)]
     );
     let input = df!("id" => [i64::MIN, i64::MAX]).unwrap().lazy();
-    assert!(chainables::delta::delta(&input, "id", None)
-        .unwrap()
-        .collect()
-        .is_err());
+    assert!(
+        chainables::delta::delta_with_groups(&input, "id", None, &[])
+            .unwrap()
+            .collect()
+            .is_err()
+    );
 }

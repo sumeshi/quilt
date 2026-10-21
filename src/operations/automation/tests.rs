@@ -274,7 +274,6 @@ fn automation_steps_reject_wrong_yaml_scalar_types() {
         ("select", "columns: [1]"),
         ("load", "paths: [false]"),
         ("grep", "pattern: 42"),
-        ("show", "debug: yes"),
     ] {
         assert!(
             parse_automation_step(name, &yaml_serde::from_str(yaml).unwrap()).is_err(),

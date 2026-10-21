@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Execution-owned artifacts shared by cloned lazy plans.
 #[derive(Clone)]
 pub struct ExecutionResources {
-    registry: Arc<Mutex<Vec<Arc<ManagedTempFile>>>>,
+    registry: Arc<Mutex<Vec<ManagedTempFile>>>,
     _dependencies: Arc<Vec<ExecutionResources>>,
     directory: PathBuf,
     allow_temp_files: bool,
@@ -77,7 +77,7 @@ impl ExecutionResources {
         self.evaluation_probe.clone()
     }
 
-    pub fn reserve_temp_file(
+    pub(crate) fn reserve_temp_file(
         &self,
         prefix: &str,
         extension: &str,
@@ -119,8 +119,8 @@ impl ExecutionResources {
         ))
     }
 
-    pub fn retain_temp_file(&self, reservation: TempFileReservation) -> io::Result<()> {
-        let managed = Arc::new(reservation.commit());
+    pub(crate) fn retain_temp_file(&self, reservation: TempFileReservation) -> io::Result<()> {
+        let managed = reservation.commit();
         self.registry
             .lock()
             .map_err(|_| io::Error::other("execution resource registry is poisoned"))?
@@ -179,7 +179,7 @@ pub(crate) fn instrument_evaluation(
     frame
 }
 
-pub struct TempFileReservation {
+pub(crate) struct TempFileReservation {
     file: Option<File>,
     path: PathBuf,
 }
@@ -219,10 +219,6 @@ impl Drop for ManagedTempFile {
     }
 }
 
-pub fn path_exists(path: &Path) -> bool {
-    path.exists()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,14 +232,14 @@ mod tests {
             let path = reservation.path().to_path_buf();
             reservation.file_mut().unwrap().write_all(b"test").unwrap();
             resources.retain_temp_file(reservation).unwrap();
-            assert!(path_exists(&path));
+            assert!(path.exists());
             (path, resources.clone())
         };
         assert_eq!(clone.tracked_count(), 1);
         drop(resources);
-        assert!(path_exists(&path));
+        assert!(path.exists());
         drop(clone);
-        assert!(!path_exists(&path));
+        assert!(!path.exists());
     }
 
     #[test]
@@ -267,9 +263,9 @@ mod tests {
             .reserve_temp_file("qlt-test-abandoned", "tmp")
             .unwrap();
         let path = reservation.path().to_path_buf();
-        assert!(path_exists(&path));
+        assert!(path.exists());
         drop(reservation);
-        assert!(!path_exists(&path));
+        assert!(!path.exists());
     }
 
     #[test]

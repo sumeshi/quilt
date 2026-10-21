@@ -412,7 +412,6 @@ mod tests {
             index: 0,
             command: crate::controllers::command_model::TypedCommand::Show(
                 crate::controllers::command_model::ShowArgs {
-                    debug: false,
                     format: Default::default(),
                 },
             ),

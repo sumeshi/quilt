@@ -118,22 +118,6 @@ impl QuiltError {
             source: Some(Box::new(source)),
         }
     }
-    pub fn class(&self) -> ErrorClass {
-        match self {
-            Self::Validation { .. } => ErrorClass::Usage,
-            Self::Usage { .. } => ErrorClass::Usage,
-            Self::Schema { .. } => ErrorClass::Schema,
-            Self::Conversion { .. } => ErrorClass::Conversion,
-            Self::Io { .. } => ErrorClass::Io,
-            Self::Operation { .. } => ErrorClass::Operation,
-            Self::Finalizer { .. } => ErrorClass::Finalizer,
-            Self::Automation {
-                source: Some(source),
-                ..
-            } => source.class(),
-            Self::Automation { .. } => ErrorClass::Automation,
-        }
-    }
     pub fn source_error(&self) -> Option<&QuiltError> {
         match self {
             Self::Automation {
@@ -143,17 +127,6 @@ impl QuiltError {
             _ => None,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrorClass {
-    Usage,
-    Schema,
-    Conversion,
-    Io,
-    Operation,
-    Finalizer,
-    Automation,
 }
 
 impl fmt::Display for QuiltError {

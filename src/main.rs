@@ -51,14 +51,8 @@ fn run() -> ExitCode {
         }
         Ok(_) => {
             let mut stdout = std::io::stdout();
-            let mut stderr = std::io::stderr();
             for result in executor.take_finalizer_results() {
-                let status = match &result {
-                    quilt::operations::finalizers::FinalizerResult::Stderr(_) => {
-                        quilt::operations::finalizers::write_stdout(&result, &mut stderr)
-                    }
-                    _ => quilt::operations::finalizers::write_stdout(&result, &mut stdout),
-                };
+                let status = quilt::operations::finalizers::write_stdout(&result, &mut stdout);
                 match status {
                     Ok(quilt::operations::finalizers::WriteStatus::Complete) => {}
                     Ok(quilt::operations::finalizers::WriteStatus::BrokenPipe) => break,

@@ -94,7 +94,6 @@ fn sync_parent_directory(_parent: &Path, _operation: &str) -> Result<(), QuiltEr
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FinalizerResult {
     Stdout(String),
-    Stderr(String),
     Scalar(String),
     File(PathBuf),
     Files(Vec<PathBuf>),
@@ -139,77 +138,7 @@ impl PartialEq for OutputArtifact {
 }
 impl Eq for OutputArtifact {}
 
-/// Write a file through a same-filesystem temporary sibling and publish it
-/// with a rename. Existing targets are rejected deliberately: callers that
-/// want replacement must choose a new destination (or remove the old one).
-/// The closure is also a small failure-injection seam for unit tests.
-pub fn atomic_write<F>(target: &Path, operation: &str, write: F) -> Result<(), QuiltError>
-where
-    F: FnOnce(&mut File) -> Result<(), QuiltError>,
-{
-    validate_destination(target, operation)?;
-    let parent = target
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    if !parent.is_dir() {
-        return Err(QuiltError::io(
-            operation,
-            Some(parent.display().to_string()),
-            "destination directory does not exist",
-        ));
-    }
-    let file_name = target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("output");
-    let stage = reserve_atomic_stage(parent, file_name, operation)?;
-    let temp = stage.path().join("payload");
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)
-        .map_err(|error| {
-            QuiltError::io(
-                operation,
-                Some(temp.display().to_string()),
-                error.to_string(),
-            )
-        })?;
-    let result = match write(&mut file) {
-        Err(error) => {
-            drop(file);
-            Err(error)
-        }
-        Ok(()) => match file.sync_all() {
-            Err(error) => {
-                drop(file);
-                Err(QuiltError::io(
-                    operation,
-                    Some(temp.display().to_string()),
-                    error.to_string(),
-                ))
-            }
-            Ok(()) => {
-                drop(file);
-                let publish = publish_file_and_sync(
-                    &NativePublicationBackend,
-                    &temp,
-                    target,
-                    parent,
-                    operation,
-                );
-                if publish.is_ok() {
-                    let _ = fs::remove_file(&temp);
-                }
-                publish
-            }
-        },
-    };
-    result
-}
-
-pub fn atomic_path<F>(target: &Path, operation: &str, write: F) -> Result<(), QuiltError>
+pub(crate) fn atomic_path<F>(target: &Path, operation: &str, write: F) -> Result<(), QuiltError>
 where
     F: FnOnce(&Path) -> Result<(), QuiltError>,
 {
@@ -462,7 +391,7 @@ pub(crate) fn publish_directory_and_sync<B: PublicationBackend>(
     backend.sync_parent(parent, operation)
 }
 
-pub fn validate_destination(target: &Path, operation: &str) -> Result<(), QuiltError> {
+pub(crate) fn validate_destination(target: &Path, operation: &str) -> Result<(), QuiltError> {
     if target.exists() {
         return Err(QuiltError::io(
             operation,
@@ -508,9 +437,7 @@ pub fn write_stdout<W: Write>(
         }
     }
     match result {
-        FinalizerResult::Stdout(text)
-        | FinalizerResult::Stderr(text)
-        | FinalizerResult::PlanTable(text) => {
+        FinalizerResult::Stdout(text) | FinalizerResult::PlanTable(text) => {
             return write_bytes(&mut writer, text.as_bytes(), "write finalizer output");
         }
         FinalizerResult::Scalar(value) => {

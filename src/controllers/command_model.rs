@@ -1,12 +1,8 @@
 pub use crate::controllers::arguments::*;
 
 pub use crate::controllers::definitions::{
-    automation_operations, by_name, command_specs, CommandCategory, CommandSpec,
-    OperationDefinition, OperationId, OptionSpec, TypedCommand,
+    by_name, registry, CommandCategory, CommandSpec, OperationId, OptionSpec, TypedCommand,
 };
-pub fn automation_record_command_names() -> impl Iterator<Item = &'static str> {
-    crate::controllers::definitions::record_operations().map(|spec| spec.name)
-}
 
 pub use crate::controllers::cli_adapter::parse_typed_commands;
 pub use crate::controllers::yaml_adapter::parse_automation_step;
