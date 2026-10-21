@@ -49,6 +49,84 @@ fn relational_pipeline_filters_preserves_types_and_groups_rows() {
         counted.column("count").unwrap().u32().unwrap().sum(),
         Some(2)
     );
+
+    // Equal sort/count keys keep input order, including first-seen groups
+    // whose labels are reverse alphabetical. Global sed edits string columns
+    // while leaving similarly rendered scalar values typed and unchanged.
+    let tied = df!(
+        "group" => ["z", "a", "z", "a"],
+        "sort_key" => [0i64, 0, 0, 0],
+        "row" => ["z1", "a1", "z2", "a2"],
+        "enabled" => [true, false, true, false],
+        "number" => [12i64, 12, 12, 12],
+        "text" => ["12", "22", "12", "22"]
+    )
+    .unwrap()
+    .lazy();
+    let sorted = chainables::sort::sort(&tied, &["sort_key".into()], false)
+        .unwrap()
+        .collect()
+        .unwrap();
+    assert_eq!(
+        sorted
+            .column("row")
+            .unwrap()
+            .str()
+            .unwrap()
+            .iter()
+            .map(Option::unwrap)
+            .collect::<Vec<_>>(),
+        ["z1", "a1", "z2", "a2"]
+    );
+    let tied_counts = chainables::count::count(&tied, &["group".into()])
+        .unwrap()
+        .collect()
+        .unwrap();
+    assert_eq!(
+        tied_counts
+            .column("group")
+            .unwrap()
+            .str()
+            .unwrap()
+            .iter()
+            .map(Option::unwrap)
+            .collect::<Vec<_>>(),
+        ["z", "a"]
+    );
+    let sed = chainables::sed::sed(&tied, None, "12", "X", false)
+        .unwrap()
+        .collect()
+        .unwrap();
+    assert_eq!(
+        sed.column("enabled")
+            .unwrap()
+            .bool()
+            .unwrap()
+            .iter()
+            .map(Option::unwrap)
+            .collect::<Vec<_>>(),
+        [true, false, true, false]
+    );
+    assert_eq!(
+        sed.column("number")
+            .unwrap()
+            .i64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect::<Vec<_>>(),
+        [12, 12, 12, 12]
+    );
+    assert_eq!(
+        sed.column("text")
+            .unwrap()
+            .str()
+            .unwrap()
+            .iter()
+            .map(Option::unwrap)
+            .collect::<Vec<_>>(),
+        ["X", "22", "X", "22"]
+    );
+
     // Overflow slicing is our boundary; ordinary head/tail are Polars behavior.
     let input = df!("id" => [1, 2]).unwrap().lazy();
     assert_eq!(

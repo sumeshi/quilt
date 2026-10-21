@@ -27,7 +27,9 @@ pub fn sort(df: &LazyFrame, colnames: &[String], desc: bool) -> Result<LazyFrame
         .iter()
         .map(|name| crate::controllers::nested::literal_col(name))
         .collect();
-    let sort_options = SortMultipleOptions::default().with_order_descending(desc);
+    let sort_options = SortMultipleOptions::default()
+        .with_order_descending(desc)
+        .with_maintain_order(true);
 
     Ok(df.clone().sort_by_exprs(sort_exprs, sort_options))
 }

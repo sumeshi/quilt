@@ -45,9 +45,11 @@ pub fn sed(
             // Apply sed to all columns
             LogController::debug("Replacing values in all columns");
             let mut result_df = df.clone();
-            // Apply replacement to all columns
+            // The implicit all-column form is text-only so numeric, boolean,
+            // and temporal columns keep their original physical and logical
+            // types. An explicit target may still be intentionally stringified.
             for (column_name, dtype) in schema.iter() {
-                if matches!(dtype, DataType::Struct(_) | DataType::List(_)) {
+                if !matches!(dtype, DataType::String) {
                     continue;
                 }
                 let col_str = column_name.as_str();

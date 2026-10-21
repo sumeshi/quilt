@@ -37,7 +37,7 @@ pub fn count(df: &LazyFrame, columns: &[String]) -> Result<LazyFrame, QuiltError
 
     Ok(df
         .clone()
-        .group_by(
+        .group_by_stable(
             group_colnames
                 .iter()
                 .map(|name| crate::controllers::nested::literal_col(name))
@@ -46,6 +46,8 @@ pub fn count(df: &LazyFrame, columns: &[String]) -> Result<LazyFrame, QuiltError
         .agg([len().alias("count")])
         .sort(
             ["count"],
-            SortMultipleOptions::default().with_order_descending(true),
+            SortMultipleOptions::default()
+                .with_order_descending(true)
+                .with_maintain_order(true),
         ))
 }
