@@ -2,6 +2,44 @@ use crate::support::*;
 use serde_json::json;
 
 #[test]
+fn cross_join_preserves_columns_that_resemble_internal_working_names() {
+    let root = tempfile::tempdir().unwrap();
+    let key = "__qlt_run_cross_join_key";
+    let left = write(root.path(), "left.jsonl", format!(
+        "{{\"{key}\":\"left\",\"{key}_1\":\"keep-left\",\"id\":1}}\n{{\"{key}\":\"left\",\"{key}_1\":\"keep-left\",\"id\":2}}\n"
+    ));
+    let right = write(root.path(), "right.jsonl", format!(
+        "{{\"{key}\":\"right\",\"{key}_2\":\"keep-right\",\"tag\":\"a\"}}\n{{\"{key}\":\"right\",\"{key}_2\":\"keep-right\",\"tag\":\"b\"}}\n"
+    ));
+    let config = document(
+        root.path(),
+        "cross.yaml",
+        json!({"version":1,"stages":[
+            {"name":"left","steps":[{"load":{"paths":[left]}}]},
+            {"name":"right","steps":[{"load":{"paths":[right]}}]},
+            {"name":"joined","join":{"inputs":["left","right"],"how":"cross"}},
+            {"name":"output","from":"joined","steps":[{"show":{}}]}
+        ]}),
+    );
+    let result = rows(&text(&["run", config.to_str().unwrap()]));
+    assert_eq!(result.len(), 4);
+    for row in &result {
+        assert_eq!(row.len(), 6);
+        assert_eq!(row[key], "left");
+        assert_eq!(row[&format!("{key}_right")], "right");
+        assert_eq!(row[&format!("{key}_1")], "keep-left");
+        assert_eq!(row[&format!("{key}_2")], "keep-right");
+    }
+    assert_eq!(
+        result
+            .iter()
+            .map(|row| (row["id"].as_str(), row["tag"].as_str()))
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from([("1", "a"), ("1", "b"), ("2", "a"), ("2", "b")])
+    );
+}
+
+#[test]
 fn typed_steps_preserve_repeated_filters_inherited_inputs_and_dump_options() {
     let root = tempfile::tempdir().unwrap();
     let source = write(

@@ -279,28 +279,37 @@ fn parse_join_type(_stage_name: &str, how_str: &str) -> JoinType {
 }
 
 fn join_pair(
-    left_df: LazyFrame,
-    right_df: LazyFrame,
+    mut left_df: LazyFrame,
+    mut right_df: LazyFrame,
     _stage_name: &str,
     join_type: JoinType,
     coalesce: bool,
     key_spec: &JoinKeySpec,
-) -> LazyFrame {
+) -> Result<LazyFrame, String> {
     if matches!(key_spec, JoinKeySpec::Cross) {
-        let cross_key = "__qlt_run_cross_join_key";
-        let mut join_args = polars::prelude::JoinArgs::new(JoinType::Inner);
-        if coalesce {
-            join_args = join_args.with_coalesce(polars::prelude::JoinCoalesce::CoalesceColumns);
+        let left_schema = left_df
+            .collect_schema()
+            .map_err(|error| error.to_string())?;
+        let right_schema = right_df
+            .collect_schema()
+            .map_err(|error| error.to_string())?;
+        let mut cross_key = "__qlt_run_cross_join_key".to_string();
+        let mut suffix = 0usize;
+        while left_schema.get(&cross_key).is_some() || right_schema.get(&cross_key).is_some() {
+            suffix += 1;
+            cross_key = format!("__qlt_run_cross_join_key_{suffix}");
         }
-        return left_df
-            .with_column(lit(cross_key).alias(cross_key))
+        let join_args = polars::prelude::JoinArgs::new(JoinType::Inner)
+            .with_coalesce(polars::prelude::JoinCoalesce::CoalesceColumns);
+        return Ok(left_df
+            .with_column(lit(0u8).alias(&cross_key))
             .join(
-                right_df.with_column(lit(cross_key).alias(cross_key)),
-                &[col(cross_key)],
-                &[col(cross_key)],
+                right_df.with_column(lit(0u8).alias(&cross_key)),
+                &[col(&cross_key)],
+                &[col(&cross_key)],
                 join_args,
             )
-            .select([col("*").exclude([cross_key])]);
+            .drop([cross_key]));
     }
     let mut join_args = polars::prelude::JoinArgs::new(join_type);
     if coalesce {
@@ -320,7 +329,7 @@ fn join_pair(
         .map(|name| Expr::Column(name.into()))
         .collect();
     LogController::debug("Joining dataframes");
-    left_df.join(right_df, &left_on_exprs, &right_on_exprs, join_args)
+    Ok(left_df.join(right_df, &left_on_exprs, &right_on_exprs, join_args))
 }
 
 pub(super) fn execute_join_stage(
@@ -379,7 +388,7 @@ pub(super) fn execute_join_stage(
             join_type.clone(),
             coalesce,
             &key_spec,
-        );
+        )?;
     }
     Ok(result)
 }
