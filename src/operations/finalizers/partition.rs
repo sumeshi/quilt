@@ -152,6 +152,9 @@ fn for_each_partition_batch<F>(spool: &Path, mut visit: F) -> Result<(), QuiltEr
 where
     F: FnMut(DataFrame) -> Result<(), QuiltError>,
 {
+    // The row frame is read one batch at a time, but this is not constant
+    // memory: enumerating the spool retains one path per batch, and partition
+    // discovery/final-name reservation retains state for every distinct key.
     let mut batches = fs::read_dir(spool)
         .map_err(|error| {
             QuiltError::io(
@@ -220,13 +223,24 @@ fn discover_partition_names(
 
     let mut sorted_keys = keys.into_iter().collect::<Vec<_>>();
     sorted_keys.sort_by(|left, right| left.1.cmp(&right.1).then(left.0.cmp(&right.0)));
-    let mut used = HashMap::<String, usize>::new();
+    // Reserve final, bounded names globally. A generated suffix can itself be
+    // a value's natural sanitized name (for example `a_b-2`), and Windows
+    // treats case-only differences as the same path.
+    let mut used = HashSet::<String>::new();
     let mut names = HashMap::with_capacity(sorted_keys.len());
     for (identity, raw) in sorted_keys {
         let base = sanitize_filename(&raw);
-        let count = used.entry(base.clone()).or_insert(0);
-        *count += 1;
-        names.insert(identity, bounded_partition_name(&raw, &base, *count));
+        let mut ordinal = 1usize;
+        loop {
+            let candidate = bounded_partition_name(&raw, &base, ordinal);
+            if used.insert(candidate.to_lowercase()) {
+                names.insert(identity, candidate);
+                break;
+            }
+            ordinal = ordinal.checked_add(1).ok_or_else(|| {
+                QuiltError::operation("partition", "could not allocate a unique partition name")
+            })?;
+        }
     }
     Ok(names)
 }
@@ -399,9 +413,15 @@ fn write_partition_csv<W: Write>(
     include_header: bool,
     group: &mut DataFrame,
 ) -> Result<(), QuiltError> {
+    // Keep the partition key and payload typed through grouping and gathering;
+    // stringify nested values only at the same final CSV boundary used by
+    // show/dump. This also keeps duration counts exact in their source unit.
+    let mut output = super::csv::csv_frame(&group.clone().lazy(), "write partition file")?
+        .collect()
+        .map_err(|error| QuiltError::finalizer("write partition file", error.to_string()))?;
     CsvWriter::new(writer)
         .include_header(include_header)
-        .finish(group)
+        .finish(&mut output)
         .map_err(|error| QuiltError::finalizer("write partition file", error.to_string()))
 }
 
@@ -534,8 +554,16 @@ fn stable_hash(value: &str) -> u64 {
 }
 
 fn is_reserved_filename(value: &str) -> bool {
+    // Windows reserves device names even when followed by an extension (for
+    // example, `CON.data`). Ignore the extension and trailing spaces/dots in
+    // the stem when checking the reserved name.
+    let stem = value
+        .split('.')
+        .next()
+        .unwrap_or(value)
+        .trim_end_matches([' ', '.']);
     matches!(
-        value.to_ascii_uppercase().as_str(),
+        stem.to_ascii_uppercase().as_str(),
         "CON"
             | "PRN"
             | "AUX"
@@ -878,6 +906,78 @@ mod tests {
             assert!(contents.starts_with("part,value\n"));
             assert_eq!(contents.lines().count(), 2);
         }
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn partition_names_remain_unique_after_sanitization_and_suffixing() {
+        let parent = test_parent("sanitized-name-collision");
+        let target = parent.join("partitions");
+        let frame = df!(
+            "part" => &[
+                "a/b",
+                "a\\b",
+                "a_b-2",
+                "Ä",
+                "ä",
+                "CON.data",
+                "lpt1.logs",
+            ],
+            "value" => &[1i64, 2, 3, 4, 5, 6, 7]
+        )
+        .unwrap()
+        .lazy();
+        let FinalizerResult::Files(files) =
+            partition(&frame, "part", target.to_str().unwrap()).unwrap()
+        else {
+            panic!("partition must return file paths");
+        };
+        assert_eq!(files.len(), 7);
+        let names = files
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect::<HashSet<_>>();
+        assert_eq!(names.len(), 7);
+        assert!(names.contains("a_b.csv"));
+        assert!(names.contains("a_b-2.csv"));
+        assert!(names.contains("a_b-2-2.csv"));
+        assert!(names.contains("Ä.csv"));
+        assert!(names.contains("ä-2.csv"));
+        assert!(names.contains("_CON.data.csv"));
+        assert!(names.contains("_lpt1.logs.csv"));
+        for (name, contents) in [
+            ("a_b.csv", "part,value\na/b,1\n"),
+            ("a_b-2.csv", "part,value\na\\b,2\n"),
+            ("a_b-2-2.csv", "part,value\na_b-2,3\n"),
+            ("Ä.csv", "part,value\nÄ,4\n"),
+            ("ä-2.csv", "part,value\nä,5\n"),
+            ("_CON.data.csv", "part,value\nCON.data,6\n"),
+            ("_lpt1.logs.csv", "part,value\nlpt1.logs,7\n"),
+        ] {
+            assert_eq!(fs::read_to_string(target.join(name)).unwrap(), contents);
+        }
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn partition_serializes_nested_payload_at_csv_boundary() {
+        let parent = test_parent("nested-payload");
+        let target = parent.join("partitions");
+        let frame = DataFrame::new_infer_height(vec![
+            Series::new("part".into(), &["a", "a"]).into(),
+            Series::new(
+                "payload".into(),
+                &[Some(Series::new(PlSmallStr::EMPTY, &[1i64, 2])), None],
+            )
+            .into(),
+        ])
+        .unwrap()
+        .lazy();
+        partition(&frame, "part", target.to_str().unwrap()).unwrap();
+        assert_eq!(
+            fs::read_to_string(target.join("a.csv")).unwrap(),
+            "part,payload\na,\"[1,2]\"\na,\n"
+        );
         fs::remove_dir_all(parent).unwrap();
     }
 

@@ -31,7 +31,7 @@ pub fn render_table(df: &LazyFrame) -> Result<String, QuiltError> {
         .take(MAX_DISPLAY_COLUMNS)
         .map(|name| crate::controllers::nested::literal_col(name.as_str()))
         .collect();
-    let preview = super::csv::csv_frame(&flattened.select(columns), "showtable")?;
+    let preview = super::csv::table_frame(&flattened.select(columns), "showtable")?;
     // Try to estimate the size using limit + head approach to avoid full collection
     let head_df = match preview.limit((MAX_DISPLAY_ROWS + 1) as u32).collect() {
         Ok(df) => df,
