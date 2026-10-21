@@ -216,7 +216,7 @@ fn source_inventory_includes_filtered_files_but_does_not_override_reused_names()
         "load",
         pattern.to_str().unwrap(),
         "--source-column",
-        "source",
+        "*",
         "-",
         "cast",
         "when",
@@ -225,7 +225,7 @@ fn source_inventory_includes_filtered_files_but_does_not_override_reused_names()
         "timeinfo",
         "when",
         "--by",
-        "source",
+        "*",
         "-",
         "show",
     ];
@@ -240,7 +240,7 @@ fn source_inventory_includes_filtered_files_but_does_not_override_reused_names()
     );
     assert!(summary
         .iter()
-        .any(|r| r["source"].ends_with("empty.jsonl") && r["rows"] == "0"));
+        .any(|r| r["*"].ends_with("empty.jsonl") && r["rows"] == "0"));
     let result = rows(&text(&[
         "load",
         pattern.to_str().unwrap(),

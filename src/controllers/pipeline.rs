@@ -242,8 +242,8 @@ impl Pipeline {
                 summary = inventory
                     .join(
                         summary,
-                        [col(name)],
-                        [col(name)],
+                        [Expr::Column(name.as_str().into())],
+                        [Expr::Column(name.as_str().into())],
                         JoinArgs::new(JoinType::Left),
                     )
                     .with_columns(
