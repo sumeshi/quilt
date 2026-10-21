@@ -5,6 +5,7 @@ pub mod contains;
 pub mod count;
 pub mod delta;
 pub mod extract;
+pub mod filter;
 pub mod flatten;
 pub mod grep;
 pub mod head;
