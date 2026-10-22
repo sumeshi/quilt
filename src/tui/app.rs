@@ -239,6 +239,28 @@ impl App {
         self.error.clear();
         self.action_error = None;
     }
+    fn prefix_key_allowed(&self, key: KeyCode) -> bool {
+        if self.picker.is_some() {
+            return matches!(key, KeyCode::Char('?') | KeyCode::Esc);
+        }
+        if self.pending_commit.is_some() || self.working.is_some() {
+            return matches!(
+                key,
+                KeyCode::Esc
+                    | KeyCode::Char('?')
+                    | KeyCode::Char('h')
+                    | KeyCode::Char('t')
+                    | KeyCode::Char('b')
+                    | KeyCode::Char('i')
+                    | KeyCode::Char('f')
+                    | KeyCode::Char('d')
+                    | KeyCode::Char('e')
+                    | KeyCode::Char('z')
+                    | KeyCode::Char('q')
+            );
+        }
+        true
+    }
     fn insert(&mut self, text: &str) {
         let clean: String = text.chars().filter(|c| !is_terminal_control(*c)).collect();
         self.draft.insert_str(self.cursor, &clean);
@@ -874,8 +896,6 @@ impl App {
         if self.picker.is_some() {
             if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('a') {
                 self.prefix_mode = true;
-                self.status =
-                    "Prefix: ? help; Esc cancels prefix; close picker for other actions".into();
                 return Ok(());
             }
             if self.prefix_mode {
@@ -908,22 +928,7 @@ impl App {
         }
         if self.prefix_mode {
             self.prefix_mode = false;
-            if (self.pending_commit.is_some() || self.working.is_some())
-                && !matches!(
-                    k.code,
-                    KeyCode::Esc
-                        | KeyCode::Char('?')
-                        | KeyCode::Char('h')
-                        | KeyCode::Char('t')
-                        | KeyCode::Char('b')
-                        | KeyCode::Char('i')
-                        | KeyCode::Char('f')
-                        | KeyCode::Char('d')
-                        | KeyCode::Char('e')
-                        | KeyCode::Char('z')
-                        | KeyCode::Char('q')
-                )
-            {
+            if !self.prefix_key_allowed(k.code) {
                 self.status = "Action in progress; help and navigation remain available".into();
                 return Ok(());
             }
@@ -1008,7 +1013,6 @@ impl App {
         if k.modifiers.contains(KeyModifiers::CONTROL) {
             if k.code == KeyCode::Char('a') {
                 self.prefix_mode = true;
-                self.status = "Prefix: t table b pipeline i input h help d details e error f full screen z cancel o export; c columns C cache w write x clear p mode u/r undo/redo q quit".into();
             }
             return Ok(());
         }
@@ -1309,7 +1313,7 @@ fn render(f: &mut Frame, app: &mut App) {
             Constraint::Length(1),
             Constraint::Min(3),
             Constraint::Length(3),
-            Constraint::Length(1),
+            Constraint::Length(footer_height(area, app)),
         ])
         .split(area);
     let (table_area, context_area, headers_area) = if chunks[1].width >= 86 {
@@ -1374,6 +1378,9 @@ fn render(f: &mut Frame, app: &mut App) {
         } else if let Some(detail) = &mut app.detail {
             detail.render(f, area);
         }
+        if app.prefix_mode && app.picker.is_some() {
+            draw_footer(f, chunks[3], app);
+        }
         return;
     }
     if app.focus == Focus::Pipeline {
@@ -1392,6 +1399,9 @@ fn render(f: &mut Frame, app: &mut App) {
             picker.render(f);
         } else if let Some(detail) = &mut app.detail {
             detail.render(f, area);
+        }
+        if app.prefix_mode && app.picker.is_some() {
+            draw_footer(f, chunks[3], app);
         }
         return;
     }
@@ -1526,6 +1536,9 @@ fn render(f: &mut Frame, app: &mut App) {
     } else if let Some(detail) = &mut app.detail {
         detail.render(f, area);
     }
+    if app.prefix_mode && app.picker.is_some() {
+        draw_footer(f, chunks[3], app);
+    }
 }
 
 fn draw_input(f: &mut Frame, input_area: Rect, app: &App) {
@@ -1592,7 +1605,86 @@ fn draw_input(f: &mut Frame, input_area: Rect, app: &App) {
     }
 }
 
+const PREFIX_ACTIONS: &[(char, &str)] = &[
+    ('t', "Table"),
+    ('b', "Pipeline"),
+    ('i', "Input"),
+    ('f', "Expand"),
+    ('c', "Columns"),
+    ('d', "Row"),
+    ('h', "Help"),
+    ('e', "Error"),
+    ('?', "Keys"),
+    ('p', "Mode"),
+    ('u', "Undo"),
+    ('r', "Redo"),
+    ('o', "Export"),
+    ('w', "YAML"),
+    ('C', "Cache"),
+    ('x', "Clear cache"),
+    ('z', "Cancel"),
+    ('q', "Quit"),
+];
+
+fn prefix_hint_lines(width: u16, app: &App) -> Vec<String> {
+    let width = width as usize;
+    let items = std::iter::once("Prefix:".to_owned())
+        .chain(
+            PREFIX_ACTIONS
+                .iter()
+                .filter(|entry| app.prefix_key_allowed(KeyCode::Char(entry.0)))
+                .map(|(key, label)| format!("{key} {label}")),
+        )
+        .chain(std::iter::once("Esc Back".to_owned()));
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for item in items {
+        if UnicodeWidthStr::width(item.as_str()) > width {
+            return vec![truncate_display("Prefix: ? all keys | Esc back", width)];
+        }
+        let separator = if line.is_empty() { "" } else { "  " };
+        if UnicodeWidthStr::width(line.as_str())
+            + separator.len()
+            + UnicodeWidthStr::width(item.as_str())
+            > width
+        {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push_str("  ");
+        }
+        line.push_str(&item);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+fn footer_height(screen: Rect, app: &App) -> u16 {
+    if !app.prefix_mode {
+        return 1;
+    }
+    // Keep room for the banner, command input, and a small preview.
+    let available = screen.height.saturating_sub(7).max(1);
+    (prefix_hint_lines(screen.width, app).len() as u16).min(available)
+}
+
 fn draw_footer(f: &mut Frame, footer_area: Rect, app: &App) {
+    if app.prefix_mode {
+        let mut lines = prefix_hint_lines(footer_area.width, app);
+        if lines.len() > footer_area.height as usize {
+            lines.truncate(footer_area.height as usize);
+            if let Some(last) = lines.last_mut() {
+                *last = truncate_display("… ? all keys | Esc back", footer_area.width as usize);
+            }
+        }
+        f.render_widget(
+            Paragraph::new(lines.join("\n")).style(Style::default().fg(Color::Cyan)),
+            footer_area,
+        );
+        return;
+    }
     let compact = footer_area.width <= 100 || app.working.is_some();
     let focus_hint = match (app.focus, compact) {
         (Focus::Input, true) => "Input | Tab/↑↓ | ^A h/t/b/o",
@@ -2107,6 +2199,92 @@ mod tests {
         app.key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
             .unwrap();
         assert_eq!(app.draft, "x?");
+    }
+
+    #[test]
+    fn prefix_dock_wraps_available_actions_and_preserves_input() {
+        fn screen(app: &mut App, width: u16, height: u16) -> Vec<String> {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| render(frame, app)).unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .chunks(width as usize)
+                .map(|row| row.iter().map(|cell| cell.symbol()).collect())
+                .collect()
+        }
+        for (width, height, focus, fullscreen) in [
+            (80, 24, Focus::Input, false),
+            (120, 24, Focus::Input, false),
+            (80, 24, Focus::Table, true),
+            (80, 24, Focus::Pipeline, false),
+            (24, 8, Focus::Input, false),
+        ] {
+            let mut app = test_app();
+            app.draft = "select name".into();
+            app.cursor = app.draft.len();
+            app.focus = focus;
+            app.fullscreen = fullscreen;
+            app.error = "previous problem".into();
+            app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+                .unwrap();
+            let rows = screen(&mut app, width, height);
+            if width >= 80 {
+                for (key, label) in PREFIX_ACTIONS {
+                    let item = format!("{key} {label}");
+                    assert!(
+                        rows.iter().any(|row| row.contains(&item)),
+                        "missing {item}: {rows:?}"
+                    );
+                }
+                assert!(rows.iter().any(|row| row.contains("Esc Back")));
+                assert!(
+                    footer_height(Rect::new(0, 0, width, height), &app)
+                        <= if width >= 120 { 2 } else { 3 }
+                );
+            } else {
+                assert!(
+                    rows.iter().any(|row| row.contains("? all keys")),
+                    "{rows:?}"
+                );
+            }
+            assert_eq!(app.status, "Ready");
+            app.key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE))
+                .unwrap();
+            assert_eq!(app.focus, Focus::Table);
+            assert!(!app.prefix_mode);
+            assert_eq!(app.status, "Ready");
+            app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+                .unwrap();
+            app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+                .unwrap();
+            assert!(!app.prefix_mode);
+            assert_eq!(app.draft, "select name");
+            assert_eq!(footer_height(Rect::new(0, 0, width, height), &app), 1);
+        }
+
+        let mut app = test_app();
+        app.working = Some((1, TaskPhase::Saving, Instant::now()));
+        app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+            .unwrap();
+        let rows = screen(&mut app, 80, 24);
+        assert!(rows.iter().any(|row| row.contains("z Cancel")));
+        assert!(!rows.iter().any(|row| row.contains("o Export")));
+        assert!(!rows.iter().any(|row| row.contains("C Cache")));
+        app.working = None;
+        app.picker = Some(ColumnPicker::new(
+            vec![("name".into(), "String".into())],
+            vec![],
+        ));
+        let rows = screen(&mut app, 24, 12);
+        assert!(rows[10].contains("? Keys"), "{rows:?}");
+        assert!(rows[11].contains("Esc Back"), "{rows:?}");
+        assert!(!rows.iter().any(|row| row.contains("t Table")));
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.picker.is_some());
+        assert!(!app.prefix_mode);
     }
 
     #[test]

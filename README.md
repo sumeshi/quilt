@@ -66,7 +66,8 @@ $ qlt --lazy --all-strings events.csv
 
 Type pipeline commands such as `grep ERROR` or `filter 'id == 4624'`. Enter
 confirms the draft; valid drafts preview live, and Tab completes commands,
-options, and columns. `:edit STEP` reopens the original command group containing
+options, and columns. Ctrl+A shows the available shortcuts; Esc cancels the prefix.
+`:edit STEP` reopens the original command group containing
 that 1-based step; the TUI shows the group's step range. An incomplete or invalid
 edit shows marked context before that group until you enter a valid command.
 

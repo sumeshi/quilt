@@ -23,6 +23,7 @@ fn run() -> ExitCode {
 Interactive pipeline editor with live previews and completion.
 
 Enter applies a command; Tab completes commands, options, and columns.
+Ctrl+A shows available shortcuts; Esc cancels the prefix.
 Ctrl+A actions: ? help, c columns, w YAML, o export, C checkpoint, x clear,
 p sample/full, u/r undo/redo, z cancel, q quit.
 t/b/i focus table/pipeline/input; f expands or shrinks the focused pane; h command help;
