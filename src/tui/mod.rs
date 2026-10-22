@@ -29,6 +29,7 @@ pub(super) struct CacheInfo {
 #[derive(Debug)]
 pub(super) struct Preview {
     columns: Vec<(String, String)>,
+    total_columns: usize,
     rows: Vec<Vec<String>>,
     truncated: bool,
     mode: PreviewMode,

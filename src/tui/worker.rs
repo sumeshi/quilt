@@ -115,6 +115,7 @@ struct LoadedSource {
 
 struct FramePreview {
     columns: Vec<(String, String)>,
+    total_columns: usize,
     rows: Vec<Vec<String>>,
     truncated: bool,
 }
@@ -182,6 +183,7 @@ impl Engine {
                 let preview = preview_frame(pipeline.frame())?;
                 Ok(Outcome::Preview(Preview {
                     columns: preview.columns,
+                    total_columns: preview.total_columns,
                     rows: preview.rows,
                     truncated: preview.truncated,
                     mode,
@@ -495,6 +497,7 @@ fn preview_frame(frame: &LazyFrame) -> Result<FramePreview, QuiltError> {
         .clone()
         .collect_schema()
         .map_err(|e| QuiltError::operation("preview schema", e.to_string()))?;
+    let total_columns = schema.len();
     let columns: Vec<(String, String)> = schema
         .iter()
         .take(MAX_COLUMNS)
@@ -518,7 +521,7 @@ fn preview_frame(frame: &LazyFrame) -> Result<FramePreview, QuiltError> {
         .limit((PREVIEW_ROWS + 1) as IdxSize)
         .collect()
         .map_err(|e| QuiltError::operation("TUI preview", e.to_string()))?;
-    let truncated = df.height() > PREVIEW_ROWS || schema.len() > MAX_COLUMNS;
+    let truncated = df.height() > PREVIEW_ROWS || total_columns > MAX_COLUMNS;
     let rows = (0..df.height().min(PREVIEW_ROWS))
         .map(|row| {
             df.columns()
@@ -532,6 +535,7 @@ fn preview_frame(frame: &LazyFrame) -> Result<FramePreview, QuiltError> {
         .collect();
     Ok(FramePreview {
         columns,
+        total_columns,
         rows,
         truncated,
     })
@@ -618,6 +622,29 @@ mod tests {
         enqueue(&mut schedule, preview_request(3)).unwrap();
         assert_eq!(schedule.preview.as_ref().unwrap().id, 3);
         assert_eq!(schedule.actions.front().unwrap().id, 2);
+    }
+
+    #[test]
+    fn wide_preview_reports_total_schema_width_with_bounded_display() {
+        let columns = (0..MAX_COLUMNS + 1)
+            .map(|index| {
+                let name = format!("column_{index}");
+                if index == 0 {
+                    Series::new(name.into(), vec!["x".repeat(MAX_CELL_CHARS + 100)]).into()
+                } else {
+                    Series::new(name.into(), vec![index as i64]).into()
+                }
+            })
+            .collect();
+        let frame = DataFrame::new_infer_height(columns).unwrap().lazy();
+        let preview = preview_frame(&frame).unwrap();
+        assert_eq!(preview.total_columns, MAX_COLUMNS + 1);
+        assert_eq!(preview.columns.len(), MAX_COLUMNS);
+        assert_eq!(preview.rows.len(), 1);
+        assert_eq!(preview.rows[0].len(), MAX_COLUMNS);
+        assert!(preview.truncated);
+        assert_eq!(preview.rows[0][0].chars().count(), MAX_CELL_CHARS + 1);
+        assert!(preview.rows[0][0].ends_with('…'));
     }
 
     fn commands(path: &std::path::Path) -> Vec<TypedCommand> {

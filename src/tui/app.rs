@@ -264,6 +264,7 @@ impl App {
                 {
                     return;
                 }
+                self.columns_offset = self.columns_offset.min(p.columns.len().saturating_sub(1));
                 self.preview = Some(p);
                 self.error.clear();
                 self.status = "Preview updated".into();
@@ -471,8 +472,20 @@ impl App {
         }
         if k.modifiers.contains(KeyModifiers::ALT) {
             match k.code {
-                KeyCode::Left => self.columns_offset = self.columns_offset.saturating_sub(1),
-                KeyCode::Right => self.columns_offset = self.columns_offset.saturating_add(1),
+                KeyCode::Left => {
+                    let last = self
+                        .preview
+                        .as_ref()
+                        .map_or(0, |p| p.columns.len().saturating_sub(1));
+                    self.columns_offset = self.columns_offset.min(last).saturating_sub(1);
+                }
+                KeyCode::Right => {
+                    let last = self
+                        .preview
+                        .as_ref()
+                        .map_or(0, |p| p.columns.len().saturating_sub(1));
+                    self.columns_offset = self.columns_offset.saturating_add(1).min(last);
+                }
                 _ => {}
             }
             return Ok(());
@@ -663,21 +676,27 @@ fn render(f: &mut Frame, app: &App) {
             Constraint::Length(1),
         ])
         .split(area);
-    let direction = if chunks[1].width < 72 {
-        Direction::Vertical
+    let (table_area, context_area, headers_area) = if chunks[1].width >= 86 {
+        let widths = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(24),
+                Constraint::Min(36),
+                Constraint::Percentage(28),
+            ])
+            .split(chunks[1]);
+        (widths[1], widths[2], widths[0])
     } else {
-        Direction::Horizontal
-    };
-    let top = if direction == Direction::Horizontal {
-        Layout::default()
-            .direction(direction)
-            .constraints([Constraint::Percentage(72), Constraint::Percentage(28)])
-            .split(chunks[1])
-    } else {
-        Layout::default()
-            .direction(direction)
+        let stacked = Layout::default()
+            .direction(Direction::Vertical)
             .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-            .split(chunks[1])
+            .split(chunks[1]);
+        let sidebar_width = chunks[1].width.saturating_sub(14).clamp(10, 24);
+        let row = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(sidebar_width), Constraint::Min(1)])
+            .split(stacked[0]);
+        (row[1], stacked[1], row[0])
     };
     let shown_mode = app.preview.as_ref().map_or(app.mode, |p| p.mode);
     let banner=format!(" QUILT  |  {} preview  |  F5 toggle sample/full  F6 cache  Ctrl-Z/Y undo/redo  Ctrl-C quit",if shown_mode==PreviewMode::Sample{format!("Sample first {} rows",app.preview.as_ref().and_then(|p|p.sample_rows).unwrap_or(super::SAMPLE_ROWS))}else{"Full data".into()});
@@ -689,9 +708,10 @@ fn render(f: &mut Frame, app: &App) {
         ),
         chunks[0],
     );
-    draw_table(f, top[0], app);
+    draw_headers(f, headers_area, app);
+    draw_table(f, table_area, app);
     let help = input::help(&app.draft, app.cursor);
-    let narrow = top[1].height < 12;
+    let narrow = context_area.height < 12;
     let step_limit = if narrow { 0 } else { 4 };
     let candidate_limit = if narrow { 2 } else { 5 };
     let candidate_start = app
@@ -717,7 +737,7 @@ fn render(f: &mut Frame, app: &App) {
                 safe(&c.display)
             )
         });
-    let help_width = top[1].width.saturating_sub(4).max(8) as usize;
+    let help_width = context_area.width.saturating_sub(4).max(8) as usize;
     let help_lines = help
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -740,7 +760,7 @@ fn render(f: &mut Frame, app: &App) {
                     .title("Context / pipeline"),
             )
             .wrap(Wrap { trim: false }),
-        top[1],
+        context_area,
     );
     let cursor_col = UnicodeWidthStr::width(&app.draft[..app.cursor]);
     let input_width = chunks[2].width.saturating_sub(2) as usize;
@@ -773,6 +793,72 @@ fn render(f: &mut Frame, app: &App) {
             (chunks[2].y + 1).min(chunks[2].bottom().saturating_sub(1)),
         ));
     }
+}
+
+fn draw_headers(f: &mut Frame, area: Rect, app: &App) {
+    let Some(preview) = &app.preview else {
+        f.render_widget(
+            Paragraph::new("Waiting for columns…")
+                .block(Block::default().borders(Borders::ALL).title("Headers")),
+            area,
+        );
+        return;
+    };
+    let columns = &preview.columns;
+    let title = if columns.len() == preview.total_columns {
+        format!("Headers ({})", preview.total_columns)
+    } else {
+        format!("Headers {}/{}", columns.len(), preview.total_columns)
+    };
+    let selected = app.columns_offset.min(columns.len().saturating_sub(1));
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let mut lines = Vec::new();
+    if columns.is_empty() {
+        lines.push(ratatui::text::Line::from("No columns"));
+    } else if inner_height > 0 {
+        let show_above = selected > 0;
+        let show_below = selected + 1 < columns.len();
+        let slots = inner_height.saturating_sub(show_above as usize + show_below as usize);
+        if slots == 0 {
+            lines.push(ratatui::text::Line::from(truncate_display(
+                &safe(&format!(
+                    "› {} : {}",
+                    columns[selected].0, columns[selected].1
+                )),
+                area.width.saturating_sub(2) as usize,
+            )));
+        } else {
+            let mut start = selected.saturating_sub(slots.saturating_sub(1) / 2);
+            start = start.min(columns.len().saturating_sub(slots));
+            let end = (start + slots).min(columns.len());
+            if start > 0 {
+                lines.push(ratatui::text::Line::from("↑ earlier headers"));
+            }
+            for (i, (name, kind)) in columns.iter().enumerate().take(end).skip(start) {
+                let marker = if i == selected { "› " } else { "  " };
+                let label = truncate_display(
+                    &safe(&format!("{marker}{name} : {kind}")),
+                    area.width.saturating_sub(2) as usize,
+                );
+                let style = if i == selected {
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                lines.push(ratatui::text::Line::from(label).style(style));
+            }
+            if end < columns.len() {
+                lines.push(ratatui::text::Line::from("↓ more headers"));
+            }
+        }
+    }
+    f.render_widget(
+        Paragraph::new(ratatui::text::Text::from(lines))
+            .block(Block::default().borders(Borders::ALL).title(title)),
+        area,
+    );
 }
 
 fn truncate_display(value: &str, max_width: usize) -> String {
@@ -908,6 +994,7 @@ mod tests {
             cursor: "select 名".len(),
             preview: Some(Preview {
                 columns: vec![("名字".into(), "String".into())],
+                total_columns: 1,
                 rows: vec![vec!["值".into()]],
                 truncated: false,
                 mode: PreviewMode::Sample,
@@ -933,6 +1020,66 @@ mod tests {
             quitting: false,
         };
         terminal.draw(|f| render(f, &app)).unwrap();
+    }
+
+    #[test]
+    fn headers_remain_visible_and_follow_the_selected_column() {
+        let mut terminal = Terminal::new(TestBackend::new(110, 18)).unwrap();
+        let mut app = test_app();
+        app.columns_offset = 7;
+        app.preview = Some(Preview {
+            columns: (0..16)
+                .map(|i| {
+                    if i == 7 {
+                        ("列\t八".into(), "String".into())
+                    } else {
+                        (format!("Header {i:02}"), "String".into())
+                    }
+                })
+                .collect(),
+            total_columns: 20,
+            rows: Vec::new(),
+            truncated: false,
+            mode: PreviewMode::Sample,
+            sample_rows: Some(10_000),
+            cache: None,
+        });
+        terminal.draw(|f| render(f, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+        assert!(rendered.contains("Headers"));
+        assert!(rendered.contains("16/20"));
+        // Ratatui reserves a continuation cell after wide glyphs, so the flattened
+        // buffer may contain padding between the CJK glyph and following text.
+        assert!(rendered.contains("列"));
+        assert!(rendered.contains("\\t八"));
+        assert!(rendered.contains("↑ earlier headers"));
+        assert!(rendered.contains("↓ more headers"));
+        assert!(app.draft.is_empty());
+
+        for _ in 0..30 {
+            app.key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT))
+                .unwrap();
+        }
+        assert_eq!(app.columns_offset, 15);
+        app.key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT))
+            .unwrap();
+        assert_eq!(app.columns_offset, 14);
+
+        app.latest_preview = 1;
+        app.handle_event(Event {
+            id: 1,
+            result: Ok(Outcome::Preview(Preview {
+                columns: vec![("only".into(), "String".into())],
+                total_columns: 1,
+                rows: Vec::new(),
+                truncated: false,
+                mode: PreviewMode::Sample,
+                sample_rows: Some(10_000),
+                cache: None,
+            })),
+        });
+        assert_eq!(app.columns_offset, 0);
     }
 
     #[test]
@@ -976,6 +1123,7 @@ mod tests {
         let mut app = test_app();
         app.preview = Some(Preview {
             columns: Vec::new(),
+            total_columns: 0,
             rows: Vec::new(),
             truncated: false,
             mode: PreviewMode::Sample,

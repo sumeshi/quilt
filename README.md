@@ -66,7 +66,9 @@ $ qlt --tui --all-strings events.csv
 
 Enter CLI pipeline commands such as `grep ERROR` or `filter 'id == 4624'`.
 The table previews the current draft; Enter applies it.
-The right pane shows completion candidates and help for the current command.
+The compact left pane lists column names and types; Alt-Left / Right keeps the
+current column visible there. The right pane shows completion candidates and
+help for the current command.
 
 | Key / command | Action |
 | --- | --- |
