@@ -1,7 +1,7 @@
 use crate::controllers::resources::ExecutionResources;
 use crate::error::QuiltError;
 use crate::operations::finalizers::{
-    atomic_path, validate_destination, FinalizerResult, OutputArtifact,
+    atomic_path, file_sink_target, validate_destination, FinalizerResult, OutputArtifact,
 };
 use polars::prelude::*;
 use std::path::{Path, PathBuf};
@@ -55,11 +55,10 @@ pub fn dump_jsonl(df: &LazyFrame, path: &str) -> Result<FinalizerResult, QuiltEr
 
 fn sink_jsonl(df: &LazyFrame, path: &Path, operation: &str) -> Result<(), QuiltError> {
     let frame = checked_jsonl_frame(df, operation)?;
+    let target = file_sink_target(path, operation)?;
     frame
         .sink(
-            SinkDestination::File {
-                target: SinkTarget::Path(PlRefPath::try_from_path(path)?),
-            },
+            SinkDestination::File { target },
             FileWriteFormat::NDJson(NDJsonWriterOptions::default()),
             UnifiedSinkArgs::default(),
         )
@@ -179,7 +178,14 @@ mod tests {
         let frame = df!("value" => &[1.0f64, f64::INFINITY]).unwrap().lazy();
         assert!(dump_jsonl(&frame, path.to_str().unwrap()).is_err());
         assert!(!path.exists());
-        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
+        let remaining = fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert!(
+            remaining.is_empty(),
+            "remaining output artifacts: {remaining:?}"
+        );
     }
 
     #[test]

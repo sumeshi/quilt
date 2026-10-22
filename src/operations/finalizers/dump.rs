@@ -1,5 +1,7 @@
 use crate::error::QuiltError;
-use crate::operations::finalizers::{atomic_path, validate_destination, FinalizerResult};
+use crate::operations::finalizers::{
+    atomic_path, file_sink_target, validate_destination, FinalizerResult,
+};
 use polars::prelude::*;
 use std::path::{Path, PathBuf};
 
@@ -35,6 +37,8 @@ pub fn dump(
     }
     validate_destination(&path, "write dump")?;
     atomic_path(&path, "write dump", |temp| {
+        let frame = super::csv::csv_frame(df, "write dump")?;
+        let target = file_sink_target(temp, "write dump")?;
         let options = CsvWriterOptions {
             serialize_options: SerializeOptions {
                 separator,
@@ -43,11 +47,9 @@ pub fn dump(
             .into(),
             ..Default::default()
         };
-        super::csv::csv_frame(df, "write dump")?
+        frame
             .sink(
-                SinkDestination::File {
-                    target: SinkTarget::Path(PlRefPath::try_from_path(temp)?),
-                },
+                SinkDestination::File { target },
                 FileWriteFormat::Csv(options),
                 UnifiedSinkArgs::default(),
             )

@@ -11,10 +11,14 @@ pub mod showtable;
 pub mod stats;
 
 use crate::error::QuiltError;
+use polars::io::utils::file::Writable;
+use polars::lazy::dsl::anonymous::SpecialEq;
+use polars::prelude::SinkTarget;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use rustix::io::Errno;
@@ -178,6 +182,27 @@ where
         Ok(())
     });
     result
+}
+
+/// Open a private output path before handing it to Polars' asynchronous sink.
+/// If sink evaluation fails, late writer cleanup can continue through this
+/// handle without recreating a path after its staging directory is removed.
+pub(crate) fn file_sink_target(path: &Path, operation: &str) -> Result<SinkTarget, QuiltError> {
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|error| {
+            QuiltError::io(
+                operation,
+                Some(path.display().to_string()),
+                error.to_string(),
+            )
+        })?;
+    Ok(SinkTarget::Dyn(SpecialEq::new(Arc::new(Mutex::new(Some(
+        Writable::Local(file),
+    ))))))
 }
 
 /// Publish a staged file without replacing a target created concurrently.
@@ -601,6 +626,33 @@ mod tests {
         let mut output = Vec::new();
         write_stdout(&result, &mut output).unwrap();
         assert_eq!(output, b"value\n\"a,b\"\n\"quote\"\"x\"\n\"line\nx\"\n\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preopened_sink_target_cannot_recreate_removed_stage_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("result.jsonl");
+        let retained = Arc::new(Mutex::new(None));
+        let retained_in_closure = Arc::clone(&retained);
+
+        let error = atomic_path(&destination, "test sink", |stage_file| {
+            *retained_in_closure.lock().unwrap() = Some(file_sink_target(stage_file, "test sink")?);
+            Err(QuiltError::operation("test sink", "injected failure"))
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("injected failure"));
+        assert!(!destination.exists());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+
+        let target = retained.lock().unwrap().take().unwrap();
+        let mut writable = target
+            .open_into_writable(None, false, None, 1, None)
+            .unwrap();
+        writable.write_all(b"late sink cleanup").unwrap();
+        drop(writable);
+        assert!(!destination.exists());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
     }
 
     #[test]

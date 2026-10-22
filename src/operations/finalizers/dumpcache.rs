@@ -1,5 +1,7 @@
 use crate::error::QuiltError;
-use crate::operations::finalizers::{atomic_path, validate_destination, FinalizerResult};
+use crate::operations::finalizers::{
+    atomic_path, file_sink_target, validate_destination, FinalizerResult,
+};
 use polars::prelude::*;
 use std::path::PathBuf;
 
@@ -29,11 +31,10 @@ pub fn dumpcache(
     };
     validate_destination(&path, "write dumpcache")?;
     atomic_path(&path, "write dumpcache", |temp| {
+        let target = file_sink_target(temp, "write dumpcache")?;
         df.clone()
             .sink(
-                SinkDestination::File {
-                    target: SinkTarget::Path(PlRefPath::try_from_path(temp)?),
-                },
+                SinkDestination::File { target },
                 FileWriteFormat::Parquet(
                     ParquetWriteOptions {
                         compression: ParquetCompression::Snappy,
