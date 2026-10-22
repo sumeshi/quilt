@@ -198,8 +198,8 @@ impl Engine {
                 let pipeline = self.full_pipeline(&request.commands, task)?;
                 task.check()?;
                 progress(TaskPhase::Caching);
-                let info = self.cache.store(request.commands, pipeline)?;
-                task.check()?;
+                let prepared = self.cache.prepare(request.commands, pipeline)?;
+                let info = self.cache.commit(prepared, task)?;
                 Ok(Outcome::Cached(info))
             }
             Action::ClearCache => {
@@ -733,17 +733,28 @@ fn worker_loop(schedule: Arc<(Mutex<Schedule>, Condvar)>, events: mpsc::Sender<E
                 state.active = None;
             }
         }
-        let result = if task.is_cancelled() {
-            match result {
-                Ok(Outcome::Saved(path)) => Ok(Outcome::Saved(path)),
-                _ => Ok(Outcome::Cancelled),
-            }
-        } else {
-            result.map_err(bound_error)
-        };
+        let result = finalize_task_result(task.is_cancelled(), result);
         if events.send(Event { id, result }).is_err() {
             return;
         }
+    }
+}
+
+fn finalize_task_result(
+    cancelled: bool,
+    result: Result<Outcome, QuiltError>,
+) -> Result<Outcome, QuiltError> {
+    if cancelled {
+        match result {
+            // These outcomes mean the mutation has already happened. Preserve
+            // that fact if cancellation arrived just after the commit point.
+            Ok(outcome @ (Outcome::Saved(_) | Outcome::Cached(_) | Outcome::CacheCleared)) => {
+                Ok(outcome)
+            }
+            _ => Ok(Outcome::Cancelled),
+        }
+    } else {
+        result.map_err(bound_error)
     }
 }
 
@@ -1052,6 +1063,7 @@ fn write_new(path: &std::path::Path, contents: &[u8]) -> Result<(), QuiltError> 
 mod tests {
     use super::*;
     use crate::controllers::command_model::{CountArgs, DumpCacheArgs, SelectArgs};
+    use crate::tui::CacheInfo;
 
     fn load(path: &std::path::Path) -> TypedCommand {
         TypedCommand::Load(LoadArgs {
@@ -1469,6 +1481,80 @@ mod tests {
         let edited = vec![load(&path)];
         assert!(engine.sample_pipeline(&edited, &TaskControl::new()).is_ok());
         assert!(engine.cache.info().is_none());
+    }
+
+    #[test]
+    fn cancelled_cache_prepare_discards_new_file_and_keeps_previous_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.csv");
+        std::fs::write(&path, "value\n1\n").unwrap();
+        let cmds = vec![load(&path)];
+        let checkpoint_dir = tempfile::tempdir().unwrap();
+        let mut engine = Engine::new();
+        engine
+            .cache
+            .store(
+                cmds.clone(),
+                Pipeline::new(
+                    df!("value" => [111i64]).unwrap().lazy(),
+                    ExecutionResources::new_in(checkpoint_dir.path().to_path_buf()),
+                ),
+            )
+            .unwrap();
+        let old_info = engine.cache.info().unwrap();
+        assert_eq!(std::fs::read_dir(checkpoint_dir.path()).unwrap().count(), 1);
+
+        let task = TaskControl::new();
+        let prepared = engine
+            .cache
+            .prepare(
+                cmds.clone(),
+                Pipeline::new(
+                    df!("value" => [222i64]).unwrap().lazy(),
+                    ExecutionResources::new_in(checkpoint_dir.path().to_path_buf()),
+                ),
+            )
+            .unwrap();
+        assert_eq!(std::fs::read_dir(checkpoint_dir.path()).unwrap().count(), 2);
+        task.cancel();
+        let result = engine.cache.commit(prepared, &task).map(Outcome::Cached);
+
+        assert!(matches!(
+            finalize_task_result(task.is_cancelled(), result).unwrap(),
+            Outcome::Cancelled
+        ));
+        assert_eq!(engine.cache.info().unwrap(), old_info);
+        assert_eq!(std::fs::read_dir(checkpoint_dir.path()).unwrap().count(), 1);
+        let (_, restored) = engine.cache.restore(&cmds).unwrap();
+        assert_eq!(
+            restored.frame().clone().collect().unwrap()["value"]
+                .i64()
+                .unwrap()
+                .get(0),
+            Some(111)
+        );
+    }
+
+    #[test]
+    fn late_cancellation_preserves_already_committed_cache_outcomes() {
+        assert!(matches!(
+            finalize_task_result(
+                true,
+                Ok(Outcome::Cached(CacheInfo {
+                    bytes: 12,
+                    steps: 2
+                }))
+            )
+            .unwrap(),
+            Outcome::Cached(CacheInfo {
+                bytes: 12,
+                steps: 2
+            })
+        ));
+        assert!(matches!(
+            finalize_task_result(true, Ok(Outcome::CacheCleared)).unwrap(),
+            Outcome::CacheCleared
+        ));
     }
 
     #[test]

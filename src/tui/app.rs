@@ -525,32 +525,24 @@ impl App {
                 ));
             }
             Ok(Outcome::Cached(c)) => {
-                if self.cancelled.remove(&id) {
-                    self.explicit.remove(&id);
-                    return;
-                }
+                self.cancelled.remove(&id);
+                self.explicit.remove(&id);
                 self.working = self.working.take().filter(|(task, _, _)| *task != id);
-                if self.explicit.remove(&id) {
-                    if let Some(preview) = &mut self.preview {
-                        preview.cache = Some(c.clone());
-                    }
-                    self.status = format!("Cache: {} bytes, {} steps", c.bytes, c.steps);
-                    self.error.clear();
+                if let Some(preview) = &mut self.preview {
+                    preview.cache = Some(c.clone());
                 }
+                self.status = format!("Cache: {} bytes, {} steps", c.bytes, c.steps);
+                self.error.clear();
             }
             Ok(Outcome::CacheCleared) => {
-                if self.cancelled.remove(&id) {
-                    self.explicit.remove(&id);
-                    return;
-                }
+                self.cancelled.remove(&id);
+                self.explicit.remove(&id);
                 self.working = self.working.take().filter(|(task, _, _)| *task != id);
-                if self.explicit.remove(&id) {
-                    if let Some(preview) = &mut self.preview {
-                        preview.cache = None;
-                    }
-                    self.status = "Cache cleared".into();
-                    self.error.clear();
+                if let Some(preview) = &mut self.preview {
+                    preview.cache = None;
                 }
+                self.status = "Cache cleared".into();
+                self.error.clear();
             }
             Ok(Outcome::Saved(path)) => {
                 self.cancelled.remove(&id);
@@ -2302,15 +2294,56 @@ mod tests {
     #[test]
     fn save_success_is_reported_even_when_cancel_was_requested() {
         let mut app = test_app();
-        app.cancelled.insert(7);
         app.explicit.insert(7);
         app.working = Some((7, TaskPhase::Saving, Instant::now()));
+        app.cancel_work();
         app.handle_event(Event {
             id: 7,
             result: Ok(Outcome::Saved(PathBuf::from("full.csv"))),
         });
         assert_eq!(app.status, "Saved full.csv");
         assert!(!app.cancelled.contains(&7));
+
+        app.preview = Some(Preview {
+            columns: Vec::new(),
+            total_columns: 0,
+            input_columns: Vec::new(),
+            rows: Vec::new(),
+            has_more_rows: false,
+            mode: PreviewMode::Sample,
+            sample_rows: None,
+            draft_issue: None,
+            cache: None,
+            commands: Vec::new(),
+            source_version: String::new(),
+        });
+        app.explicit.insert(8);
+        app.working = Some((8, TaskPhase::Caching, Instant::now()));
+        app.cancel_work();
+        app.handle_event(Event {
+            id: 8,
+            result: Ok(Outcome::Cached(super::super::CacheInfo {
+                bytes: 123,
+                steps: 2,
+            })),
+        });
+        assert_eq!(app.status, "Cache: 123 bytes, 2 steps");
+        assert_eq!(
+            app.preview.as_ref().unwrap().cache.as_ref().unwrap().bytes,
+            123
+        );
+        assert!(!app.cancelled.contains(&8));
+
+        app.explicit.insert(9);
+        app.working = Some((9, TaskPhase::Caching, Instant::now()));
+        app.cancel_work();
+        app.handle_event(Event {
+            id: 9,
+            result: Ok(Outcome::CacheCleared),
+        });
+        assert_eq!(app.status, "Cache cleared");
+        assert!(app.preview.as_ref().unwrap().cache.is_none());
+        assert!(!app.cancelled.contains(&9));
     }
 
     #[test]

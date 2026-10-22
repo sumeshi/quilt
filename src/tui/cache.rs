@@ -1,3 +1,4 @@
+use super::task::TaskControl;
 use crate::controllers::command_model::TypedCommand;
 use crate::controllers::materialization::materialize_parquet;
 use crate::controllers::pipeline::Pipeline;
@@ -17,6 +18,12 @@ struct Checkpoint {
     pipeline: Pipeline,
     bytes: u64,
     input_stamps: Vec<InputStamp>,
+}
+
+/// A fully materialized checkpoint that has not yet replaced the live one.
+/// Dropping it releases its managed Parquet file.
+pub(super) struct PreparedCheckpoint {
+    checkpoint: Checkpoint,
 }
 
 /// One full-data Parquet checkpoint for the current typed command prefix.
@@ -52,11 +59,11 @@ impl SessionCache {
         }
     }
 
-    pub(super) fn store(
-        &mut self,
+    pub(super) fn prepare(
+        &self,
         commands: Vec<TypedCommand>,
         pipeline: Pipeline,
-    ) -> Result<super::CacheInfo, QuiltError> {
+    ) -> Result<PreparedCheckpoint, QuiltError> {
         let available = self
             .limit
             .saturating_sub(self.checkpoint.as_ref().map_or(0, |c| c.bytes));
@@ -69,16 +76,41 @@ impl SessionCache {
             Some(available),
         )?;
         let new_pipeline = Pipeline::new(frame, resources).with_source_inventory(source_inventory);
-        self.checkpoint = Some(Checkpoint {
-            commands: commands.clone(),
-            pipeline: new_pipeline,
-            bytes,
-            input_stamps: stamps,
-        });
-        Ok(super::CacheInfo {
-            bytes,
-            steps: commands.len(),
+        Ok(PreparedCheckpoint {
+            checkpoint: Checkpoint {
+                commands,
+                pipeline: new_pipeline,
+                bytes,
+                input_stamps: stamps,
+            },
         })
+    }
+
+    /// Install a previously prepared checkpoint. This is the only mutating
+    /// part of cache creation, so callers can check cancellation immediately
+    /// before it and safely discard a prepared checkpoint when cancelled.
+    pub(super) fn commit(
+        &mut self,
+        prepared: PreparedCheckpoint,
+        task: &TaskControl,
+    ) -> Result<super::CacheInfo, QuiltError> {
+        task.check()?;
+        let info = super::CacheInfo {
+            bytes: prepared.checkpoint.bytes,
+            steps: prepared.checkpoint.commands.len(),
+        };
+        self.checkpoint = Some(prepared.checkpoint);
+        Ok(info)
+    }
+
+    #[cfg(test)]
+    pub(super) fn store(
+        &mut self,
+        commands: Vec<TypedCommand>,
+        pipeline: Pipeline,
+    ) -> Result<super::CacheInfo, QuiltError> {
+        let prepared = self.prepare(commands, pipeline)?;
+        self.commit(prepared, &TaskControl::new())
     }
 
     pub(super) fn clear(&mut self) {
