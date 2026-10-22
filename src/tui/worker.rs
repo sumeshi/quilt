@@ -615,7 +615,7 @@ fn preview_frame(frame: &LazyFrame) -> Result<FramePreview, QuiltError> {
         .limit((PREVIEW_ROWS + 1) as IdxSize)
         .collect()
         .map_err(|e| QuiltError::operation("TUI preview", e.to_string()))?;
-    let truncated = df.height() > PREVIEW_ROWS || total_columns > MAX_COLUMNS;
+    let truncated = df.height() > PREVIEW_ROWS;
     let rows = (0..df.height().min(PREVIEW_ROWS))
         .map(|row| {
             df.columns()
@@ -763,7 +763,7 @@ mod tests {
         assert_eq!(preview.columns.len(), MAX_COLUMNS);
         assert_eq!(preview.rows.len(), 1);
         assert_eq!(preview.rows[0].len(), MAX_COLUMNS);
-        assert!(preview.truncated);
+        assert!(!preview.truncated);
         assert_eq!(preview.rows[0][0].chars().count(), MAX_CELL_CHARS + 1);
         assert!(preview.rows[0][0].ends_with('…'));
     }

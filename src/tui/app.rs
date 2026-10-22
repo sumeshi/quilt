@@ -369,6 +369,7 @@ impl App {
                     return;
                 }
                 self.columns_offset = self.columns_offset.min(p.columns.len().saturating_sub(1));
+                self.rows_offset = self.rows_offset.min(p.rows.len().saturating_sub(1));
                 let draft_issue = p.draft_issue.clone();
                 self.preview = Some(p);
                 self.preview_pending = false;
@@ -1476,6 +1477,41 @@ mod tests {
             quitting: false,
         };
         terminal.draw(|f| render(f, &mut app)).unwrap();
+    }
+
+    #[test]
+    fn preview_update_bounds_scroll_after_result_shrinks() {
+        let mut app = test_app();
+        app.rows_offset = 80;
+        app.latest_preview = 1;
+        app.handle_event(Event {
+            id: 1,
+            result: Ok(Outcome::Preview(Preview {
+                columns: vec![
+                    ("hoge".into(), "str".into()),
+                    ("count".into(), "u32".into()),
+                ],
+                total_columns: 2,
+                input_columns: vec![("hoge".into(), "str".into())],
+                rows: vec![vec!["A".into(), "60".into()], vec!["B".into(), "40".into()]],
+                truncated: false,
+                mode: PreviewMode::Sample,
+                sample_rows: Some(100),
+                draft_issue: None,
+                cache: None,
+            })),
+        });
+        let mut terminal = Terminal::new(TestBackend::new(110, 18)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(app.rows_offset < 2);
+        assert!(rendered.contains("40"), "{rendered}");
     }
 
     #[test]
