@@ -90,6 +90,7 @@ struct App {
     explicit: HashSet<u64>,
     status: String,
     error: String,
+    action_error: Option<u64>,
     dirty_at: Option<Instant>,
     columns_offset: usize,
     rows_offset: usize,
@@ -143,6 +144,7 @@ pub(super) fn run(
         explicit: HashSet::new(),
         status: "Ready".into(),
         error: String::new(),
+        action_error: None,
         dirty_at: None,
         columns_offset: 0,
         rows_offset: 0,
@@ -233,6 +235,10 @@ pub(super) fn run(
 }
 
 impl App {
+    fn clear_error(&mut self) {
+        self.error.clear();
+        self.action_error = None;
+    }
     fn insert(&mut self, text: &str) {
         let clean: String = text.chars().filter(|c| !is_terminal_control(*c)).collect();
         self.draft.insert_str(self.cursor, &clean);
@@ -242,9 +248,25 @@ impl App {
         self.dirty_at = Some(Instant::now());
         self.latest_preview = 0;
         self.preview_pending = false;
-        self.error.clear();
+        self.clear_error();
         self.completion = 0;
         self.refresh_candidates();
+    }
+    fn transition_draft(&mut self, draft: String, refresh_preview: bool) {
+        self.draft = draft;
+        self.cursor = self.draft.len();
+        self.edit_step = None;
+        self.dirty_at = None;
+        self.latest_preview = 0;
+        self.preview_pending = false;
+        self.pending_picker = false;
+        self.completion = 0;
+        self.clear_error();
+        self.refresh_candidates();
+        self.dirty_at = refresh_preview.then(Instant::now);
+    }
+    fn clear_draft(&mut self, refresh_preview: bool) {
+        self.transition_draft(String::new(), refresh_preview);
     }
     fn refresh_candidates(&mut self) {
         self.candidates = input::complete(
@@ -329,7 +351,16 @@ impl App {
             return;
         }
         if self.draft.trim_start().starts_with(':') {
-            self.preview_pending = false;
+            match self.queue(self.committed.clone(), Action::Preview(self.mode)) {
+                Ok(id) => {
+                    self.latest_preview = id;
+                    self.preview_pending = true;
+                }
+                Err(e) => {
+                    self.preview_pending = false;
+                    self.error = safe(&e.to_string());
+                }
+            }
             self.pending_picker = false;
             self.status = "Built-in draft; Enter executes it".into();
             return;
@@ -426,11 +457,16 @@ impl App {
                 let draft_issue = p.draft_issue.clone();
                 self.preview = Some(p);
                 self.preview_pending = false;
-                self.error.clear();
-                self.status = draft_issue.map_or_else(
-                    || "Preview updated".into(),
-                    |issue| format!("Input before draft — {}", safe(&issue)),
-                );
+                let built_in_prompt = self.draft.trim_start().starts_with(':');
+                if !built_in_prompt {
+                    if self.action_error.is_none() {
+                        self.clear_error();
+                    }
+                    self.status = draft_issue.map_or_else(
+                        || "Preview updated".into(),
+                        |issue| format!("Input before draft — {}", safe(&issue)),
+                    );
+                }
                 self.refresh_candidates();
                 if self.pending_picker {
                     self.pending_picker = false;
@@ -457,10 +493,7 @@ impl App {
                             }
                         }
                         self.committed = pending.commands;
-                        self.edit_step = None;
-                        self.draft.clear();
-                        self.cursor = 0;
-                        self.refresh_candidates();
+                        self.clear_draft(false);
                         self.status = "Command committed".into();
                     }
                 }
@@ -532,7 +565,7 @@ impl App {
                     preview.cache = Some(c.clone());
                 }
                 self.status = format!("Cache: {} bytes, {} steps", c.bytes, c.steps);
-                self.error.clear();
+                self.clear_error();
             }
             Ok(Outcome::CacheCleared) => {
                 self.cancelled.remove(&id);
@@ -542,14 +575,14 @@ impl App {
                     preview.cache = None;
                 }
                 self.status = "Cache cleared".into();
-                self.error.clear();
+                self.clear_error();
             }
             Ok(Outcome::Saved(path)) => {
                 self.cancelled.remove(&id);
                 self.explicit.remove(&id);
                 self.working = self.working.take().filter(|(task, _, _)| *task != id);
                 self.status = format!("Saved {}", safe(&path.to_string_lossy()));
-                self.error.clear();
+                self.clear_error();
             }
             Err(e) => {
                 if self.cancelled.remove(&id) {
@@ -567,8 +600,10 @@ impl App {
                     .pending_commit
                     .as_ref()
                     .is_some_and(|pending| pending.id == id);
-                if self.explicit.remove(&id) || id == self.latest_preview || is_commit {
+                let explicit = self.explicit.remove(&id);
+                if explicit || id == self.latest_preview || is_commit {
                     self.error = safe(&e.to_string());
+                    self.action_error = explicit.then_some(id);
                     if id == self.latest_preview {
                         self.preview_pending = false;
                         self.pending_picker = false;
@@ -801,13 +836,9 @@ impl App {
         match result {
             Ok(()) => {
                 if cmd != ":edit" {
-                    self.draft.clear();
-                    self.cursor = 0;
-                    self.edit_step = None;
-                    self.dirty_at = None;
-                    self.refresh_candidates();
+                    self.clear_draft(true);
                 }
-                self.error.clear();
+                self.clear_error();
             }
             Err(e) => self.error = safe(&e.to_string()),
         }
@@ -932,13 +963,14 @@ impl App {
                 }
                 KeyCode::Char('d') => self.inspect(None),
                 KeyCode::Char('e') => {
-                    if let Some(issue) = self.preview.as_ref().and_then(|p| p.draft_issue.as_ref())
+                    if !self.error.is_empty() {
+                        self.detail = Some(DetailView::new("Error details", self.error.clone()));
+                    } else if let Some(issue) =
+                        self.preview.as_ref().and_then(|p| p.draft_issue.as_ref())
                     {
                         self.detail = Some(DetailView::new("Draft issue details", issue.clone()));
-                    } else if self.error.is_empty() {
-                        self.status = "There is no current error to expand".into();
                     } else {
-                        self.detail = Some(DetailView::new("Error details", self.error.clone()));
+                        self.status = "There is no current error to expand".into();
                     }
                 }
                 KeyCode::Char('o') => self.prompt_action("export"),
@@ -1055,13 +1087,7 @@ impl App {
         match k.code {
             KeyCode::Esc => {
                 self.pending_picker = false;
-                self.draft.clear();
-                self.cursor = 0;
-                self.dirty_at = None;
-                self.edit_step = None;
-                self.error.clear();
-                self.completion = 0;
-                self.refresh_candidates();
+                self.clear_draft(false);
                 if self.committed.is_empty() {
                     self.preview = None;
                     self.latest_preview = 0;
@@ -1165,7 +1191,18 @@ impl App {
             .preview
             .as_ref()
             .map_or_else(Vec::new, |p| p.input_columns.clone());
-        self.picker = Some(ColumnPicker::new(columns, target.columns));
+        let available: Vec<String> = columns.iter().map(|(name, _)| name.clone()).collect();
+        let selected = match crate::operations::chainables::select::expand_select_columns(
+            &target.columns,
+            &available,
+        ) {
+            Ok(columns) => columns,
+            Err(error) => {
+                self.error = safe(&error.to_string());
+                return;
+            }
+        };
+        self.picker = Some(ColumnPicker::new(columns, selected));
     }
     fn apply_picker_selection(&mut self, columns: Vec<String>) {
         let Some(target) = input::select_target(&self.draft, self.cursor) else {
@@ -1190,42 +1227,21 @@ impl App {
     }
     fn prompt_action(&mut self, kind: &str) {
         if kind == "write" {
-            self.draft = ":write ".into();
-            self.cursor = self.draft.len();
-            self.edit_step = None;
-            self.dirty_at = None;
-            self.latest_preview = 0;
-            self.preview_pending = false;
-            self.pending_picker = false;
-            self.completion = 0;
-            self.error.clear();
-            self.refresh_candidates();
+            self.transition_draft(":write ".into(), true);
+            self.preview = None;
+            self.focus = Focus::Input;
+            self.fullscreen = false;
             self.status = "Enter a YAML path, then press Enter".into();
         } else if kind == "export" {
-            self.draft = ":export ".into();
-            self.cursor = self.draft.len();
-            self.edit_step = None;
-            self.dirty_at = None;
-            self.latest_preview = 0;
-            self.preview_pending = false;
-            self.pending_picker = false;
-            self.completion = 0;
-            self.error.clear();
-            self.refresh_candidates();
+            self.transition_draft(":export ".into(), true);
+            self.preview = None;
+            self.focus = Focus::Input;
+            self.fullscreen = false;
             self.status = "Enter a new path to export the full data set (CSV by default)".into();
         }
     }
     fn reset_draft_for_history_change(&mut self) {
-        self.draft.clear();
-        self.cursor = 0;
-        self.edit_step = None;
-        self.dirty_at = None;
-        self.latest_preview = 0;
-        self.preview_pending = false;
-        self.pending_picker = false;
-        self.completion = 0;
-        self.error.clear();
-        self.refresh_candidates();
+        self.clear_draft(false);
     }
     fn preview_committed(&mut self) {
         if self.committed.is_empty() {
@@ -2006,6 +2022,23 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
 mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
+    use std::{fs, thread};
+
+    fn wait_for_final_event(app: &mut App, id: u64) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if let Some(event) = app.worker.poll() {
+                let done = event.id == id && !matches!(&event.result, Ok(Outcome::Working(_)));
+                app.handle_event(event);
+                if done {
+                    return;
+                }
+            } else {
+                thread::yield_now();
+            }
+        }
+        panic!("worker did not complete request {id} within 10 seconds");
+    }
 
     fn test_app() -> App {
         App {
@@ -2025,6 +2058,7 @@ mod tests {
             explicit: HashSet::new(),
             status: "Ready".into(),
             error: String::new(),
+            action_error: None,
             dirty_at: None,
             columns_offset: 0,
             rows_offset: 0,
@@ -2107,6 +2141,7 @@ mod tests {
             explicit: HashSet::new(),
             status: "Ready".into(),
             error: String::new(),
+            action_error: None,
             dirty_at: None,
             columns_offset: 0,
             rows_offset: 0,
@@ -2562,6 +2597,15 @@ mod tests {
             .unwrap();
         assert_eq!(app.explicit.len(), 1);
         assert!(app.status.contains("checkpoint"));
+
+        // The picker can repair an unfinished literal name without applying it.
+        app.draft = "select alpha,be".into();
+        app.cursor = app.draft.len();
+        app.open_picker_now();
+        assert!(app.picker.is_some());
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.draft, "select alpha,be");
     }
 
     #[test]
@@ -2871,5 +2915,117 @@ mod tests {
         assert_eq!(app.draft, ":write ");
         assert!(app.edit_step.is_none());
         assert!(app.candidates.is_empty());
+        assert_eq!(app.focus, Focus::Input);
+        assert!(!app.fullscreen);
+    }
+
+    #[test]
+    fn export_prompt_restores_input_focus_from_fullscreen_panes() {
+        for focus in [Focus::Table, Focus::Pipeline] {
+            let mut app = test_app();
+            app.focus = focus;
+            app.fullscreen = true;
+            app.draft = "select missing".into();
+            app.error = "invalid column".into();
+
+            app.prompt_action("export");
+            app.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+                .unwrap();
+
+            assert_eq!(app.draft, ":export x");
+            assert_eq!(app.focus, Focus::Input);
+            assert!(!app.fullscreen);
+            assert!(app.error.is_empty());
+        }
+    }
+
+    #[test]
+    fn draft_export_and_failed_export_keep_preview_and_error_provenance_current() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("input.csv");
+        let output = directory.path().join("export.csv");
+        let existing = directory.path().join("existing.csv");
+        fs::write(&source, "a,b,c\n1,2,3\n").unwrap();
+        fs::write(&existing, "keep\n").unwrap();
+
+        let mut app = test_app();
+        let source_command = format!("load {}", input::quote_argument(&source.to_string_lossy()));
+        app.committed = input::parse_commands(&source_command).unwrap();
+        app.draft = "select a".into();
+        app.cursor = app.draft.len();
+        app.schedule_preview();
+        let draft_preview = app.latest_preview;
+        wait_for_final_event(&mut app, draft_preview);
+        assert_eq!(
+            app.preview.as_ref().unwrap().columns[0].0,
+            "a",
+            "the draft preview should reflect its select"
+        );
+
+        app.prompt_action("export");
+        app.schedule_preview();
+        let confirmed_preview = app.latest_preview;
+        wait_for_final_event(&mut app, confirmed_preview);
+        let preview = app.preview.as_ref().unwrap();
+        assert_eq!(preview.commands, app.committed);
+        assert_eq!(
+            preview
+                .columns
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "c"]
+        );
+
+        app.draft = format!(
+            ":export {}",
+            input::quote_argument(&output.to_string_lossy())
+        );
+        app.cursor = app.draft.len();
+        app.commit();
+        let export_id = app.generation;
+        app.schedule_preview();
+        let refreshed_after_export = app.latest_preview;
+        wait_for_final_event(&mut app, export_id);
+        wait_for_final_event(&mut app, refreshed_after_export);
+        let exported = fs::read_to_string(&output).unwrap();
+        assert!(exported.lines().next().unwrap().contains("a,b,c"));
+        assert_eq!(app.preview.as_ref().unwrap().commands, app.committed);
+
+        app.draft = "select missing".into();
+        app.cursor = app.draft.len();
+        app.schedule_preview();
+        let invalid_draft = app.latest_preview;
+        wait_for_final_event(&mut app, invalid_draft);
+        assert!(app.preview.as_ref().unwrap().draft_issue.is_some());
+        app.prompt_action("export");
+        app.draft = format!(
+            ":export {}",
+            input::quote_argument(&existing.to_string_lossy())
+        );
+        app.cursor = app.draft.len();
+        app.commit();
+        let failed_export_id = app.generation;
+        app.schedule_preview();
+        let refreshed_preview = app.latest_preview;
+        wait_for_final_event(&mut app, failed_export_id);
+        wait_for_final_event(&mut app, refreshed_preview);
+        assert!(app.error.contains("already exists"), "{}", app.error);
+        assert_eq!(app.preview.as_ref().unwrap().commands, app.committed);
+
+        app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+            .unwrap();
+        app.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE))
+            .unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(rendered.contains("Error details"), "{rendered}");
     }
 }

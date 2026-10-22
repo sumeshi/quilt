@@ -1152,7 +1152,7 @@ mod tests {
         let target = select_target(quoted_range, quoted_range.len()).unwrap();
         let available = ["col:1", "middle", "col:3"].map(str::to_owned);
         assert_eq!(
-            crate::operations::chainables::select::resolve_select_columns(
+            crate::operations::chainables::select::expand_select_columns(
                 &target.columns,
                 &available,
             )

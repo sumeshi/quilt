@@ -17,7 +17,17 @@ pub fn select(df: &LazyFrame, colnames: &[String]) -> Result<LazyFrame, QuiltErr
         )
     })?;
     let available_columns: Vec<String> = schema.iter_names().map(|s| s.to_string()).collect();
-    let expanded_colnames = resolve_select_columns(colnames, &available_columns)?;
+    let expanded_colnames = expand_select_columns(colnames, &available_columns)?;
+
+    for colname in &expanded_colnames {
+        if !available_columns.iter().any(|name| name == colname) {
+            return Err(QuiltError::schema(
+                "select",
+                Some(colname),
+                format!("Error: Column '{colname}' not found in DataFrame for select operation"),
+            ));
+        }
+    }
 
     let selected_cols: Vec<Expr> = expanded_colnames
         .iter()
@@ -30,7 +40,8 @@ pub fn select(df: &LazyFrame, colnames: &[String]) -> Result<LazyFrame, QuiltErr
     Ok(df.clone().select(&selected_cols))
 }
 
-pub(crate) fn resolve_select_columns(
+/// Expand range and index syntax. Literal names are validated by the caller.
+pub(crate) fn expand_select_columns(
     colnames: &[String],
     available_columns: &[String],
 ) -> Result<Vec<String>, QuiltError> {
@@ -69,16 +80,6 @@ pub(crate) fn resolve_select_columns(
             }
         } else {
             expanded_colnames.push(colname.clone());
-        }
-    }
-
-    for colname in &expanded_colnames {
-        if !available_columns.iter().any(|name| name == colname) {
-            return Err(QuiltError::schema(
-                "select",
-                Some(colname),
-                format!("Error: Column '{colname}' not found in DataFrame for select operation"),
-            ));
         }
     }
 
@@ -268,19 +269,19 @@ mod tests {
     fn schema_resolver_preserves_literal_names_before_range_syntax() {
         let columns = ["a", "b", "c", "1:2"].map(str::to_owned).to_vec();
         assert_eq!(
-            resolve_select_columns(&["1:2".into()], &columns).unwrap(),
+            expand_select_columns(&["1:2".into()], &columns).unwrap(),
             ["1:2"]
         );
         assert_eq!(
-            resolve_select_columns(&["1:3".into()], &columns).unwrap(),
+            expand_select_columns(&["1:3".into()], &columns).unwrap(),
             ["a", "b", "c"]
         );
         assert_eq!(
-            resolve_select_columns(&["a:c".into()], &columns).unwrap(),
+            expand_select_columns(&["a:c".into()], &columns).unwrap(),
             ["a", "b", "c"]
         );
         assert_eq!(
-            resolve_select_columns(&["2".into()], &columns).unwrap(),
+            expand_select_columns(&["2".into()], &columns).unwrap(),
             ["b"]
         );
     }
