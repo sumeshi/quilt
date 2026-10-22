@@ -4,7 +4,7 @@ use super::{
     worker::Worker,
     Action, Event, Outcome, Preview, PreviewMode, Request,
 };
-use crate::controllers::command_model::{CommandCategory, TypedCommand};
+use crate::controllers::command_model::{registry, CommandCategory, TypedCommand};
 use crate::QuiltError;
 use crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event as CEvent, KeyCode, KeyEvent,
@@ -18,6 +18,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
+    text::{Line, Span},
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap},
     Frame, Terminal,
 };
@@ -216,6 +217,29 @@ impl App {
                 .as_ref()
                 .map_or(&[], |p| p.input_columns.as_slice()),
         );
+        let editing_first_step = self.edit_step.is_some_and(|(start, _)| start == 0);
+        if !self.committed.is_empty() && !editing_first_step {
+            self.candidates.retain(|candidate| {
+                candidate.kind != input::CompletionKind::Command
+                    || registry()
+                        .iter()
+                        .find(|command| command.name == candidate.display)
+                        .is_none_or(|command| command.category != CommandCategory::Initializer)
+            });
+        }
+        if self.draft.trim().is_empty()
+            && self
+                .committed
+                .last()
+                .is_some_and(|command| command.name() == "select")
+        {
+            if let Some(index) = self.candidates.iter().position(|candidate| {
+                candidate.kind == input::CompletionKind::Command && candidate.display == "count"
+            }) {
+                let count = self.candidates.remove(index);
+                self.candidates.insert(0, count);
+            }
+        }
         if self.candidates.is_empty() {
             self.completion = 0;
         } else {
@@ -614,9 +638,9 @@ impl App {
                     self.help_overlay = true;
                     self.help_scroll = 0;
                 }
-                KeyCode::Char('s') => self.open_picker(),
+                KeyCode::Char('c') => self.open_picker(),
                 KeyCode::Char('w') => self.prompt_action("write"),
-                KeyCode::Char('c') => {
+                KeyCode::Char('C') => {
                     let commands = self.committed.clone();
                     match self.queue(commands, Action::Cache) {
                         Ok(_) => self.status = "Creating session checkpoint…".into(),
@@ -647,7 +671,9 @@ impl App {
         if k.modifiers.contains(KeyModifiers::CONTROL) {
             if k.code == KeyCode::Char('a') {
                 self.prefix_mode = true;
-                self.status = "Prefix: ? help s columns w write c checkpoint x clear p mode u/r undo/redo q quit".into();
+                self.status =
+                    "Prefix: ? help c columns C cache w write x clear p mode u/r undo/redo q quit"
+                        .into();
             }
             return Ok(());
         }
@@ -736,7 +762,8 @@ impl App {
             KeyCode::Tab => self.complete(),
             KeyCode::Up => {
                 if !self.candidates.is_empty() {
-                    self.completion = self.completion.saturating_sub(1) % self.candidates.len();
+                    self.completion =
+                        (self.completion + self.candidates.len() - 1) % self.candidates.len();
                 }
             }
             KeyCode::Down => {
@@ -931,7 +958,7 @@ fn render(f: &mut Frame, app: &mut App) {
         ""
     };
     let banner = format!(
-        " QUILT | {} preview{} | Ctrl+A ? help | Ctrl+A s columns | Tab complete | Alt←/→ columns | Enter apply",
+        " QUILT | {} preview{} | Ctrl+A ? help | Ctrl+A c columns | Tab complete | Alt←/→ columns | Enter apply",
         if shown_mode == PreviewMode::Sample {
             format!(
                 "Sample first {} rows",
@@ -955,32 +982,13 @@ fn render(f: &mut Frame, app: &mut App) {
     );
     draw_headers(f, headers_area, app);
     draw_table(f, table_area, app);
-    let help = input::help(&app.draft, app.cursor);
-    let candidate_limit = 5;
-    let candidate_start = app
-        .completion
-        .saturating_sub(candidate_limit / 2)
-        .min(app.candidates.len().saturating_sub(candidate_limit));
-    let candidates = app
-        .candidates
-        .iter()
-        .enumerate()
-        .skip(candidate_start)
-        .take(candidate_limit)
-        .map(|(i, c)| {
-            format!(
-                "{} {}",
-                if i == app.completion { "›" } else { " " },
-                safe(&c.display)
-            )
-        });
     let (completion_area, help_area, pipeline_area) = if context_area.height >= 25 {
         let areas = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(7),
+                Constraint::Percentage(50),
                 Constraint::Min(8),
-                Constraint::Length(7),
+                Constraint::Length(5),
             ])
             .split(context_area);
         (areas[0], areas[1], Some(areas[2]))
@@ -991,17 +999,95 @@ fn render(f: &mut Frame, app: &mut App) {
             .split(context_area);
         (areas[0], areas[1], None)
     };
-    let mut completion_lines = vec!["Candidates".to_owned()];
-    completion_lines.extend(candidates);
+    let candidate_rows = completion_area.height.saturating_sub(2) as usize;
+    let two_lines = candidate_rows >= 4 && completion_area.width >= 26;
+    let lines_per_candidate = if two_lines { 2 } else { 1 };
+    let visible_candidates = (candidate_rows / lines_per_candidate).max(1);
+    let selected_candidate = app.completion.min(app.candidates.len().saturating_sub(1));
+    let candidate_start = selected_candidate
+        .saturating_sub(visible_candidates / 2)
+        .min(app.candidates.len().saturating_sub(visible_candidates));
+    let candidate_end = (candidate_start + visible_candidates).min(app.candidates.len());
+    let completion_title = if app.candidates.is_empty() {
+        "Completions 0/0".to_owned()
+    } else {
+        format!(
+            "Completions {}-{} /{} ↑↓",
+            candidate_start + 1,
+            candidate_end,
+            app.candidates.len()
+        )
+    };
+    let candidate_width = completion_area.width.saturating_sub(2) as usize;
+    let mut completion_lines = Vec::new();
+    for (index, candidate) in app
+        .candidates
+        .iter()
+        .enumerate()
+        .take(candidate_end)
+        .skip(candidate_start)
+    {
+        let selected = index == selected_candidate;
+        let marker = if selected { "› " } else { "  " };
+        let name_style = if selected {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().add_modifier(Modifier::BOLD)
+        };
+        if two_lines {
+            completion_lines.push(Line::from(vec![
+                Span::styled(marker, name_style),
+                Span::styled(
+                    truncate_display(
+                        &safe(&candidate.display),
+                        candidate_width.saturating_sub(UnicodeWidthStr::width(marker)),
+                    ),
+                    name_style,
+                ),
+            ]));
+            completion_lines.push(Line::from(Span::styled(
+                truncate_display(
+                    &format!("  {}", safe(&candidate.description)),
+                    candidate_width,
+                ),
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            let label = format!(
+                "{marker}{} — {}",
+                safe(&candidate.display),
+                safe(&candidate.description)
+            );
+            completion_lines.push(Line::from(Span::styled(
+                truncate_display(&label, candidate_width),
+                name_style,
+            )));
+        }
+    }
     if app.candidates.is_empty() {
-        completion_lines.push("No completions".into());
+        completion_lines.push(Line::from("No completions"));
     }
     f.render_widget(
-        Paragraph::new(completion_lines.join("\n"))
-            .block(Block::default().borders(Borders::ALL).title("Completions"))
-            .wrap(Wrap { trim: false }),
+        Paragraph::new(completion_lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(completion_title),
+        ),
         completion_area,
     );
+    let command_help = app
+        .candidates
+        .get(selected_candidate)
+        .and_then(input::completion_help);
+    let help = command_help
+        .clone()
+        .unwrap_or_else(|| input::help(&app.draft, app.cursor));
+    let help_title = command_help
+        .as_ref()
+        .and_then(|_| app.candidates.get(selected_candidate))
+        .map_or_else(|| "Help".to_owned(), |c| format!("Help: {}", c.display));
     f.render_widget(
         Paragraph::new(
             help.lines()
@@ -1009,13 +1095,7 @@ fn render(f: &mut Frame, app: &mut App) {
                 .collect::<Vec<_>>()
                 .join("\n"),
         )
-        .block(Block::default().borders(Borders::ALL).title(
-            if help.lines().count() > help_area.height.saturating_sub(2) as usize {
-                "Help ↓"
-            } else {
-                "Help"
-            },
-        ))
+        .block(Block::default().borders(Borders::ALL).title(help_title))
         .wrap(Wrap { trim: false }),
         help_area,
     );
@@ -1038,10 +1118,27 @@ fn render(f: &mut Frame, app: &mut App) {
             pipeline_area,
         );
     }
-    let cursor_col = UnicodeWidthStr::width(&app.draft[..app.cursor]);
+    let safe_draft = safe(&app.draft);
+    let cursor_col = UnicodeWidthStr::width(safe(&app.draft[..app.cursor]).as_str());
     let input_width = chunks[2].width.saturating_sub(2) as usize;
     let input_scroll = cursor_col.saturating_sub(input_width.saturating_sub(1));
-    let input = Paragraph::new(safe(&app.draft))
+    let selected_completion = app.candidates.get(selected_candidate);
+    let ghost = input::placeholder(
+        &app.draft,
+        app.cursor,
+        selected_completion,
+        !app.committed.is_empty(),
+    );
+    let input_line = Line::from(vec![
+        Span::raw(safe_draft),
+        Span::styled(
+            safe(&ghost),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ),
+    ]);
+    let input = Paragraph::new(input_line)
         .scroll((0, input_scroll.min(u16::MAX as usize) as u16))
         .block(
             Block::default()
@@ -1087,9 +1184,9 @@ fn draw_keyboard_help(f: &mut Frame, screen: Rect, scroll: &mut u16) {
     };
     let lines = [
         "Ctrl+A then ?  Full keyboard help",
-        "Ctrl+A then s  Choose select columns (Space toggle, h/j/k/l move)",
+        "Ctrl+A then c  Choose select columns (Space toggle, h/j/k/l move)",
         "Ctrl+A then w  Write YAML checkpoint path",
-        "Ctrl+A then c  Create session checkpoint",
+        "Ctrl+A then C  Create session checkpoint",
         "Ctrl+A then x  Clear cache",
         "Ctrl+A then p  Toggle sample/full preview",
         "Ctrl+A then u/r  Undo / redo",
@@ -1470,6 +1567,16 @@ mod tests {
                 cache: None,
             })),
         });
+        app.draft.clear();
+        app.cursor = 0;
+        app.refresh_candidates();
+        assert!(!app.candidates.iter().any(|c| c.display == "load"));
+        app.edit_step = Some((0, 1));
+        app.refresh_candidates();
+        assert!(app.candidates.iter().any(|c| c.display == "load"));
+        app.edit_step = None;
+        app.draft = "select ".into();
+        app.cursor = app.draft.len();
         app.refresh_candidates();
         assert_eq!(app.committed.len(), 1);
         assert!(app.pending_commit.is_none());
@@ -1509,8 +1616,12 @@ mod tests {
             cache: None,
         });
         let original = app.draft.clone();
-        app.open_picker();
+        app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+            .unwrap();
+        app.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
+            .unwrap();
         assert!(app.picker.is_some());
+        assert!(app.explicit.is_empty());
         app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
             .unwrap();
         app.key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
@@ -1531,6 +1642,78 @@ mod tests {
             .unwrap();
         assert_eq!(app.draft, "select beta");
         assert!(app.dirty_at.is_some());
+
+        app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+            .unwrap();
+        app.key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.explicit.len(), 1);
+        assert!(app.status.contains("checkpoint"));
+    }
+
+    #[test]
+    fn completion_pane_scrolls_through_commands_and_ghost_is_display_only() {
+        let mut app = test_app();
+        app.committed = input::parse_commands("load source.csv").unwrap();
+        app.preview = Some(Preview {
+            columns: vec![("alpha".into(), "String".into())],
+            total_columns: 1,
+            input_columns: vec![("alpha".into(), "String".into())],
+            rows: Vec::new(),
+            truncated: false,
+            mode: PreviewMode::Sample,
+            sample_rows: Some(10_000),
+            draft_issue: None,
+            cache: None,
+        });
+        app.refresh_candidates();
+        let count_index = app
+            .candidates
+            .iter()
+            .position(|c| c.display == "count")
+            .unwrap();
+        app.completion = count_index;
+        let original_committed = app.committed.clone();
+        let mut terminal = Terminal::new(TestBackend::new(180, 36)).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let input_row = 33;
+        let count_ghost = &terminal.backend().buffer()[(1, input_row)];
+        assert_eq!(count_ghost.symbol(), "c");
+        assert_eq!(count_ghost.fg, Color::DarkGray);
+        let ghost_row = (1..80)
+            .map(|x| terminal.backend().buffer()[(x, input_row)].symbol())
+            .collect::<String>();
+        assert!(ghost_row.starts_with("count [columns]"));
+        assert!(app.draft.is_empty());
+        assert!(app.pending_commit.is_none());
+        assert_eq!(app.committed, original_committed);
+        let count_description: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(count_description.contains("Count repeated rows"));
+
+        app.completion = app.candidates.len() - 1;
+        let selected = app.candidates.last().unwrap().clone();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(rendered.contains(&selected.display));
+        assert!(rendered.contains(&format!("Help: {}", selected.display)));
+        assert!(rendered.contains(&format!("/{} ↑↓", app.candidates.len())));
+
+        app.completion = 0;
+        app.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.completion, app.candidates.len() - 1);
     }
 
     #[test]
@@ -1726,6 +1909,8 @@ mod tests {
             display: "abcdef".into(),
             replacement: "abcdef".into(),
             range: 7..13,
+            description: "Column · String".into(),
+            kind: input::CompletionKind::Column,
         }];
 
         app.prompt_action("write");

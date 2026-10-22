@@ -9,7 +9,61 @@ pub(super) struct Completion {
     pub display: String,
     pub replacement: String,
     pub range: Range<usize>,
+    pub description: String,
+    pub kind: CompletionKind,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CompletionKind {
+    Command,
+    Option,
+    Column,
+    Builtin,
+}
+
+struct BuiltinAction {
+    name: &'static str,
+    usage: &'static str,
+    description: &'static str,
+}
+
+const BUILTIN_ACTIONS: &[BuiltinAction] = &[
+    BuiltinAction {
+        name: ":edit",
+        usage: ":edit STEP",
+        description: "Edit a pipeline step (1-based)",
+    },
+    BuiltinAction {
+        name: ":write",
+        usage: ":write PATH",
+        description: "Write the confirmed pipeline as YAML",
+    },
+    BuiltinAction {
+        name: ":cache",
+        usage: ":cache [PATH]",
+        description: "Save a session checkpoint, or persistent Parquet cache",
+    },
+    BuiltinAction {
+        name: ":clear-cache",
+        usage: ":clear-cache",
+        description: "Clear cached pipeline data",
+    },
+    BuiltinAction {
+        name: ":undo",
+        usage: ":undo",
+        description: "Undo the last pipeline edit",
+    },
+    BuiltinAction {
+        name: ":redo",
+        usage: ":redo",
+        description: "Redo the last undone edit",
+    },
+    BuiltinAction {
+        name: ":quit",
+        usage: ":quit",
+        description: "Leave the TUI",
+    },
+];
 
 pub(super) struct SelectTarget {
     pub range: Range<usize>,
@@ -320,6 +374,127 @@ pub(super) fn quote_argument(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+pub(super) fn completion_help(completion: &Completion) -> Option<String> {
+    match completion.kind {
+        CompletionKind::Command => render_command_help(&completion.display),
+        CompletionKind::Builtin => BUILTIN_ACTIONS
+            .iter()
+            .find(|action| action.name == completion.display)
+            .map(|action| format!("{}\n  {}", action.usage, action.description)),
+        CompletionKind::Option | CompletionKind::Column => None,
+    }
+}
+
+pub(super) fn placeholder(
+    input: &str,
+    cursor: usize,
+    selected: Option<&Completion>,
+    has_source: bool,
+) -> String {
+    if cursor != input.len() || !input.is_char_boundary(cursor) {
+        return String::new();
+    }
+    if input.trim().is_empty() {
+        if let Some(selected) = selected.filter(|completion| {
+            matches!(
+                completion.kind,
+                CompletionKind::Command | CompletionKind::Builtin
+            )
+        }) {
+            return format!(
+                "{}{}",
+                selected.replacement,
+                completion_usage_tail(selected)
+            );
+        }
+        return if has_source {
+            "Type a command · count [columns] ...".to_owned()
+        } else {
+            "load <file.csv|file.jsonl> ...".to_owned()
+        };
+    }
+
+    let spans = token_spans(input);
+    let separators = pipeline_separators(&spans);
+    let first = separators
+        .iter()
+        .rposition(|&index| spans[index].start < cursor)
+        .map_or(0, |position| separators[position] + 1);
+    let last = separators
+        .iter()
+        .find(|&&index| spans[index].start >= cursor)
+        .copied()
+        .unwrap_or(spans.len());
+    let segment = spans.get(first..last).unwrap_or_default();
+    let command = segment.first().map(|token| token.value.as_str());
+    let trailing_space = input.chars().last().is_some_and(char::is_whitespace);
+
+    if trailing_space && segment.len() == 1 {
+        match command {
+            Some("select") => return "<columns> · Ctrl+A c choose".to_owned(),
+            Some("count") => return "[columns] · empty = repeated rows".to_owned(),
+            _ => {}
+        }
+    }
+
+    if let Some(selected) = selected {
+        if matches!(
+            selected.kind,
+            CompletionKind::Command | CompletionKind::Builtin
+        ) && selected.range.end == cursor
+            && selected.range.start <= selected.range.end
+        {
+            if let Some(fragment) = input.get(selected.range.clone()) {
+                if !fragment.contains(['"', '\'']) && selected.replacement.starts_with(fragment) {
+                    let suffix = &selected.replacement[fragment.len()..];
+                    let tail = completion_usage_tail(selected);
+                    if !suffix.is_empty() || !tail.is_empty() {
+                        return format!("{suffix}{tail}");
+                    }
+                }
+            }
+        }
+    }
+
+    if trailing_space && segment.len() == 1 {
+        if let Some(name) = command {
+            if let Some(action) = BUILTIN_ACTIONS.iter().find(|action| action.name == name) {
+                return action
+                    .usage
+                    .strip_prefix(action.name)
+                    .unwrap_or("")
+                    .to_owned();
+            }
+            if let Some(spec) = registry().iter().find(|spec| spec.name == name) {
+                return spec.help.strip_prefix(spec.name).unwrap_or("").to_owned();
+            }
+        }
+    }
+    String::new()
+}
+
+fn completion_usage_tail(completion: &Completion) -> String {
+    match completion.kind {
+        CompletionKind::Command => registry()
+            .iter()
+            .find(|spec| spec.name == completion.display)
+            .map(|spec| spec.help.strip_prefix(spec.name).unwrap_or("").to_owned())
+            .unwrap_or_default(),
+        CompletionKind::Builtin => BUILTIN_ACTIONS
+            .iter()
+            .find(|action| action.name == completion.display)
+            .map(|action| {
+                action
+                    .usage
+                    .strip_prefix(action.name)
+                    .unwrap_or("")
+                    .to_owned()
+            })
+            .unwrap_or_default(),
+        CompletionKind::Option | CompletionKind::Column => String::new(),
+    }
+}
+
 pub(super) fn complete(
     input: &str,
     cursor: usize,
@@ -328,13 +503,22 @@ pub(super) fn complete(
     if cursor > input.len() || !input.is_char_boundary(cursor) {
         return vec![];
     }
+    let left = &input[..cursor];
+    let trimmed_left = left.trim_start();
+    let leading = left.len() - trimmed_left.len();
+    if trimmed_left.starts_with(':') && !trimmed_left.chars().any(char::is_whitespace) {
+        return BUILTIN_ACTIONS
+            .iter()
+            .filter(|action| action.name.starts_with(trimmed_left))
+            .map(|action| builtin_completion(action, leading..cursor))
+            .collect();
+    }
     let spans = token_spans(input);
     if let Some((first, last)) = active_select(&spans, cursor) {
         if let Some(completion) = complete_select_field(cursor, columns, &spans[first + 1..last]) {
             return completion;
         }
     }
-    let left = &input[..cursor];
     let start = left
         .rfind(char::is_whitespace)
         .map_or(0, |i| i + left[i..].chars().next().unwrap().len_utf8());
@@ -352,7 +536,7 @@ pub(super) fn complete(
     let segment = &tokens[segment_start..];
     let has_partial = !trailing_space && !tokens.is_empty();
     let at_command = segment.is_empty() || (has_partial && segment.len() == 1);
-    let mut candidates: Vec<(String, String)> = Vec::new();
+    let mut candidates: Vec<Completion> = Vec::new();
     if at_command {
         candidates.extend(
             registry()
@@ -363,8 +547,21 @@ pub(super) fn complete(
                         CommandCategory::Initializer | CommandCategory::Chainable
                     )
                 })
-                .map(|s| (s.name.to_owned(), s.name.to_owned())),
+                .map(|s| Completion {
+                    display: s.name.to_owned(),
+                    replacement: s.name.to_owned(),
+                    range: start..cursor,
+                    description: s.summary.to_owned(),
+                    kind: CompletionKind::Command,
+                }),
         );
+        if tokens.is_empty() {
+            candidates.extend(
+                BUILTIN_ACTIONS
+                    .iter()
+                    .map(|action| builtin_completion(action, start..cursor)),
+            );
+        }
     } else {
         let command_tokens = if trailing_space {
             segment
@@ -378,32 +575,56 @@ pub(super) fn complete(
             candidates.extend(
                 spec.options
                     .iter()
-                    .map(|o| (format!("--{}", o.name), format!("--{}", o.name))),
+                    .filter(|option| {
+                        !(spec.name == "load" && matches!(option.name, "stdin-format" | "rejects"))
+                    })
+                    .map(|o| {
+                        let display = format!("--{}", o.name);
+                        let description = if o.takes_value {
+                            format!("{display} <value>")
+                        } else {
+                            format!("{display} (optional)")
+                        };
+                        Completion {
+                            display: display.clone(),
+                            replacement: display,
+                            range: start..cursor,
+                            description,
+                            kind: CompletionKind::Option,
+                        }
+                    }),
             );
             let prior = segment.last().map(String::as_str).unwrap_or("");
             let arg_index = segment.len().saturating_sub(2);
             let want_columns = trailing_space || (!prior.starts_with('-') && !prior.is_empty());
             if want_columns && !looks_like_path_slot(spec.name, arg_index) {
-                candidates.extend(
-                    columns
-                        .iter()
-                        .map(|(name, _)| (name.clone(), quote_column(name, spec.name))),
-                );
+                candidates.extend(columns.iter().map(|(name, dtype)| Completion {
+                    display: name.clone(),
+                    replacement: quote_column(name, spec.name),
+                    range: start..cursor,
+                    description: format!("Column · {dtype}"),
+                    kind: CompletionKind::Column,
+                }));
             }
         }
     }
     let match_prefix = prefix.trim_start_matches(['"', '\'']);
     candidates
         .into_iter()
-        .filter(|(display, replacement)| {
-            replacement.starts_with(prefix) || display.starts_with(match_prefix)
-        })
-        .map(|(display, replacement)| Completion {
-            display,
-            replacement,
-            range: start..cursor,
+        .filter(|candidate| {
+            candidate.replacement.starts_with(prefix) || candidate.display.starts_with(match_prefix)
         })
         .collect()
+}
+
+fn builtin_completion(action: &BuiltinAction, range: Range<usize>) -> Completion {
+    Completion {
+        display: action.name.to_owned(),
+        replacement: action.name.to_owned(),
+        range,
+        description: action.description.to_owned(),
+        kind: CompletionKind::Builtin,
+    }
 }
 
 fn complete_select_field(
@@ -468,7 +689,7 @@ fn complete_select_field(
         columns
             .iter()
             .filter(|(name, _)| name.starts_with(prefix))
-            .map(|(name, _)| {
+            .map(|(name, dtype)| {
                 let (replacement, range) = if token.has_shell_quotes {
                     let field = csv_field(name);
                     let value = format!(
@@ -485,6 +706,8 @@ fn complete_select_field(
                     display: name.clone(),
                     replacement,
                     range,
+                    description: format!("Column · {dtype}"),
+                    kind: CompletionKind::Column,
                 }
             })
             .collect(),
@@ -517,20 +740,14 @@ pub(super) fn help(input: &str, cursor: usize) -> String {
     let trimmed = input.get(..cursor.min(input.len())).unwrap_or(input).trim();
     if let Some(rest) = trimmed.strip_prefix(':') {
         let name = rest.split_whitespace().next().unwrap_or("");
-        return match name {
-            "write" => ":write PATH  Write the current pipeline as YAML".into(),
-            "cache" => {
-                ":cache [PATH]  Save a session checkpoint, or persistent Parquet cache".into()
-            }
-            "clear-cache" => ":clear-cache  Clear cached pipeline data".into(),
-            "undo" => ":undo  Undo the last pipeline edit".into(),
-            "redo" => ":redo  Redo the last undone edit".into(),
-            "edit" => ":edit [STEP]  Edit a pipeline step (1-based)".into(),
-            "quit" => ":quit  Leave the TUI".into(),
-            _ => {
-                ":write PATH, :cache [PATH], :clear-cache, :undo, :redo, :edit [STEP], :quit".into()
-            }
-        };
+        let action_name = format!(":{name}");
+        return BUILTIN_ACTIONS
+            .iter()
+            .find(|action| action.name == action_name)
+            .map(|action| format!("{}  {}", action.usage, action.description))
+            .unwrap_or_else(|| {
+                ":write PATH, :cache [PATH], :clear-cache, :undo, :redo, :edit STEP, :quit".into()
+            });
     }
     let tokens = tokenize(trimmed).unwrap_or_default();
     let start = tokens.iter().rposition(|t| t == "-").map_or(0, |i| i + 1);
@@ -632,6 +849,102 @@ mod tests {
             tokenize(&format!("x {}", quote_argument(r#"a\b"c"#))).unwrap()[1],
             r#"a\b"c"#
         );
+    }
+
+    #[test]
+    fn completion_catalog_and_builtin_metadata_are_complete() {
+        let initial = complete("", 0, &[]);
+        for spec in registry().iter().filter(|spec| {
+            matches!(
+                spec.category,
+                CommandCategory::Initializer | CommandCategory::Chainable
+            )
+        }) {
+            let candidate = initial.iter().find(|c| c.display == spec.name).unwrap();
+            assert_eq!(candidate.kind, CompletionKind::Command);
+            assert_eq!(candidate.description, spec.summary);
+        }
+        assert!(!initial.iter().any(|c| {
+            c.kind == CompletionKind::Command
+                && registry().iter().any(|spec| {
+                    spec.name == c.display
+                        && !matches!(
+                            spec.category,
+                            CommandCategory::Initializer | CommandCategory::Chainable
+                        )
+                })
+        }));
+        assert!(initial
+            .iter()
+            .any(|c| c.display == ":cache" && c.kind == CompletionKind::Builtin));
+
+        let colon = complete(":ed", 3, &[]);
+        let edit = colon.iter().find(|c| c.display == ":edit").unwrap();
+        assert_eq!(edit.description, "Edit a pipeline step (1-based)");
+        assert!(completion_help(edit).unwrap().contains(":edit STEP"));
+        assert!(complete("flatten - :ed", "flatten - :ed".len(), &[])
+            .iter()
+            .all(|c| c.kind != CompletionKind::Builtin));
+
+        let options = complete("load --", "load --".len(), &[]);
+        assert!(!options
+            .iter()
+            .any(|c| matches!(c.display.as_str(), "--stdin-format" | "--rejects")));
+        let option = options
+            .iter()
+            .find(|c| c.kind == CompletionKind::Option)
+            .unwrap();
+        assert!(
+            option.description.ends_with("<value>") || option.description.ends_with("(optional)")
+        );
+        let columns = [("timestamp".to_owned(), "i64".to_owned())];
+        let column = complete("select ", "select ".len(), &columns)
+            .into_iter()
+            .find(|c| c.display == "timestamp")
+            .unwrap();
+        assert_eq!(column.description, "Column · i64");
+        assert_eq!(column.kind, CompletionKind::Column);
+    }
+
+    #[test]
+    fn placeholder_follows_context_and_selected_usage_at_the_end_only() {
+        assert_eq!(
+            placeholder("", 0, None, false),
+            "load <file.csv|file.jsonl> ..."
+        );
+        assert_eq!(
+            placeholder("", 0, None, true),
+            "Type a command · count [columns] ..."
+        );
+        assert_eq!(
+            placeholder("select ", 7, None, true),
+            "<columns> · Ctrl+A c choose"
+        );
+        assert_eq!(
+            placeholder("count ", 6, None, true),
+            "[columns] · empty = repeated rows"
+        );
+        assert_eq!(placeholder("filter ", 7, None, true), " <expression>");
+        let chained = "flatten - select timestamp - count ";
+        assert_eq!(
+            placeholder(chained, chained.len(), None, true),
+            "[columns] · empty = repeated rows"
+        );
+
+        let selected = complete("sel", 3, &[])
+            .into_iter()
+            .find(|c| c.display == "select")
+            .unwrap();
+        assert_eq!(
+            placeholder("sel", 3, Some(&selected), true),
+            "ect <columns>"
+        );
+        assert_eq!(placeholder("sel", 2, Some(&selected), true), "");
+        let count = complete("", 0, &[])
+            .into_iter()
+            .find(|c| c.display == "count")
+            .unwrap();
+        assert_eq!(placeholder("", 0, Some(&count), true), "count [columns]");
     }
 
     #[test]

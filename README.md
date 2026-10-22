@@ -74,15 +74,20 @@ you enter a valid command.
 | --- | --- |
 | Tab; Up / Down | Complete commands, options, or columns; choose a completion |
 | Page Up / Down; Alt-Left / Right | Scroll rows or move across table columns |
-| Ctrl+A, then `?` / `s` | Open keyboard help / select columns |
+| Ctrl+A, then `?` / `c` | Open keyboard help / select columns |
 | Ctrl+A, then `w` | Save the confirmed pipeline as a YAML workflow |
-| Ctrl+A, then `c` / `x` | Create a checkpoint / clear the cache |
+| Ctrl+A, then `C` / `x` | Create a checkpoint / clear the cache |
 | Ctrl+A, then `p` | Switch between sample and full-data preview |
 | Ctrl+A, then `u` / `r` | Undo / redo pipeline changes |
 | Ctrl+A, then `q`; Ctrl-C | Quit / exit |
 | `:edit STEP` | Edit an applied command, numbered from 1 |
 | `:write PATH`; `:cache [PATH]`; `:clear-cache` | Save YAML; create a checkpoint; clear cache |
 | `:undo`; `:redo`; `:quit` | Undo; redo; quit |
+
+For frequency summaries, `select hoge,fuga - count` reports counts for each
+unique combination, while `count hoge` lists `hoge` values by descending
+frequency. By default, counts describe the preview sample of up to 10,000 input
+rows; use Ctrl+A then `p` to switch to counts across all input data.
 
 In the column picker, use Space to toggle, arrows or `hjkl` to move, `/` to
 filter, `a` to select all filtered columns, `i` to invert, and `u` to clear.
