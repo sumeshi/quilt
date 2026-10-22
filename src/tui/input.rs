@@ -31,12 +31,17 @@ const BUILTIN_ACTIONS: &[BuiltinAction] = &[
     BuiltinAction {
         name: ":edit",
         usage: ":edit STEP",
-        description: "Edit a pipeline step (1-based)",
+        description: "Edit the original command group containing a 1-based step",
     },
     BuiltinAction {
         name: ":write",
         usage: ":write PATH",
         description: "Write the confirmed pipeline as YAML",
+    },
+    BuiltinAction {
+        name: ":export",
+        usage: ":export PATH [--format csv|jsonl]",
+        description: "Export the full confirmed result; format defaults by extension",
     },
     BuiltinAction {
         name: ":cache",
@@ -164,10 +169,12 @@ fn pipeline_separators(tokens: &[TokenSpan]) -> Vec<usize> {
             continue;
         }
         let spec = command.and_then(|name| registry().iter().find(|s| s.name == name));
-        let after_max = positional_only
+        let unquoted = !token.has_shell_quotes;
+        let after_max = unquoted
+            && positional_only
             && word == "-"
             && spec.is_some_and(|s| s.max_args.is_some_and(|n| positional_count >= n));
-        if word == "-" && (!positional_only || after_max) {
+        if unquoted && word == "-" && (!positional_only || after_max) {
             separators.push(i);
             command = None;
             positional_only = false;
@@ -178,11 +185,11 @@ fn pipeline_separators(tokens: &[TokenSpan]) -> Vec<usize> {
             command = Some(word);
             continue;
         }
-        if word == "--" && !positional_only {
+        if unquoted && word == "--" && !positional_only {
             positional_only = true;
             continue;
         }
-        if !positional_only {
+        if unquoted && !positional_only {
             if let Some(spec) = spec {
                 let flag = word
                     .strip_prefix("--")
@@ -230,6 +237,28 @@ fn pipeline_separators(tokens: &[TokenSpan]) -> Vec<usize> {
         positional_count += 1;
     }
     separators
+}
+
+/// Split source text into pipeline stages while retaining each stage's original
+/// quoting and spacing. Quoted dashes and option values remain part of a stage.
+pub(super) fn stage_sources(source: &str) -> Vec<&str> {
+    let tokens = token_spans(source);
+    let separators = pipeline_separators(&tokens);
+    let mut stages = Vec::with_capacity(separators.len() + 1);
+    let mut start = 0;
+    for separator in separators {
+        let token = &tokens[separator];
+        let stage = source[start..token.start].trim();
+        if !stage.is_empty() {
+            stages.push(stage);
+        }
+        start = token.end;
+    }
+    let stage = source[start..].trim();
+    if !stage.is_empty() {
+        stages.push(stage);
+    }
+    stages
 }
 
 fn active_select(tokens: &[TokenSpan], cursor: usize) -> Option<(usize, usize)> {
@@ -746,7 +775,9 @@ pub(super) fn help(input: &str, cursor: usize) -> String {
             .find(|action| action.name == action_name)
             .map(|action| format!("{}  {}", action.usage, action.description))
             .unwrap_or_else(|| {
-                ":write PATH, :cache [PATH], :clear-cache, :undo, :redo, :edit STEP, :quit".into()
+                ":export PATH [--format csv|jsonl], :write PATH, :cache [PATH], \
+                 :clear-cache, :undo, :redo, :edit STEP, :quit"
+                    .into()
             });
     }
     let tokens = tokenize(trimmed).unwrap_or_default();
@@ -878,9 +909,21 @@ mod tests {
             .iter()
             .any(|c| c.display == ":cache" && c.kind == CompletionKind::Builtin));
 
+        let export = initial.iter().find(|c| c.display == ":export").unwrap();
+        assert_eq!(
+            export.description,
+            "Export the full confirmed result; format defaults by extension"
+        );
+        assert!(completion_help(export)
+            .unwrap()
+            .contains(":export PATH [--format csv|jsonl]"));
+
         let colon = complete(":ed", 3, &[]);
         let edit = colon.iter().find(|c| c.display == ":edit").unwrap();
-        assert_eq!(edit.description, "Edit a pipeline step (1-based)");
+        assert_eq!(
+            edit.description,
+            "Edit the original command group containing a 1-based step"
+        );
         assert!(completion_help(edit).unwrap().contains(":edit STEP"));
         assert!(complete("flatten - :ed", "flatten - :ed".len(), &[])
             .iter()
@@ -949,6 +992,11 @@ mod tests {
 
     #[test]
     fn preview_prefix_uses_valid_commands_before_active_segment() {
+        let source = r#"load "logs/a-b.csv" - grep -- "-" - head 3"#;
+        assert_eq!(
+            stage_sources(source),
+            [r#"load "logs/a-b.csv""#, r#"grep -- "-""#, "head 3"]
+        );
         for input in ["flatten - select ", "flatten - select \"timestamp"] {
             let prefix = preview_prefix(input);
             assert_eq!(prefix.len(), 1);

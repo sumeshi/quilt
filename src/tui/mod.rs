@@ -3,9 +3,13 @@
 mod app;
 mod cache;
 mod columns;
+mod detail;
 mod input;
+mod output;
+mod task;
 mod worker;
 
+use crate::controllers::arguments::OutputFormat;
 use crate::controllers::command_model::{parse_typed_commands, TypedCommand};
 use crate::QuiltError;
 use std::path::PathBuf;
@@ -33,11 +37,34 @@ pub(super) struct Preview {
     total_columns: usize,
     input_columns: Vec<(String, String)>,
     rows: Vec<Vec<String>>,
-    truncated: bool,
+    has_more_rows: bool,
     mode: PreviewMode,
     sample_rows: Option<usize>,
     draft_issue: Option<String>,
     cache: Option<CacheInfo>,
+    commands: Vec<TypedCommand>,
+    source_version: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TaskPhase {
+    Loading,
+    Computing,
+    Inspecting,
+    Saving,
+    Caching,
+}
+
+impl TaskPhase {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Loading => "Reading and validating input",
+            Self::Computing => "Computing preview",
+            Self::Inspecting => "Reading details",
+            Self::Saving => "Saving output",
+            Self::Caching => "Creating checkpoint",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -52,6 +79,16 @@ pub(super) enum Action {
     ClearCache,
     SaveCache(PathBuf),
     ExportYaml(PathBuf),
+    ExportData {
+        path: PathBuf,
+        format: OutputFormat,
+    },
+    Inspect {
+        mode: PreviewMode,
+        row: usize,
+        column: Option<usize>,
+        source_version: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -63,7 +100,14 @@ pub(super) struct Request {
 
 #[derive(Debug)]
 pub(super) enum Outcome {
+    Working(TaskPhase),
     Preview(Preview),
+    Detail {
+        title: String,
+        text: String,
+        truncated: bool,
+    },
+    Cancelled,
     Cached(CacheInfo),
     CacheCleared,
     Saved(PathBuf),
