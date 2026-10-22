@@ -24,6 +24,7 @@ pub struct CommandSpec {
     pub max_args: Option<usize>,
     pub options: &'static [OptionSpec],
     pub help: &'static str,
+    pub summary: &'static str,
 }
 
 impl TypedCommand {
@@ -462,7 +463,7 @@ const RUN: &[OptionSpec] = &[
 ];
 
 macro_rules! define_operations {
-    ($( $id:ident($arg:ty) => { name: $name:literal, category: $category:ident, max_args: $max:expr, options: $options:expr, help: $help:literal },)+) => {
+    ($( $id:ident($arg:ty) => { name: $name:literal, category: $category:ident, max_args: $max:expr, options: $options:expr, help: $help:literal, summary: $summary:literal },)+) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub enum OperationId { $( $id, )+ }
         #[derive(Debug, Clone, PartialEq, Eq)]
@@ -484,49 +485,49 @@ macro_rules! define_operations {
             }
         }
         static SPECS: &[CommandSpec] = &[
-            $( CommandSpec { category: CommandCategory::$category, name: $name, max_args: $max, options: $options, help: $help }, )+
+            $( CommandSpec { category: CommandCategory::$category, name: $name, max_args: $max, options: $options, help: $help, summary: $summary }, )+
         ];
     };
 }
 
 define_operations! {
-    Load(LoadArgs) => { name: "load", category: Initializer, max_args: None, options: LOAD, help: "load [files...] [options] — CSV, JSONL/NDJSON, or Parquet" },
-    Select(SelectArgs) => { name: "select", category: Chainable, max_args: None, options: NONE, help: "select <columns>" },
-    Filter(FilterArgs) => { name: "filter", category: Chainable, max_args: Some(1), options: NONE, help: "filter <expression>" },
-    Derive(DeriveArgs) => { name: "derive", category: Chainable, max_args: Some(2), options: NONE, help: "derive <output> <expression>" },
-    Aggregate(AggregateArgs) => { name: "aggregate", category: Chainable, max_args: None, options: TIMEINFO, help: "aggregate <mode:column:output...> [--by columns]" },
-    ArrayContains(ArrayContainsArgs) => { name: "array-contains", category: Chainable, max_args: Some(2), options: NONE, help: "array-contains <column> <value>" },
-    ArrayGet(ArrayGetArgs) => { name: "array-get", category: Chainable, max_args: Some(2), options: OUTPUT, help: "array-get <column> <index> [--output name]" },
-    Explode(ExplodeArgs) => { name: "explode", category: Chainable, max_args: Some(1), options: NONE, help: "explode <columns>" },
-    Cast(CastArgs) => { name: "cast", category: Chainable, max_args: Some(2), options: DATETIME, help: "cast <column> <type>" },
-    Bucket(BucketArgs) => { name: "bucket", category: Chainable, max_args: Some(2), options: BUCKET, help: "bucket <column> <interval>" },
-    Delta(ColumnOutputArgs) => { name: "delta", category: Chainable, max_args: Some(1), options: DELTA, help: "delta <column>" },
-    Extract(ExtractArgs) => { name: "extract", category: Chainable, max_args: Some(2), options: NONE, help: "extract <column> <regex>" },
-    Flatten(UnitArgs) => { name: "flatten", category: Chainable, max_args: Some(0), options: NONE, help: "flatten" },
-    ParseSize(ParseSizeArgs) => { name: "parse-size", category: Chainable, max_args: Some(1), options: NONE, help: "parse-size <column>" },
-    Isin(IsinArgs) => { name: "isin", category: Chainable, max_args: Some(2), options: NONE, help: "isin <column> <values>" },
-    Contains(ContainsArgs) => { name: "contains", category: Chainable, max_args: Some(2), options: IGNORE, help: "contains <column> <pattern>" },
-    Sed(SedArgs) => { name: "sed", category: Chainable, max_args: Some(2), options: SED, help: "sed <pattern> <replacement>" },
-    Grep(GrepArgs) => { name: "grep", category: Chainable, max_args: Some(1), options: GREP, help: "grep <pattern>" },
-    Head(NumberArgs) => { name: "head", category: Chainable, max_args: Some(1), options: NUMBER, help: "head [number]" },
-    Tail(NumberArgs) => { name: "tail", category: Chainable, max_args: Some(1), options: NUMBER, help: "tail [number]" },
-    Sort(SortArgs) => { name: "sort", category: Chainable, max_args: Some(1), options: DESC, help: "sort <columns>" },
-    Count(CountArgs) => { name: "count", category: Chainable, max_args: Some(1), options: NONE, help: "count [columns]" },
-    TimeInfo(TimeInfoArgs) => { name: "timeinfo", category: Chainable, max_args: Some(1), options: TIMEINFO, help: "timeinfo <datetime-column> [--by columns]" },
-    Uniq(UnitArgs) => { name: "uniq", category: Chainable, max_args: Some(0), options: NONE, help: "uniq" },
-    ChangeTz(ChangeTzArgs) => { name: "changetz", category: Chainable, max_args: Some(1), options: TZ, help: "changetz <column> --from-tz <tz> --to-tz <tz>" },
-    RenameCol(RenameColArgs) => { name: "renamecol", category: Chainable, max_args: Some(2), options: NONE, help: "renamecol <old> <new>" },
-    TimeSlice(TimeSliceArgs) => { name: "timeslice", category: Chainable, max_args: Some(1), options: TIMESLICE, help: "timeslice <column> [--start <time>] [--end <time>]" },
-    Show(ShowArgs) => { name: "show", category: Finalizer, max_args: Some(0), options: SHOW, help: "show" },
-    ShowTable(UnitArgs) => { name: "showtable", category: Finalizer, max_args: Some(0), options: NONE, help: "showtable" },
-    Headers(HeadersArgs) => { name: "headers", category: Finalizer, max_args: Some(0), options: HEADERS, help: "headers [--plain]" },
-    Stats(UnitArgs) => { name: "stats", category: Finalizer, max_args: Some(0), options: NONE, help: "stats" },
-    ShowQuery(UnitArgs) => { name: "showquery", category: Finalizer, max_args: Some(0), options: NONE, help: "showquery" },
-    Dump(DumpArgs) => { name: "dump", category: Finalizer, max_args: Some(0), options: DUMP, help: "dump [options]" },
-    DumpCache(DumpCacheArgs) => { name: "dumpcache", category: Finalizer, max_args: Some(0), options: OUTPUT, help: "dumpcache [--output <file>]" },
-    Partition(PartitionArgs) => { name: "partition", category: Finalizer, max_args: Some(2), options: NONE, help: "partition <column> [directory]" },
-    Calc(CalcArgs) => { name: "calc", category: Finalizer, max_args: Some(1), options: CALC, help: "calc <column> --sum|--avg|--min|--max|--median|--std" },
-    Run(RunArgs) => { name: "run", category: Automation, max_args: None, options: RUN, help: "run <config> [files...] [options]" },
+    Load(LoadArgs) => { name: "load", category: Initializer, max_args: None, options: LOAD, help: "load [files...] [options] — CSV, JSONL/NDJSON, or Parquet", summary: "Read CSV, JSONL, or Parquet data from files or standard input" },
+    Select(SelectArgs) => { name: "select", category: Chainable, max_args: None, options: NONE, help: "select <columns>", summary: "Keep selected columns and choose their order" },
+    Filter(FilterArgs) => { name: "filter", category: Chainable, max_args: Some(1), options: NONE, help: "filter <expression>", summary: "Keep rows that match a Boolean expression" },
+    Derive(DeriveArgs) => { name: "derive", category: Chainable, max_args: Some(2), options: NONE, help: "derive <output> <expression>", summary: "Create a column from a typed expression" },
+    Aggregate(AggregateArgs) => { name: "aggregate", category: Chainable, max_args: None, options: TIMEINFO, help: "aggregate <mode:column:output...> [--by columns]", summary: "Compute summary metrics, optionally grouped by columns" },
+    ArrayContains(ArrayContainsArgs) => { name: "array-contains", category: Chainable, max_args: Some(2), options: NONE, help: "array-contains <column> <value>", summary: "Keep rows whose list contains a value" },
+    ArrayGet(ArrayGetArgs) => { name: "array-get", category: Chainable, max_args: Some(2), options: OUTPUT, help: "array-get <column> <index> [--output name]", summary: "Get one item from each list into a new column" },
+    Explode(ExplodeArgs) => { name: "explode", category: Chainable, max_args: Some(1), options: NONE, help: "explode <columns>", summary: "Expand list items into separate rows" },
+    Cast(CastArgs) => { name: "cast", category: Chainable, max_args: Some(2), options: DATETIME, help: "cast <column> <type>", summary: "Convert a column to another supported type" },
+    Bucket(BucketArgs) => { name: "bucket", category: Chainable, max_args: Some(2), options: BUCKET, help: "bucket <column> <interval>", summary: "Group date or time values into fixed intervals" },
+    Delta(ColumnOutputArgs) => { name: "delta", category: Chainable, max_args: Some(1), options: DELTA, help: "delta <column>", summary: "Calculate differences between consecutive values" },
+    Extract(ExtractArgs) => { name: "extract", category: Chainable, max_args: Some(2), options: NONE, help: "extract <column> <regex>", summary: "Extract matching text from a column with a regular expression" },
+    Flatten(UnitArgs) => { name: "flatten", category: Chainable, max_args: Some(0), options: NONE, help: "flatten", summary: "Expand nested object fields into columns" },
+    ParseSize(ParseSizeArgs) => { name: "parse-size", category: Chainable, max_args: Some(1), options: NONE, help: "parse-size <column>", summary: "Parse human-readable sizes into numbers" },
+    Isin(IsinArgs) => { name: "isin", category: Chainable, max_args: Some(2), options: NONE, help: "isin <column> <values>", summary: "Keep rows whose values match a supplied list" },
+    Contains(ContainsArgs) => { name: "contains", category: Chainable, max_args: Some(2), options: IGNORE, help: "contains <column> <pattern>", summary: "Keep rows where a column contains text" },
+    Sed(SedArgs) => { name: "sed", category: Chainable, max_args: Some(2), options: SED, help: "sed <pattern> <replacement>", summary: "Replace matching text in string columns" },
+    Grep(GrepArgs) => { name: "grep", category: Chainable, max_args: Some(1), options: GREP, help: "grep <pattern>", summary: "Keep rows where any column matches text" },
+    Head(NumberArgs) => { name: "head", category: Chainable, max_args: Some(1), options: NUMBER, help: "head [number]", summary: "Keep the first rows" },
+    Tail(NumberArgs) => { name: "tail", category: Chainable, max_args: Some(1), options: NUMBER, help: "tail [number]", summary: "Keep the last rows" },
+    Sort(SortArgs) => { name: "sort", category: Chainable, max_args: Some(1), options: DESC, help: "sort <columns>", summary: "Sort rows by one or more columns" },
+    Count(CountArgs) => { name: "count", category: Chainable, max_args: Some(1), options: NONE, help: "count [columns]", summary: "Count repeated rows or values, highest first" },
+    TimeInfo(TimeInfoArgs) => { name: "timeinfo", category: Chainable, max_args: Some(1), options: TIMEINFO, help: "timeinfo <datetime-column> [--by columns]", summary: "Summarize time gaps and ranges in a datetime column" },
+    Uniq(UnitArgs) => { name: "uniq", category: Chainable, max_args: Some(0), options: NONE, help: "uniq", summary: "Keep one copy of each distinct row" },
+    ChangeTz(ChangeTzArgs) => { name: "changetz", category: Chainable, max_args: Some(1), options: TZ, help: "changetz <column> --from-tz <tz> --to-tz <tz>", summary: "Convert datetime values between time zones" },
+    RenameCol(RenameColArgs) => { name: "renamecol", category: Chainable, max_args: Some(2), options: NONE, help: "renamecol <old> <new>", summary: "Rename a column" },
+    TimeSlice(TimeSliceArgs) => { name: "timeslice", category: Chainable, max_args: Some(1), options: TIMESLICE, help: "timeslice <column> [--start <time>] [--end <time>]", summary: "Keep rows within a datetime range" },
+    Show(ShowArgs) => { name: "show", category: Finalizer, max_args: Some(0), options: SHOW, help: "show", summary: "Display rows as CSV or JSONL" },
+    ShowTable(UnitArgs) => { name: "showtable", category: Finalizer, max_args: Some(0), options: NONE, help: "showtable", summary: "Display a compact table preview" },
+    Headers(HeadersArgs) => { name: "headers", category: Finalizer, max_args: Some(0), options: HEADERS, help: "headers [--plain]", summary: "Print column names" },
+    Stats(UnitArgs) => { name: "stats", category: Finalizer, max_args: Some(0), options: NONE, help: "stats", summary: "Show row and column statistics" },
+    ShowQuery(UnitArgs) => { name: "showquery", category: Finalizer, max_args: Some(0), options: NONE, help: "showquery", summary: "Show the query plan" },
+    Dump(DumpArgs) => { name: "dump", category: Finalizer, max_args: Some(0), options: DUMP, help: "dump [options]", summary: "Write rows to a file or standard output" },
+    DumpCache(DumpCacheArgs) => { name: "dumpcache", category: Finalizer, max_args: Some(0), options: OUTPUT, help: "dumpcache [--output <file>]", summary: "Save the query result as a Parquet cache" },
+    Partition(PartitionArgs) => { name: "partition", category: Finalizer, max_args: Some(2), options: NONE, help: "partition <column> [directory]", summary: "Write separate output files for each column value" },
+    Calc(CalcArgs) => { name: "calc", category: Finalizer, max_args: Some(1), options: CALC, help: "calc <column> --sum|--avg|--min|--max|--median|--std", summary: "Calculate a statistic for one column" },
+    Run(RunArgs) => { name: "run", category: Automation, max_args: None, options: RUN, help: "run <config> [files...] [options]", summary: "Run a workflow from a YAML configuration file" },
 }
 pub fn registry() -> &'static [CommandSpec] {
     SPECS
@@ -553,6 +554,7 @@ mod tests {
                 1
             );
             assert!(!definition.help.trim().is_empty());
+            assert!(!definition.summary.trim().is_empty());
         }
     }
 }

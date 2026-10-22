@@ -28,7 +28,7 @@ pub fn render_registry_help() -> String {
             .iter()
             .filter(|s| s.category == cat)
         {
-            out.push_str(&format!("  {:12} {}\n", s.name, s.help));
+            out.push_str(&format!("  {:12} {} — {}\n", s.name, s.help, s.summary));
         }
     }
     out
@@ -37,9 +37,10 @@ pub fn render_command_help(name: &str) -> Option<String> {
     let s = crate::controllers::definitions::by_name(name)?;
     if name == "run" {
         return Some(
-            "run\n\nUsage: qlt run <config> [files...] [options]\n\n"
-                .to_string()
-                + "Execute a version-1 YAML workflow. If a load step omits paths, positional files "
+            format!(
+                "run\n\nUsage: qlt {}\n{}\n\nExecute a version-1 YAML workflow. If a load step omits paths, positional files ",
+                s.help, s.summary
+            )
                 + "after the config path are supplied to that step.\n"
                 + "  --check                 Parse and statically validate the run document without reading input data or writing output\n"
                 + "  --var name=value        Supply a value for a declared typed parameter (repeatable)\n"
@@ -50,6 +51,7 @@ pub fn render_command_help(name: &str) -> Option<String> {
         );
     }
     let details = match name {
+        "count" => "\nCount repeated rows with `count`, or count values in selected columns with `count <columns>` (for example, `count hoge`). Select multiple columns to count each combination (for example, `select hoge,fuga - count`). Results are sorted by count, highest first; null values form a group and are counted.\n",
         "load" => "\nCSV and JSONL: full schema discovery and strict record validation by default.\n  --infer-schema-length full|N  Bound discovery but validate all later records.\n  --all-strings                 Read CSV fields as String, preserving identifiers.\n  --schema column=type          Override a CSV column (repeatable): string,int,uint,float,bool.\n  --stdin-format csv|tsv|jsonl   Read finite stdin instead of files.\n  --rejects PATH                Quarantine rejected records in a new JSONL report.\nCSV inference preserves leading-zero identifiers and integers outside a lossless numeric common type as strings. Unsupported encodings fail with the source path. JSONL duplicate keys and incompatible types fail unless quarantined. Gzip/stdin/reject filtering use managed temporary disk.\n",
         "filter" => "\nTyped Boolean expressions: == != < <= > >=, and/or/not (also && || !), parentheses, IS NULL/IS NOT NULL. Strings are quoted; backticks quote literal column names. Column comparisons preserve exact integers and reject incompatible types.\n",
         "derive" => "\nCreate a new column with + - * / and typed column/literal expressions. Integer results are checked Int64 values. Use cast <column> float before floating-point rates; integer columns are never silently promoted to Float64. Existing output columns are rejected.\n",
@@ -67,5 +69,8 @@ pub fn render_command_help(name: &str) -> Option<String> {
         "isin" => "\nMembership keys must be scalar; nested columns are rejected. Use flatten for a scalar field or grep/contains for JSON text search.\n",
         _ => "",
     };
-    Some(format!("{}\n\nUsage: {}\n{details}", s.name, s.help))
+    Some(format!(
+        "{}\n\nUsage: {}\n{}\n{details}",
+        s.name, s.help, s.summary
+    ))
 }
