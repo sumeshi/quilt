@@ -486,7 +486,7 @@ pub fn parse_automation_step(
             Ok(TypedCommand::Select(SelectArgs {
                 columns: match a.columns {
                     YamlStrings::One(value) => {
-                        crate::controllers::cli_adapter::select_columns_from_input(&value)?
+                        crate::controllers::cli_adapter::parse_column_list(&value)?
                     }
                     YamlStrings::Many(values) => values,
                 },
@@ -524,7 +524,7 @@ pub fn parse_automation_step(
                     .by
                     .map(|value| match value {
                         YamlStrings::One(value) => {
-                            crate::controllers::cli_adapter::select_columns_from_input(&value)
+                            crate::controllers::cli_adapter::parse_column_list(&value)
                         }
                         YamlStrings::Many(values) => Ok(values),
                     })

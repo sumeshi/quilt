@@ -249,7 +249,7 @@ fn split_values(value: &str) -> Result<Vec<String>, QuiltError> {
         Ok(values)
     }
 }
-pub(crate) fn select_columns_from_input(input: &str) -> Result<Vec<String>, QuiltError> {
+pub(crate) fn parse_column_list(input: &str) -> Result<Vec<String>, QuiltError> {
     let mut columns = Vec::new();
     let mut quoted = false;
     let mut start = 0;
@@ -263,7 +263,7 @@ pub(crate) fn select_columns_from_input(input: &str) -> Result<Vec<String>, Quil
         }
     }
     if quoted {
-        return Err(QuiltError::usage("Error: unclosed quote in select columns"));
+        return Err(QuiltError::usage("Error: unclosed quote in column list"));
     }
     columns.push(input[start..].trim().to_string());
     for name in &mut columns {
@@ -276,7 +276,7 @@ pub(crate) fn select_columns_from_input(input: &str) -> Result<Vec<String>, Quil
         }
     }
     if columns.iter().any(String::is_empty) {
-        return Err(QuiltError::usage("Error: select columns must not be empty"));
+        return Err(QuiltError::usage("Error: column list must not be empty"));
     }
     Ok(columns)
 }
@@ -393,7 +393,7 @@ fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
                     .map(|s| parse_metric(s))
                     .collect::<Result<_, _>>()?,
                 by: val(&raw, "by")
-                    .map(|s| select_columns_from_input(&s))
+                    .map(|s| parse_column_list(&s))
                     .transpose()?
                     .unwrap_or_default(),
             }))
@@ -418,13 +418,13 @@ fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
         OperationId::Explode => {
             args(&raw, 1, Some(1), "explode <columns>")?;
             Ok(TypedCommand::Explode(ExplodeArgs {
-                columns: select_columns_from_input(&a[0])?,
+                columns: parse_column_list(&a[0])?,
             }))
         }
         OperationId::Select => {
             args(&raw, 1, None, "select <columns>")?;
             Ok(TypedCommand::Select(SelectArgs {
-                columns: select_columns_from_input(&raw.args.join(","))?,
+                columns: parse_column_list(&raw.args.join(","))?,
             }))
         }
         OperationId::Cast => {
@@ -449,7 +449,7 @@ fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
             args(&raw, 1, Some(1), "delta <column>")?;
             Ok(TypedCommand::Delta(ColumnOutputArgs {
                 by: val(&raw, "by")
-                    .map(|s| select_columns_from_input(&s))
+                    .map(|s| parse_column_list(&s))
                     .transpose()?
                     .unwrap_or_default(),
                 column: a[0].clone(),
@@ -503,7 +503,9 @@ fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
                 pattern: a[0].clone(),
                 ignore_case: flag(&raw, "ignore_case"),
                 invert_match: flag(&raw, "invert_match"),
-                columns: val(&raw, "column").map(|v| split_values(&v)).transpose()?,
+                columns: val(&raw, "column")
+                    .map(|v| parse_column_list(&v))
+                    .transpose()?,
             }))
         }
         OperationId::Head => {
@@ -531,7 +533,7 @@ fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
         OperationId::Sort => {
             args(&raw, 1, Some(1), "sort <columns>")?;
             Ok(TypedCommand::Sort(SortArgs {
-                columns: split_values(&a[0])?,
+                columns: parse_column_list(&a[0])?,
                 descending: flag(&raw, "desc"),
             }))
         }
@@ -539,11 +541,10 @@ fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
             args(&raw, 0, Some(1), "count [columns]")?;
             Ok(TypedCommand::Count(CountArgs {
                 columns: a
-                    .iter()
-                    .flat_map(|v| v.split(','))
-                    .filter(|v| !v.trim().is_empty())
-                    .map(|v| v.trim().into())
-                    .collect(),
+                    .first()
+                    .map(|value| parse_column_list(value))
+                    .transpose()?
+                    .unwrap_or_default(),
             }))
         }
         OperationId::TimeInfo => {
@@ -556,7 +557,7 @@ fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
             Ok(TypedCommand::TimeInfo(TimeInfoArgs {
                 column: a[0].clone(),
                 by: val(&raw, "by")
-                    .map(|value| select_columns_from_input(&value))
+                    .map(|value| parse_column_list(&value))
                     .transpose()?
                     .unwrap_or_default(),
             }))
@@ -747,18 +748,43 @@ fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
 
 #[cfg(test)]
 mod select_columns_tests {
-    use super::select_columns_from_input;
+    use super::{parse_column_list, parse_typed_commands};
+    use crate::controllers::definitions::TypedCommand;
 
     #[test]
     fn select_column_names_unescape_csv_quotes_without_unquoting_ranges() {
         let escaped_header = format!("\"{}\"", r#"a":"b"#.replace('"', "\"\""));
+        assert_eq!(parse_column_list(&escaped_header).unwrap(), [r#"a":"b"#]);
         assert_eq!(
-            select_columns_from_input(&escaped_header).unwrap(),
-            [r#"a":"b"#]
-        );
-        assert_eq!(
-            select_columns_from_input(r#""ns:a":"ns:b""#).unwrap(),
+            parse_column_list(r#""ns:a":"ns:b""#).unwrap(),
             [r#""ns:a":"ns:b""#]
         );
+    }
+
+    #[test]
+    fn column_list_commands_share_quoted_comma_and_space_grammar() {
+        let quoted = r#""a,b",plain"#;
+        let expected = ["a,b", "plain"];
+        let commands = [
+            vec!["sort".into(), quoted.into()],
+            vec!["count".into(), quoted.into()],
+            vec![
+                "grep".into(),
+                "pattern".into(),
+                "--column".into(),
+                quoted.into(),
+            ],
+        ];
+        for argv in commands {
+            let parsed = parse_typed_commands(&argv).unwrap();
+            let columns = match &parsed[0] {
+                TypedCommand::Sort(args) => &args.columns,
+                TypedCommand::Count(args) => &args.columns,
+                TypedCommand::Grep(args) => args.columns.as_ref().unwrap(),
+                _ => unreachable!(),
+            };
+            assert_eq!(columns, &expected);
+        }
+        assert_eq!(parse_column_list(r#"" a b ""#).unwrap(), [" a b "]);
     }
 }

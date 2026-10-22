@@ -17,6 +17,23 @@ pub fn select(df: &LazyFrame, colnames: &[String]) -> Result<LazyFrame, QuiltErr
         )
     })?;
     let available_columns: Vec<String> = schema.iter_names().map(|s| s.to_string()).collect();
+    let expanded_colnames = resolve_select_columns(colnames, &available_columns)?;
+
+    let selected_cols: Vec<Expr> = expanded_colnames
+        .iter()
+        .map(|name| crate::controllers::nested::literal_col(name))
+        .collect();
+    if selected_cols.is_empty() {
+        LogController::warn("No valid columns selected. Returning original DataFrame.");
+        return Ok(df.clone());
+    }
+    Ok(df.clone().select(&selected_cols))
+}
+
+pub(crate) fn resolve_select_columns(
+    colnames: &[String],
+    available_columns: &[String],
+) -> Result<Vec<String>, QuiltError> {
     let mut expanded_colnames = Vec::new();
 
     for colname in colnames {
@@ -24,9 +41,9 @@ pub fn select(df: &LazyFrame, colnames: &[String]) -> Result<LazyFrame, QuiltErr
             expanded_colnames.push(colname.clone());
         } else if colname.contains(':') && !colname.starts_with('"') {
             let range_cols = if is_numeric_range(colname) {
-                parse_numeric_range(colname, &available_columns)?
+                parse_numeric_range(colname, available_columns)?
             } else {
-                parse_colon_range(colname, &available_columns)?
+                parse_colon_range(colname, available_columns)?
             };
             expanded_colnames.extend(range_cols);
         } else if colname.starts_with('"') && colname.contains(':') && colname.ends_with('"') {
@@ -35,15 +52,15 @@ pub fn select(df: &LazyFrame, colnames: &[String]) -> Result<LazyFrame, QuiltErr
                 expanded_colnames.extend(parse_quoted_colon_range(
                     start_col,
                     end_col,
-                    &available_columns,
+                    available_columns,
                 )?);
             } else {
                 expanded_colnames.push(colname.clone());
             }
         } else if RE_COL_RANGE_HYPHEN.is_match(colname) {
-            expanded_colnames.extend(parse_hyphen_range(colname, &available_columns)?);
+            expanded_colnames.extend(parse_hyphen_range(colname, available_columns)?);
         } else if is_numeric_index(colname) {
-            if let Some(col_name) = parse_single_numeric_index(colname, &available_columns) {
+            if let Some(col_name) = parse_single_numeric_index(colname, available_columns) {
                 expanded_colnames.push(col_name);
             } else {
                 return Err(QuiltError::usage(format!(
@@ -65,15 +82,7 @@ pub fn select(df: &LazyFrame, colnames: &[String]) -> Result<LazyFrame, QuiltErr
         }
     }
 
-    let selected_cols: Vec<Expr> = expanded_colnames
-        .iter()
-        .map(|name| crate::controllers::nested::literal_col(name))
-        .collect();
-    if selected_cols.is_empty() {
-        LogController::warn("No valid columns selected. Returning original DataFrame.");
-        return Ok(df.clone());
-    }
-    Ok(df.clone().select(&selected_cols))
+    Ok(expanded_colnames)
 }
 
 pub fn parse_hyphen_range(
@@ -253,5 +262,26 @@ mod tests {
             .unwrap();
 
         assert_eq!(selected.get_column_names(), &["col:1", "middle", "col:3"]);
+    }
+
+    #[test]
+    fn schema_resolver_preserves_literal_names_before_range_syntax() {
+        let columns = ["a", "b", "c", "1:2"].map(str::to_owned).to_vec();
+        assert_eq!(
+            resolve_select_columns(&["1:2".into()], &columns).unwrap(),
+            ["1:2"]
+        );
+        assert_eq!(
+            resolve_select_columns(&["1:3".into()], &columns).unwrap(),
+            ["a", "b", "c"]
+        );
+        assert_eq!(
+            resolve_select_columns(&["a:c".into()], &columns).unwrap(),
+            ["a", "b", "c"]
+        );
+        assert_eq!(
+            resolve_select_columns(&["2".into()], &columns).unwrap(),
+            ["b"]
+        );
     }
 }

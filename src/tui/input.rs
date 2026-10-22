@@ -339,7 +339,8 @@ pub(super) fn select_target(input: &str, cursor: usize) -> Option<SelectTarget> 
         .join(",");
     Some(SelectTarget {
         range: start..end.max(start),
-        columns: csv_columns_lenient(&joined),
+        columns: crate::controllers::cli_adapter::parse_column_list(&joined)
+            .unwrap_or_else(|_| csv_columns_lenient(&joined)),
     })
 }
 
@@ -558,7 +559,12 @@ pub(super) fn complete(
         .unwrap_or_default();
     let trailing_space = left.chars().last().is_some_and(char::is_whitespace);
     let current_word_complete = trailing_space;
-    let mut segment_start = tokens.iter().rposition(|t| t == "-").map_or(0, |i| i + 1);
+    let separators = pipeline_separators(&spans);
+    let mut segment_start = separators
+        .iter()
+        .rev()
+        .find(|&&i| spans[i].start < cursor)
+        .map_or(0, |&i| i + 1);
     if !current_word_complete {
         segment_start = segment_start.min(tokens.len());
     }
@@ -625,11 +631,21 @@ pub(super) fn complete(
             );
             let prior = segment.last().map(String::as_str).unwrap_or("");
             let arg_index = segment.len().saturating_sub(2);
+            let prior_args = if trailing_space {
+                &segment[1..]
+            } else {
+                &segment[1..segment.len().saturating_sub(1)]
+            };
+            let list_slot = matches!(spec.name, "select" | "count" | "sort" | "explode")
+                || (matches!(spec.name, "grep")
+                    && prior_args.last().is_some_and(|arg| arg == "--column"))
+                || (matches!(spec.name, "aggregate" | "delta" | "timeinfo")
+                    && prior_args.last().is_some_and(|arg| arg == "--by"));
             let want_columns = trailing_space || (!prior.starts_with('-') && !prior.is_empty());
             if want_columns && !looks_like_path_slot(spec.name, arg_index) {
                 candidates.extend(columns.iter().map(|(name, dtype)| Completion {
                     display: name.clone(),
-                    replacement: quote_column(name, spec.name),
+                    replacement: quote_column(name, list_slot),
                     range: start..cursor,
                     description: format!("Column · {dtype}"),
                     kind: CompletionKind::Column,
@@ -729,7 +745,7 @@ fn complete_select_field(
                     );
                     (quote_argument(&value), token.start..token.end)
                 } else {
-                    (quote_column(name, "select"), raw_start..raw_end)
+                    (quote_column(name, true), raw_start..raw_end)
                 };
                 Completion {
                     display: name.clone(),
@@ -747,8 +763,8 @@ fn looks_like_path_slot(command: &str, arg_index: usize) -> bool {
     matches!(command, "load" | "dump" | "dumpcache" | "partition" | "run") && arg_index == 0
 }
 
-fn quote_column(name: &str, command: &str) -> String {
-    if command == "select" {
+fn quote_column(name: &str, column_list: bool) -> String {
+    if column_list {
         let csv = csv_field(name);
         if csv != name || name.chars().any(|c| c.is_whitespace() || c == '\'') {
             quote_argument(&csv)
@@ -781,7 +797,10 @@ pub(super) fn help(input: &str, cursor: usize) -> String {
             });
     }
     let tokens = tokenize(trimmed).unwrap_or_default();
-    let start = tokens.iter().rposition(|t| t == "-").map_or(0, |i| i + 1);
+    let spans = token_spans(trimmed);
+    let start = pipeline_separators(&spans)
+        .last()
+        .map_or(0, |index| index + 1);
     let command = tokens
         .get(start)
         .filter(|t| registry().iter().any(|s| s.name == t.as_str()))
@@ -856,6 +875,42 @@ mod tests {
             .unwrap();
         let commands = parse_commands(&format!("cast {} string", result.replacement)).unwrap();
         assert!(matches!(&commands[0], TypedCommand::Cast(args) if args.column == name));
+    }
+
+    #[test]
+    fn list_column_completion_round_trips_comma_space_and_quote_names() {
+        let names = ["a,b c", "a'b", "say\"hi"];
+        let columns = names
+            .iter()
+            .map(|name| (name.to_string(), "String".to_string()))
+            .collect::<Vec<_>>();
+        for (draft, prefix) in [
+            ("count ", "count "),
+            ("sort ", "sort "),
+            ("grep pattern --column ", "grep pattern --column "),
+            (
+                "flatten - select x - grep pattern --column ",
+                "flatten - select x - grep pattern --column ",
+            ),
+        ] {
+            for name in names {
+                let found = complete(draft, draft.len(), &columns);
+                let item = found
+                    .iter()
+                    .find(|candidate| candidate.display == name)
+                    .unwrap();
+                let command = format!("{draft}{}", item.replacement);
+                let parsed = parse_commands(&command).unwrap();
+                let selected = parsed.last().unwrap();
+                let result = match selected {
+                    TypedCommand::Count(args) => &args.columns,
+                    TypedCommand::Sort(args) => &args.columns,
+                    TypedCommand::Grep(args) => args.columns.as_ref().unwrap(),
+                    _ => unreachable!(),
+                };
+                assert_eq!(result, &[name.to_string()], "{prefix}");
+            }
+        }
     }
 
     #[test]
@@ -1093,6 +1148,17 @@ mod tests {
         let blank = select_target("", 0).unwrap();
         assert!(blank.range.is_empty() && blank.columns.is_empty());
         assert!(select_target("flatten - cast x string", 24).is_none());
+        let quoted_range = r#"select '"col:1":"col:3"'"#;
+        let target = select_target(quoted_range, quoted_range.len()).unwrap();
+        let available = ["col:1", "middle", "col:3"].map(str::to_owned);
+        assert_eq!(
+            crate::operations::chainables::select::resolve_select_columns(
+                &target.columns,
+                &available,
+            )
+            .unwrap(),
+            available,
+        );
 
         let names = [
             "a,b",
