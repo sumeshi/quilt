@@ -60,42 +60,41 @@ This command:
 ### Interactive mode
 
 ```bash
-$ qlt --tui Security.jsonl
-$ qlt --tui --all-strings events.csv
+$ qlt --lazy Security.jsonl
+$ qlt --lazy --all-strings events.csv
 ```
 
-Enter CLI pipeline commands such as `grep ERROR` or `filter 'id == 4624'`.
-The table previews the current draft; Enter applies it.
-The compact left pane lists column names and types; Alt-Left / Right keeps the
-current column visible there. The right pane shows completion candidates and
-help for the current command.
+Type pipeline commands such as `grep ERROR` or `filter 'id == 4624'`. Enter
+confirms the draft; valid drafts preview live, and Tab completes commands,
+options, and columns. Use `:edit STEP` to bring an applied command back into the
+input. An incomplete or invalid edit shows marked context before that step until
+you enter a valid command.
 
 | Key / command | Action |
 | --- | --- |
-| Tab; Up / Down | Complete a command, option, or column; choose a candidate |
-| Page Up / Down; Alt-Left / Right | Scroll rows or columns |
-| Ctrl-Z / Ctrl-Y | Undo / redo applied pipeline changes |
-| `:edit STEP` | Edit an applied step, numbered from 1 |
-| F5 | Switch between a source sample and full-data evaluation |
-| F6 or `:cache` | Save the confirmed pipeline as a temporary Parquet checkpoint |
-| `:cache PATH` | Save a persistent Parquet file |
-| Ctrl-S or `:write PATH` | Save the confirmed pipeline as a YAML workflow |
-| `:clear-cache`; Ctrl-C or `:quit` | Release the checkpoint; leave the TUI |
+| Tab; Up / Down | Complete commands, options, or columns; choose a completion |
+| Page Up / Down; Alt-Left / Right | Scroll rows or move across table columns |
+| Ctrl+A, then `?` / `s` | Open keyboard help / select columns |
+| Ctrl+A, then `w` | Save the confirmed pipeline as a YAML workflow |
+| Ctrl+A, then `c` / `x` | Create a checkpoint / clear the cache |
+| Ctrl+A, then `p` | Switch between sample and full-data preview |
+| Ctrl+A, then `u` / `r` | Undo / redo pipeline changes |
+| Ctrl+A, then `q`; Ctrl-C | Quit / exit |
+| `:edit STEP` | Edit an applied command, numbered from 1 |
+| `:write PATH`; `:cache [PATH]`; `:clear-cache` | Save YAML; create a checkpoint; clear cache |
+| `:undo`; `:redo`; `:quit` | Undo; redo; quit |
 
-Sample mode uses up to 10,000 source rows within a 32 MiB estimated data budget.
-Counts, sorting, and aggregates in this mode describe that sample. Full mode applies the
-pipeline to all input data; global operations can take longer. Initial loading
-still validates the complete input. The table shows up to 100 result rows.
-
-Full-data evaluation can reuse temporary checkpoints. They have a 512 MiB total
-budget and are released when no longer used or on normal exit. Editing a cached
-prefix or reloading changed input invalidates the checkpoint. Cache/export
-failures preserve existing files.
-Parquet restrictions, including empty objects, also apply to checkpoints.
-Saved YAML refers to the original inputs and confirmed commands, without sample
-limits or temporary cache paths, and can be executed with `qlt run`.
-On exit, queued operations are cancelled and any active operation finishes before
-the terminal closes.
+In the column picker, use Space to toggle, arrows or `hjkl` to move, `/` to
+filter, `a` to select all filtered columns, `i` to invert, and `u` to clear.
+While filtering, Enter ends the filter; press Enter again to apply the selection
+to the draft. Esc cancels. Sample preview uses up to 10,000 source rows within a
+32 MiB estimate; the table shows up to 100 rows and 128 columns. Initial loading
+validates all input, and full preview evaluates all data. Temporary checkpoints
+share a 512 MiB budget, are cleaned up on normal exit, and exports do not
+overwrite existing files. YAML saves confirmed commands against the original
+inputs, without sample limits or checkpoint paths, for `qlt run`. On exit,
+queued work is cancelled and any active operation finishes before the terminal
+closes.
 
 ### Command Structure
 

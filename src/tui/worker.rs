@@ -74,7 +74,10 @@ fn enqueue(schedule: &mut Schedule, request: Request) -> Result<(), QuiltError> 
     if schedule.closed {
         return Err(QuiltError::operation("TUI worker", "worker has stopped"));
     }
-    if matches!(&request.action, Action::Preview(_)) {
+    if matches!(
+        &request.action,
+        Action::Preview(_) | Action::DraftPreview { .. }
+    ) {
         schedule.preview = Some(request);
     } else {
         if schedule.actions.len() >= ACTION_QUEUE_CAPACITY {
@@ -116,6 +119,7 @@ struct LoadedSource {
 struct FramePreview {
     columns: Vec<(String, String)>,
     total_columns: usize,
+    input_columns: Vec<(String, String)>,
     rows: Vec<Vec<String>>,
     truncated: bool,
 }
@@ -170,26 +174,27 @@ impl Engine {
                 }
             }
             Action::Preview(mode) => {
-                let (pipeline, sample_rows) = if mode == PreviewMode::Sample {
-                    let pipeline = self.sample_pipeline(&request.commands)?;
-                    let rows = self
-                        .source
-                        .as_ref()
-                        .and_then(|source| source.sample.as_ref().map(|sample| sample.rows));
-                    (pipeline, rows)
-                } else {
-                    (self.full_pipeline(&request.commands)?, None)
-                };
+                let pipeline = self.pipeline_for(&request.commands, mode)?;
                 let preview = preview_frame(pipeline.frame())?;
                 Ok(Outcome::Preview(Preview {
                     columns: preview.columns,
                     total_columns: preview.total_columns,
+                    input_columns: preview.input_columns,
                     rows: preview.rows,
                     truncated: preview.truncated,
                     mode,
                     cache: self.cache.info(),
-                    sample_rows,
+                    sample_rows: self.sample_rows(mode),
+                    draft_issue: None,
                 }))
+            }
+            Action::DraftPreview {
+                mode,
+                context,
+                issue,
+            } => {
+                let preview = self.draft_preview(&request.commands, &context, issue, mode)?;
+                Ok(Outcome::Preview(preview))
             }
         }
     }
@@ -321,6 +326,91 @@ impl Engine {
         executor
             .into_pipeline()
             .ok_or_else(|| QuiltError::usage("load data before previewing"))
+    }
+
+    fn pipeline_for(
+        &mut self,
+        commands: &[TypedCommand],
+        mode: PreviewMode,
+    ) -> Result<Pipeline, QuiltError> {
+        match mode {
+            PreviewMode::Sample => self.sample_pipeline(commands),
+            PreviewMode::Full => self.full_pipeline(commands),
+        }
+    }
+
+    fn sample_rows(&self, mode: PreviewMode) -> Option<usize> {
+        (mode == PreviewMode::Sample)
+            .then(|| {
+                self.source
+                    .as_ref()
+                    .and_then(|source| source.sample.as_ref().map(|sample| sample.rows))
+            })
+            .flatten()
+    }
+
+    fn draft_preview(
+        &mut self,
+        candidate: &[TypedCommand],
+        context: &[TypedCommand],
+        issue: Option<String>,
+        mode: PreviewMode,
+    ) -> Result<Preview, QuiltError> {
+        let context_pipeline = if context.is_empty() {
+            None
+        } else {
+            Some(self.pipeline_for(context, mode)?)
+        };
+
+        let (pipeline, draft_issue, input_columns) = if let Some(issue) = issue {
+            let pipeline = context_pipeline
+                .ok_or_else(|| QuiltError::usage("no valid pipeline context for draft"))?;
+            (pipeline, Some(bound_cell(issue)), None)
+        } else {
+            let candidate_result = self.pipeline_for(candidate, mode).and_then(|pipeline| {
+                preview_frame(pipeline.frame()).map(|preview| (pipeline, preview))
+            });
+            match candidate_result {
+                Ok((pipeline, candidate_preview)) => {
+                    let context_schema = if let Some(context_pipeline) = context_pipeline.as_ref() {
+                        input_columns(context_pipeline.frame())?
+                    } else {
+                        candidate_preview.input_columns.clone()
+                    };
+                    (pipeline, None, Some((candidate_preview, context_schema)))
+                }
+                Err(candidate_error) => {
+                    let Some(pipeline) = context_pipeline else {
+                        return Err(candidate_error);
+                    };
+                    (
+                        pipeline,
+                        Some(bound_cell(candidate_error.to_string())),
+                        None,
+                    )
+                }
+            }
+        };
+
+        let rendered = if let Some((preview, input_columns)) = input_columns {
+            (preview, input_columns)
+        } else {
+            let preview = preview_frame(pipeline.frame())?;
+            let columns = preview.input_columns.clone();
+            (preview, columns)
+        };
+        let (preview, input_columns) = rendered;
+        Ok(Preview {
+            columns: preview.columns,
+            total_columns: preview.total_columns,
+            input_columns,
+            rows: preview.rows,
+            truncated: preview.truncated,
+            mode,
+            sample_rows: self.sample_rows(mode),
+            draft_issue,
+            cache: self.cache.info(),
+        })
     }
 }
 
@@ -498,10 +588,14 @@ fn preview_frame(frame: &LazyFrame) -> Result<FramePreview, QuiltError> {
         .collect_schema()
         .map_err(|e| QuiltError::operation("preview schema", e.to_string()))?;
     let total_columns = schema.len();
-    let columns: Vec<(String, String)> = schema
+    let input_columns = schema
+        .iter()
+        .map(|(name, dtype)| (name.to_string(), dtype.to_string()))
+        .collect::<Vec<_>>();
+    let columns: Vec<(String, String)> = input_columns
         .iter()
         .take(MAX_COLUMNS)
-        .map(|(name, dtype)| (bound_cell(name.to_string()), bound_cell(dtype.to_string())))
+        .map(|(name, dtype)| (bound_cell(name.clone()), bound_cell(dtype.clone())))
         .collect();
     let display_exprs: Vec<Expr> = schema
         .iter()
@@ -536,9 +630,23 @@ fn preview_frame(frame: &LazyFrame) -> Result<FramePreview, QuiltError> {
     Ok(FramePreview {
         columns,
         total_columns,
+        input_columns,
         rows,
         truncated,
     })
+}
+
+fn input_columns(frame: &LazyFrame) -> Result<Vec<(String, String)>, QuiltError> {
+    frame
+        .clone()
+        .collect_schema()
+        .map(|schema| {
+            schema
+                .iter()
+                .map(|(name, dtype)| (name.to_string(), dtype.to_string()))
+                .collect()
+        })
+        .map_err(|error| QuiltError::operation("preview schema", error.to_string()))
 }
 
 fn bound_cell(value: String) -> String {
@@ -576,7 +684,7 @@ fn write_new(path: &std::path::Path, contents: &[u8]) -> Result<(), QuiltError> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::controllers::command_model::{CountArgs, DumpCacheArgs};
+    use crate::controllers::command_model::{CountArgs, DumpCacheArgs, SelectArgs};
 
     fn load(path: &std::path::Path) -> TypedCommand {
         TypedCommand::Load(LoadArgs {
@@ -620,7 +728,20 @@ mod tests {
         )
         .unwrap();
         enqueue(&mut schedule, preview_request(3)).unwrap();
-        assert_eq!(schedule.preview.as_ref().unwrap().id, 3);
+        enqueue(
+            &mut schedule,
+            Request {
+                id: 4,
+                commands: Vec::new(),
+                action: Action::DraftPreview {
+                    mode: PreviewMode::Sample,
+                    context: Vec::new(),
+                    issue: Some("unfinished".into()),
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(schedule.preview.as_ref().unwrap().id, 4);
         assert_eq!(schedule.actions.front().unwrap().id, 2);
     }
 
@@ -645,6 +766,77 @@ mod tests {
         assert!(preview.truncated);
         assert_eq!(preview.rows[0][0].chars().count(), MAX_CELL_CHARS + 1);
         assert!(preview.rows[0][0].ends_with('…'));
+    }
+
+    #[test]
+    fn draft_preview_keeps_full_context_schema_and_falls_back_on_invalid_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("draft.csv");
+        std::fs::write(&path, "hoge,other\n1,2\n").unwrap();
+        let context = vec![load(&path)];
+        let candidate = vec![
+            load(&path),
+            TypedCommand::Select(SelectArgs {
+                columns: vec!["hoge".into()],
+            }),
+        ];
+        let mut engine = Engine::new();
+        let Outcome::Preview(selected) = engine
+            .process(Request {
+                id: 1,
+                commands: candidate,
+                action: Action::DraftPreview {
+                    mode: PreviewMode::Sample,
+                    context: context.clone(),
+                    issue: None,
+                },
+            })
+            .unwrap()
+        else {
+            panic!("draft did not return a preview")
+        };
+        assert_eq!(selected.columns.len(), 1);
+        assert_eq!(
+            selected
+                .input_columns
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["hoge", "other"]
+        );
+        assert!(selected.draft_issue.is_none());
+
+        let Outcome::Preview(fallback) = engine
+            .process(Request {
+                id: 2,
+                commands: context.clone(),
+                action: Action::DraftPreview {
+                    mode: PreviewMode::Sample,
+                    context: context.clone(),
+                    issue: Some("incomplete select".into()),
+                },
+            })
+            .unwrap()
+        else {
+            panic!("draft fallback did not return a preview")
+        };
+        assert_eq!(fallback.columns.len(), 2);
+        assert_eq!(fallback.input_columns.len(), 2);
+        assert_eq!(fallback.draft_issue.as_deref(), Some("incomplete select"));
+
+        let invalid = vec![
+            load(&path),
+            TypedCommand::Select(SelectArgs {
+                columns: vec!["missing".into()],
+            }),
+        ];
+        assert!(engine
+            .process(Request {
+                id: 3,
+                commands: invalid,
+                action: Action::Preview(PreviewMode::Sample)
+            })
+            .is_err());
     }
 
     fn commands(path: &std::path::Path) -> Vec<TypedCommand> {

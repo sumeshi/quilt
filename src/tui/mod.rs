@@ -2,6 +2,7 @@
 
 mod app;
 mod cache;
+mod columns;
 mod input;
 mod worker;
 
@@ -26,20 +27,27 @@ pub(super) struct CacheInfo {
     steps: usize,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct Preview {
     columns: Vec<(String, String)>,
     total_columns: usize,
+    input_columns: Vec<(String, String)>,
     rows: Vec<Vec<String>>,
     truncated: bool,
     mode: PreviewMode,
     sample_rows: Option<usize>,
+    draft_issue: Option<String>,
     cache: Option<CacheInfo>,
 }
 
 #[derive(Clone, Debug)]
 pub(super) enum Action {
     Preview(PreviewMode),
+    DraftPreview {
+        mode: PreviewMode,
+        context: Vec<TypedCommand>,
+        issue: Option<String>,
+    },
     Cache,
     ClearCache,
     SaveCache(PathBuf),

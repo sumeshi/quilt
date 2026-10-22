@@ -1,4 +1,9 @@
-use super::{input, worker::Worker, Action, Event, Outcome, Preview, PreviewMode, Request};
+use super::{
+    columns::{ColumnPicker, PickerResult},
+    input,
+    worker::Worker,
+    Action, Event, Outcome, Preview, PreviewMode, Request,
+};
 use crate::controllers::command_model::{CommandCategory, TypedCommand};
 use crate::QuiltError;
 use crossterm::event::{
@@ -13,7 +18,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap},
     Frame, Terminal,
 };
 use std::collections::HashSet;
@@ -78,6 +83,12 @@ struct App {
     rows_offset: usize,
     completion: usize,
     candidates: Vec<input::Completion>,
+    prefix_mode: bool,
+    help_overlay: bool,
+    help_scroll: u16,
+    picker: Option<ColumnPicker>,
+    pending_picker: bool,
+    preview_pending: bool,
     quitting: bool,
 }
 
@@ -117,6 +128,12 @@ pub(super) fn run(
         rows_offset: 0,
         completion: 0,
         candidates: Vec::new(),
+        prefix_mode: false,
+        help_overlay: false,
+        help_scroll: 0,
+        picker: None,
+        pending_picker: false,
+        preview_pending: false,
         quitting: false,
     };
     app.refresh_candidates();
@@ -132,7 +149,7 @@ pub(super) fn run(
             app.schedule_preview();
         }
         terminal
-            .draw(|f| render(f, &app))
+            .draw(|f| render(f, &mut app))
             .map_err(|e| QuiltError::operation("TUI render", e.to_string()))?;
         if event::poll(Duration::from_millis(40))
             .map_err(|e| QuiltError::operation("TUI input", e.to_string()))?
@@ -140,7 +157,11 @@ pub(super) fn run(
             match event::read().map_err(|e| QuiltError::operation("TUI input", e.to_string()))? {
                 CEvent::Key(key) => app.key(key)?,
                 CEvent::Paste(text) => {
-                    if app.pending_commit.is_none() {
+                    if app.pending_commit.is_none()
+                        && app.picker.is_none()
+                        && !app.help_overlay
+                        && !app.prefix_mode
+                    {
                         app.insert(&text);
                         app.changed();
                     } else {
@@ -182,6 +203,7 @@ impl App {
     fn changed(&mut self) {
         self.dirty_at = Some(Instant::now());
         self.latest_preview = 0;
+        self.preview_pending = false;
         self.error.clear();
         self.completion = 0;
         self.refresh_candidates();
@@ -190,7 +212,9 @@ impl App {
         self.candidates = input::complete(
             &self.draft,
             self.cursor,
-            self.preview.as_ref().map_or(&[], |p| p.columns.as_slice()),
+            self.preview
+                .as_ref()
+                .map_or(&[], |p| p.input_columns.as_slice()),
         );
         if self.candidates.is_empty() {
             self.completion = 0;
@@ -201,7 +225,7 @@ impl App {
     fn queue(&mut self, commands: Vec<TypedCommand>, action: Action) -> Result<u64, QuiltError> {
         self.generation += 1;
         let id = self.generation;
-        let is_preview = matches!(&action, Action::Preview(_));
+        let is_preview = matches!(&action, Action::Preview(_) | Action::DraftPreview { .. });
         self.worker.submit(Request {
             id,
             commands,
@@ -229,21 +253,77 @@ impl App {
         };
         Ok(all)
     }
+    fn draft_context(&self) -> Vec<TypedCommand> {
+        let mut context = if let Some((start, _)) = self.edit_step {
+            self.committed[..start].to_vec()
+        } else {
+            self.committed.clone()
+        };
+        context.extend(input::preview_prefix(&self.draft[..self.cursor]));
+        context
+    }
     fn schedule_preview(&mut self) {
         self.dirty_at = None;
         if self.pending_commit.is_some() {
             return;
         }
-        match self.candidate() {
-            Ok(commands) => {
-                if let Err(e) = self.queue(commands, Action::Preview(self.mode)) {
-                    self.error = e.to_string();
-                } else {
-                    self.latest_preview = self.generation;
+        if self.draft.trim_start().starts_with(':') {
+            self.preview_pending = false;
+            self.pending_picker = false;
+            self.status = "Built-in draft; Enter executes it".into();
+            return;
+        }
+        if self.draft.trim().is_empty() && self.edit_step.is_none() {
+            match self.queue(self.committed.clone(), Action::Preview(self.mode)) {
+                Ok(id) => {
+                    self.latest_preview = id;
+                    self.preview_pending = true;
+                }
+                Err(e) => {
+                    self.preview_pending = false;
+                    self.error = safe(&e.to_string());
                 }
             }
-            Err(_) => {
-                self.status = "Draft incomplete; keeping last preview".into();
+            return;
+        }
+
+        let context = self.draft_context();
+        let empty_edit = self.draft.trim().is_empty() && self.edit_step.is_some();
+        let (commands, issue) = if empty_edit {
+            (
+                context.clone(),
+                Some("Empty edit draft; showing input before edited step".into()),
+            )
+        } else {
+            match self.candidate() {
+                Ok(commands) => (commands, None),
+                Err(e) => (context.clone(), Some(safe(&e.to_string()))),
+            }
+        };
+        if context.is_empty() && issue.is_some() {
+            self.preview = None;
+            self.preview_pending = false;
+            self.pending_picker = false;
+            self.refresh_candidates();
+            self.status = format!("Draft incomplete; {}", issue.unwrap_or_default());
+            return;
+        }
+        match self.queue(
+            commands,
+            Action::DraftPreview {
+                mode: self.mode,
+                context,
+                issue,
+            },
+        ) {
+            Ok(id) => {
+                self.latest_preview = id;
+                self.preview_pending = true;
+                self.status = "Updating draft preview…".into();
+            }
+            Err(e) => {
+                self.preview_pending = false;
+                self.error = safe(&e.to_string());
             }
         }
     }
@@ -265,10 +345,19 @@ impl App {
                     return;
                 }
                 self.columns_offset = self.columns_offset.min(p.columns.len().saturating_sub(1));
+                let draft_issue = p.draft_issue.clone();
                 self.preview = Some(p);
+                self.preview_pending = false;
                 self.error.clear();
-                self.status = "Preview updated".into();
+                self.status = draft_issue.map_or_else(
+                    || "Preview updated".into(),
+                    |issue| format!("Input before draft — {}", safe(&issue)),
+                );
                 self.refresh_candidates();
+                if self.pending_picker {
+                    self.pending_picker = false;
+                    self.open_picker_now();
+                }
                 if let Some(pending) = self.pending_commit.take() {
                     if pending.id == id {
                         self.push_history(pending.label);
@@ -329,6 +418,10 @@ impl App {
                     .is_some_and(|pending| pending.id == id);
                 if self.explicit.remove(&id) || id == self.latest_preview || is_commit {
                     self.error = safe(&e.to_string());
+                    if id == self.latest_preview {
+                        self.preview_pending = false;
+                        self.pending_picker = false;
+                    }
                     if is_commit {
                         self.pending_commit = None;
                     }
@@ -368,6 +461,7 @@ impl App {
         if self.draft.trim().is_empty() {
             return;
         }
+        self.pending_picker = false;
         if self.draft.trim_start().starts_with(':') {
             self.directive();
             return;
@@ -400,6 +494,7 @@ impl App {
                 match self.queue(next.clone(), Action::Preview(self.mode)) {
                     Ok(id) => {
                         self.latest_preview = id;
+                        self.preview_pending = true;
                         self.dirty_at = None;
                         self.pending_commit = Some(PendingCommit {
                             id,
@@ -453,20 +548,106 @@ impl App {
         if k.kind == KeyEventKind::Release {
             return Ok(());
         }
+        if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('c') {
+            self.quitting = true;
+            return Ok(());
+        }
+        if self.help_overlay {
+            match k.code {
+                KeyCode::Esc | KeyCode::Char('?') => self.help_overlay = false,
+                KeyCode::Up => self.help_scroll = self.help_scroll.saturating_sub(1),
+                KeyCode::Down => self.help_scroll = self.help_scroll.saturating_add(1),
+                KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(8),
+                KeyCode::PageDown => self.help_scroll = self.help_scroll.saturating_add(8),
+                KeyCode::Home => self.help_scroll = 0,
+                KeyCode::End => self.help_scroll = u16::MAX,
+                _ => {}
+            }
+            return Ok(());
+        }
+        if self.picker.is_some() {
+            if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('a') {
+                self.prefix_mode = true;
+                self.status =
+                    "Prefix: ? help; Esc cancels prefix; close picker for other actions".into();
+                return Ok(());
+            }
+            if self.prefix_mode {
+                self.prefix_mode = false;
+                match k.code {
+                    KeyCode::Esc => {
+                        self.status = "Prefix cancelled; column selection remains open".into()
+                    }
+                    KeyCode::Char('?') => {
+                        self.help_overlay = true;
+                        self.help_scroll = 0;
+                    }
+                    _ => self.status = "Close column selection before other prefix actions".into(),
+                }
+                return Ok(());
+            }
+            let result = self.picker.as_mut().unwrap().handle_key(k);
+            match result {
+                PickerResult::Continue => {}
+                PickerResult::Cancel => {
+                    self.picker = None;
+                    self.status = "Column selection cancelled".into();
+                }
+                PickerResult::Accept(columns) => {
+                    self.picker = None;
+                    self.apply_picker_selection(columns);
+                }
+            }
+            return Ok(());
+        }
         if self.pending_commit.is_some()
-            && !(k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('c'))
             && !(k.code == KeyCode::Enter && self.draft.trim() == ":quit")
         {
             self.status = "Waiting for command validation…".into();
             return Ok(());
         }
-        if k.modifiers.contains(KeyModifiers::CONTROL) {
+        if self.prefix_mode {
+            self.prefix_mode = false;
             match k.code {
-                KeyCode::Char('c') => self.quitting = true,
-                KeyCode::Char('s') => self.prompt_action("write"),
-                KeyCode::Char('z') => self.undo(),
-                KeyCode::Char('y') => self.redo(),
-                _ => {}
+                KeyCode::Esc => self.status = "Prefix cancelled".into(),
+                KeyCode::Char('?') => {
+                    self.help_overlay = true;
+                    self.help_scroll = 0;
+                }
+                KeyCode::Char('s') => self.open_picker(),
+                KeyCode::Char('w') => self.prompt_action("write"),
+                KeyCode::Char('c') => {
+                    let commands = self.committed.clone();
+                    match self.queue(commands, Action::Cache) {
+                        Ok(_) => self.status = "Creating session checkpoint…".into(),
+                        Err(e) => self.error = safe(&e.to_string()),
+                    }
+                }
+                KeyCode::Char('x') => {
+                    let commands = self.committed.clone();
+                    if let Err(e) = self.queue(commands, Action::ClearCache) {
+                        self.error = safe(&e.to_string());
+                    }
+                }
+                KeyCode::Char('p') => {
+                    self.mode = if self.mode == PreviewMode::Sample {
+                        PreviewMode::Full
+                    } else {
+                        PreviewMode::Sample
+                    };
+                    self.schedule_preview();
+                }
+                KeyCode::Char('u') => self.undo(),
+                KeyCode::Char('r') => self.redo(),
+                KeyCode::Char('q') => self.quitting = true,
+                _ => self.status = "Unknown prefix key; press Ctrl+A ? for help".into(),
+            }
+            return Ok(());
+        }
+        if k.modifiers.contains(KeyModifiers::CONTROL) {
+            if k.code == KeyCode::Char('a') {
+                self.prefix_mode = true;
+                self.status = "Prefix: ? help s columns w write c checkpoint x clear p mode u/r undo/redo q quit".into();
             }
             return Ok(());
         }
@@ -492,6 +673,7 @@ impl App {
         }
         match k.code {
             KeyCode::Esc => {
+                self.pending_picker = false;
                 self.draft.clear();
                 self.cursor = 0;
                 self.dirty_at = None;
@@ -502,6 +684,7 @@ impl App {
                 if self.committed.is_empty() {
                     self.preview = None;
                     self.latest_preview = 0;
+                    self.preview_pending = false;
                 } else {
                     self.schedule_preview();
                 }
@@ -531,20 +714,24 @@ impl App {
                 }
             }
             KeyCode::Left => {
+                let old_context = self.draft_context();
                 self.cursor = prev_boundary(&self.draft, self.cursor);
-                self.refresh_candidates();
+                self.refresh_after_cursor_move(old_context);
             }
             KeyCode::Right => {
+                let old_context = self.draft_context();
                 self.cursor = next_boundary(&self.draft, self.cursor);
-                self.refresh_candidates();
+                self.refresh_after_cursor_move(old_context);
             }
             KeyCode::Home => {
+                let old_context = self.draft_context();
                 self.cursor = 0;
-                self.refresh_candidates();
+                self.refresh_after_cursor_move(old_context);
             }
             KeyCode::End => {
+                let old_context = self.draft_context();
                 self.cursor = self.draft.len();
-                self.refresh_candidates();
+                self.refresh_after_cursor_move(old_context);
             }
             KeyCode::Tab => self.complete(),
             KeyCode::Up => {
@@ -559,21 +746,55 @@ impl App {
             }
             KeyCode::PageUp => self.rows_offset = self.rows_offset.saturating_sub(20),
             KeyCode::PageDown => self.rows_offset += 20,
-            KeyCode::F(5) => {
-                self.mode = if self.mode == PreviewMode::Sample {
-                    PreviewMode::Full
-                } else {
-                    PreviewMode::Sample
-                };
-                self.schedule_preview()
-            }
-            KeyCode::F(6) => {
-                let c = self.committed.clone();
-                let _ = self.queue(c, Action::Cache);
-            }
             _ => {}
         }
         Ok(())
+    }
+    fn refresh_after_cursor_move(&mut self, old_context: Vec<TypedCommand>) {
+        if self.draft_context() != old_context {
+            self.changed();
+        } else {
+            self.refresh_candidates();
+        }
+    }
+    fn open_picker(&mut self) {
+        if input::select_target(&self.draft, self.cursor).is_none() {
+            self.status = "Column picker is available for a select command or blank draft".into();
+            return;
+        }
+        if self.dirty_at.is_some() {
+            self.pending_picker = true;
+            self.schedule_preview();
+        } else if self.preview_pending || self.latest_preview == 0 || self.preview.is_none() {
+            self.pending_picker = true;
+            if !self.preview_pending {
+                self.schedule_preview();
+            }
+        } else {
+            self.open_picker_now();
+        }
+    }
+    fn open_picker_now(&mut self) {
+        let Some(target) = input::select_target(&self.draft, self.cursor) else {
+            self.status = "Column picker is available for a select command or blank draft".into();
+            return;
+        };
+        let columns = self
+            .preview
+            .as_ref()
+            .map_or_else(Vec::new, |p| p.input_columns.clone());
+        self.picker = Some(ColumnPicker::new(columns, target.columns));
+    }
+    fn apply_picker_selection(&mut self, columns: Vec<String>) {
+        let Some(target) = input::select_target(&self.draft, self.cursor) else {
+            self.status = "Draft changed; column selection was not applied".into();
+            return;
+        };
+        let replacement = input::format_select(&columns);
+        self.draft.replace_range(target.range.clone(), &replacement);
+        self.cursor = target.range.start + replacement.len();
+        self.changed();
+        self.status = "Column selection updated; Enter to commit".into();
     }
     fn complete(&mut self) {
         if let Some(c) = self
@@ -592,6 +813,8 @@ impl App {
             self.edit_step = None;
             self.dirty_at = None;
             self.latest_preview = 0;
+            self.preview_pending = false;
+            self.pending_picker = false;
             self.completion = 0;
             self.error.clear();
             self.refresh_candidates();
@@ -604,6 +827,8 @@ impl App {
         self.edit_step = None;
         self.dirty_at = None;
         self.latest_preview = 0;
+        self.preview_pending = false;
+        self.pending_picker = false;
         self.completion = 0;
         self.error.clear();
         self.refresh_candidates();
@@ -612,6 +837,7 @@ impl App {
         if self.committed.is_empty() {
             self.preview = None;
             self.latest_preview = 0;
+            self.preview_pending = false;
         } else {
             self.schedule_preview();
         }
@@ -665,7 +891,7 @@ fn safe(s: &str) -> String {
         .collect()
 }
 
-fn render(f: &mut Frame, app: &App) {
+fn render(f: &mut Frame, app: &mut App) {
     let area = f.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -699,7 +925,26 @@ fn render(f: &mut Frame, app: &App) {
         (row[1], stacked[1], row[0])
     };
     let shown_mode = app.preview.as_ref().map_or(app.mode, |p| p.mode);
-    let banner=format!(" QUILT  |  {} preview  |  F5 toggle sample/full  F6 cache  Ctrl-Z/Y undo/redo  Ctrl-C quit",if shown_mode==PreviewMode::Sample{format!("Sample first {} rows",app.preview.as_ref().and_then(|p|p.sample_rows).unwrap_or(super::SAMPLE_ROWS))}else{"Full data".into()});
+    let preview_state = if app.dirty_at.is_some() || app.preview_pending {
+        " | Updating preview…"
+    } else {
+        ""
+    };
+    let banner = format!(
+        " QUILT | {} preview{} | Ctrl+A ? help | Ctrl+A s columns | Tab complete | Alt←/→ columns | Enter apply",
+        if shown_mode == PreviewMode::Sample {
+            format!(
+                "Sample first {} rows",
+                app.preview
+                    .as_ref()
+                    .and_then(|p| p.sample_rows)
+                    .unwrap_or(super::SAMPLE_ROWS)
+            )
+        } else {
+            "Full data".into()
+        },
+        preview_state
+    );
     f.render_widget(
         Paragraph::new(banner).style(
             Style::default()
@@ -711,19 +956,11 @@ fn render(f: &mut Frame, app: &App) {
     draw_headers(f, headers_area, app);
     draw_table(f, table_area, app);
     let help = input::help(&app.draft, app.cursor);
-    let narrow = context_area.height < 12;
-    let step_limit = if narrow { 0 } else { 4 };
-    let candidate_limit = if narrow { 2 } else { 5 };
+    let candidate_limit = 5;
     let candidate_start = app
         .completion
         .saturating_sub(candidate_limit / 2)
         .min(app.candidates.len().saturating_sub(candidate_limit));
-    let steps = app
-        .committed
-        .iter()
-        .enumerate()
-        .take(step_limit)
-        .map(|(i, c)| format!("{}. {}", i + 1, c.name()));
     let candidates = app
         .candidates
         .iter()
@@ -737,31 +974,70 @@ fn render(f: &mut Frame, app: &App) {
                 safe(&c.display)
             )
         });
-    let help_width = context_area.width.saturating_sub(4).max(8) as usize;
-    let help_lines = help
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .take(if narrow { 0 } else { 2 })
-        .map(|line| truncate_display(&safe(line), help_width));
-    let mut right_lines = vec!["Completions".to_owned()];
-    right_lines.extend(candidates);
-    if !narrow {
-        right_lines.push("Steps".into());
-        right_lines.extend(steps);
-        right_lines.push("Context".into());
-        right_lines.extend(help_lines);
+    let (completion_area, help_area, pipeline_area) = if context_area.height >= 25 {
+        let areas = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(7),
+                Constraint::Min(8),
+                Constraint::Length(7),
+            ])
+            .split(context_area);
+        (areas[0], areas[1], Some(areas[2]))
+    } else {
+        let areas = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(42), Constraint::Min(1)])
+            .split(context_area);
+        (areas[0], areas[1], None)
+    };
+    let mut completion_lines = vec!["Candidates".to_owned()];
+    completion_lines.extend(candidates);
+    if app.candidates.is_empty() {
+        completion_lines.push("No completions".into());
     }
-    let right = right_lines.join("\n");
     f.render_widget(
-        Paragraph::new(right)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Context / pipeline"),
-            )
+        Paragraph::new(completion_lines.join("\n"))
+            .block(Block::default().borders(Borders::ALL).title("Completions"))
             .wrap(Wrap { trim: false }),
-        context_area,
+        completion_area,
     );
+    f.render_widget(
+        Paragraph::new(
+            help.lines()
+                .filter(|line| !line.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .block(Block::default().borders(Borders::ALL).title(
+            if help.lines().count() > help_area.height.saturating_sub(2) as usize {
+                "Help ↓"
+            } else {
+                "Help"
+            },
+        ))
+        .wrap(Wrap { trim: false }),
+        help_area,
+    );
+    if let Some(pipeline_area) = pipeline_area {
+        let steps = app
+            .committed
+            .iter()
+            .enumerate()
+            .take(4)
+            .map(|(i, c)| format!("{}. {}", i + 1, c.name()))
+            .collect::<Vec<_>>();
+        f.render_widget(
+            Paragraph::new(if steps.is_empty() {
+                "No committed steps".into()
+            } else {
+                steps.join("\n")
+            })
+            .block(Block::default().borders(Borders::ALL).title("Pipeline"))
+            .wrap(Wrap { trim: false }),
+            pipeline_area,
+        );
+    }
     let cursor_col = UnicodeWidthStr::width(&app.draft[..app.cursor]);
     let input_width = chunks[2].width.saturating_sub(2) as usize;
     let input_scroll = cursor_col.saturating_sub(input_width.saturating_sub(1));
@@ -793,6 +1069,67 @@ fn render(f: &mut Frame, app: &App) {
             (chunks[2].y + 1).min(chunks[2].bottom().saturating_sub(1)),
         ));
     }
+    if app.help_overlay {
+        draw_keyboard_help(f, area, &mut app.help_scroll);
+    } else if let Some(picker) = &mut app.picker {
+        picker.render(f);
+    }
+}
+
+fn draw_keyboard_help(f: &mut Frame, screen: Rect, scroll: &mut u16) {
+    let width = screen.width.saturating_sub(4).clamp(1, 76);
+    let height = screen.height.saturating_sub(2).clamp(1, 18);
+    let area = Rect {
+        x: screen.x + screen.width.saturating_sub(width) / 2,
+        y: screen.y + screen.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    let lines = [
+        "Ctrl+A then ?  Full keyboard help",
+        "Ctrl+A then s  Choose select columns (Space toggle, h/j/k/l move)",
+        "Ctrl+A then w  Write YAML checkpoint path",
+        "Ctrl+A then c  Create session checkpoint",
+        "Ctrl+A then x  Clear cache",
+        "Ctrl+A then p  Toggle sample/full preview",
+        "Ctrl+A then u/r  Undo / redo",
+        "Ctrl+A then q  Quit; Ctrl+C quits",
+        "? or Esc closes this help; Esc cancels prefix/modal",
+        "Tab complete; Up/Down choose completion; Alt+Left/Right scroll columns",
+        "Enter commits the draft; colon commands remain available",
+    ];
+    f.render_widget(Clear, area);
+    let wrapped = wrap_static_lines(&lines, area.width.saturating_sub(2) as usize);
+    let visible = area.height.saturating_sub(2) as usize;
+    let max_scroll = wrapped.len().saturating_sub(visible).min(u16::MAX as usize) as u16;
+    *scroll = (*scroll).min(max_scroll);
+    let paragraph = Paragraph::new(wrapped.join("\n")).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title("Keyboard help (↑/↓ PgUp/PgDn; Esc)"),
+    );
+    f.render_widget(paragraph.scroll((*scroll, 0)), area);
+}
+
+fn wrap_static_lines(lines: &[&str], max_width: usize) -> Vec<String> {
+    let max_width = max_width.max(1);
+    let mut wrapped = Vec::new();
+    for line in lines {
+        let mut current = String::new();
+        let mut width = 0;
+        for c in line.chars() {
+            let char_width = UnicodeWidthStr::width(c.encode_utf8(&mut [0; 4]));
+            if width > 0 && width + char_width > max_width {
+                wrapped.push(std::mem::take(&mut current));
+                width = 0;
+            }
+            current.push(c);
+            width += char_width;
+        }
+        wrapped.push(current);
+    }
+    wrapped
 }
 
 fn draw_headers(f: &mut Frame, area: Rect, app: &App) {
@@ -889,7 +1226,12 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App) {
     let start = app.columns_offset.min(cols.len().saturating_sub(1));
     let end = (start + width).min(cols.len());
     let title = format!(
-        "Preview | {} rows shown{} | cache {} B",
+        "{} | {} rows shown{} | cache {} B",
+        if p.draft_issue.is_some() {
+            "Input before draft"
+        } else {
+            "Preview"
+        },
         p.rows.len(),
         if p.truncated { "+" } else { "" },
         p.cache.as_ref().map_or(0, |c| c.bytes)
@@ -956,6 +1298,12 @@ mod tests {
             rows_offset: 0,
             completion: 0,
             candidates: Vec::new(),
+            prefix_mode: false,
+            help_overlay: false,
+            help_scroll: 0,
+            picker: None,
+            pending_picker: false,
+            preview_pending: false,
             quitting: false,
         }
     }
@@ -982,12 +1330,15 @@ mod tests {
             KeyEvent::new_with_kind(KeyCode::Char('x'), KeyModifiers::NONE, KeyEventKind::Press);
         app.key(press).unwrap();
         assert_eq!(app.draft, "x");
+        app.key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.draft, "x?");
     }
 
     #[test]
     fn narrow_test_backend_renders_without_panicking() {
         let mut terminal = Terminal::new(TestBackend::new(24, 8)).unwrap();
-        let app = App {
+        let mut app = App {
             worker: Worker::new(),
             committed: Vec::new(),
             draft: "select 名".into(),
@@ -995,10 +1346,12 @@ mod tests {
             preview: Some(Preview {
                 columns: vec![("名字".into(), "String".into())],
                 total_columns: 1,
+                input_columns: vec![("名字".into(), "String".into())],
                 rows: vec![vec!["值".into()]],
                 truncated: false,
                 mode: PreviewMode::Sample,
                 sample_rows: Some(10_000),
+                draft_issue: None,
                 cache: None,
             }),
             mode: PreviewMode::Sample,
@@ -1017,9 +1370,15 @@ mod tests {
             rows_offset: 0,
             completion: 0,
             candidates: Vec::new(),
+            prefix_mode: false,
+            help_overlay: false,
+            help_scroll: 0,
+            picker: None,
+            pending_picker: false,
+            preview_pending: false,
             quitting: false,
         };
-        terminal.draw(|f| render(f, &app)).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
     }
 
     #[test]
@@ -1038,13 +1397,15 @@ mod tests {
                 })
                 .collect(),
             total_columns: 20,
+            input_columns: vec![("列\t八".into(), "String".into())],
             rows: Vec::new(),
             truncated: false,
             mode: PreviewMode::Sample,
             sample_rows: Some(10_000),
+            draft_issue: None,
             cache: None,
         });
-        terminal.draw(|f| render(f, &app)).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
         let buffer = terminal.backend().buffer();
         let rendered: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
         assert!(rendered.contains("Headers"));
@@ -1072,14 +1433,173 @@ mod tests {
             result: Ok(Outcome::Preview(Preview {
                 columns: vec![("only".into(), "String".into())],
                 total_columns: 1,
+                input_columns: vec![("only".into(), "String".into())],
                 rows: Vec::new(),
                 truncated: false,
                 mode: PreviewMode::Sample,
                 sample_rows: Some(10_000),
+                draft_issue: None,
                 cache: None,
             })),
         });
         assert_eq!(app.columns_offset, 0);
+    }
+
+    #[test]
+    fn draft_preview_fallback_keeps_pipeline_uncommitted_and_completes_input_schema() {
+        let mut app = test_app();
+        app.committed = input::parse_commands("load source.csv").unwrap();
+        app.draft = "select ".into();
+        app.cursor = app.draft.len();
+        app.latest_preview = 4;
+        app.handle_event(Event {
+            id: 4,
+            result: Ok(Outcome::Preview(Preview {
+                columns: vec![("projected".into(), "String".into())],
+                total_columns: 1,
+                input_columns: vec![
+                    ("alpha".into(), "String".into()),
+                    ("beta".into(), "Int64".into()),
+                    ("hoge".into(), "String".into()),
+                ],
+                rows: vec![vec!["source".into()]],
+                truncated: false,
+                mode: PreviewMode::Sample,
+                sample_rows: Some(10_000),
+                draft_issue: Some("invalid column; showing input before draft".into()),
+                cache: None,
+            })),
+        });
+        app.refresh_candidates();
+        assert_eq!(app.committed.len(), 1);
+        assert!(app.pending_commit.is_none());
+        assert!(app.status.contains("Input before draft"));
+        assert!(app
+            .candidates
+            .iter()
+            .any(|candidate| candidate.display == "alpha"));
+        assert!(app
+            .candidates
+            .iter()
+            .any(|candidate| candidate.display == "beta"));
+        assert!(!app
+            .candidates
+            .iter()
+            .any(|candidate| candidate.display == "projected"));
+    }
+
+    #[test]
+    fn column_picker_cancel_preserves_draft_and_accept_rewrites_select_target() {
+        let mut app = test_app();
+        app.draft = "select alpha,beta".into();
+        app.cursor = app.draft.len();
+        app.latest_preview = 1;
+        app.preview = Some(Preview {
+            columns: vec![("alpha".into(), "String".into())],
+            total_columns: 1,
+            input_columns: vec![
+                ("alpha".into(), "String".into()),
+                ("beta".into(), "Int64".into()),
+            ],
+            rows: Vec::new(),
+            truncated: false,
+            mode: PreviewMode::Sample,
+            sample_rows: Some(10_000),
+            draft_issue: None,
+            cache: None,
+        });
+        let original = app.draft.clone();
+        app.open_picker();
+        assert!(app.picker.is_some());
+        app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+            .unwrap();
+        app.key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.help_overlay);
+        assert!(app.picker.is_some());
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.picker.is_some());
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.draft, original);
+
+        app.open_picker();
+        app.key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .unwrap();
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.draft, "select beta");
+        assert!(app.dirty_at.is_some());
+    }
+
+    #[test]
+    fn prefix_help_and_right_panes_keep_draft_intact() {
+        let mut terminal = Terminal::new(TestBackend::new(110, 36)).unwrap();
+        let mut app = test_app();
+        app.draft = "select alpha".into();
+        app.cursor = app.draft.len();
+        app.preview = Some(Preview {
+            columns: vec![("alpha".into(), "String".into())],
+            total_columns: 1,
+            input_columns: vec![("alpha".into(), "String".into())],
+            rows: Vec::new(),
+            truncated: false,
+            mode: PreviewMode::Sample,
+            sample_rows: Some(10_000),
+            draft_issue: None,
+            cache: None,
+        });
+        let draft = app.draft.clone();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(rendered.contains("Completions"));
+        assert!(rendered.contains("Help"));
+        assert!(rendered.contains("Pipeline"));
+
+        app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+            .unwrap();
+        app.key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
+            .unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let help: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(help.contains("Keyboard help"));
+        app.key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.help_scroll, 8);
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.draft, draft);
+        assert!(!app.help_overlay);
+
+        app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+            .unwrap();
+        app.key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
+            .unwrap();
+        app.key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))
+            .unwrap();
+        let mut narrow = Terminal::new(TestBackend::new(36, 8)).unwrap();
+        narrow.draw(|f| render(f, &mut app)).unwrap();
+        let scrolled_help: String = narrow
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(scrolled_help.contains("available"));
     }
 
     #[test]
@@ -1124,10 +1644,12 @@ mod tests {
         app.preview = Some(Preview {
             columns: Vec::new(),
             total_columns: 0,
+            input_columns: Vec::new(),
             rows: Vec::new(),
             truncated: false,
             mode: PreviewMode::Sample,
             sample_rows: Some(10_000),
+            draft_issue: None,
             cache: None,
         });
         app.error = "invalid draft".into();

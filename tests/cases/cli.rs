@@ -56,20 +56,20 @@ fn assert_temp_directory_empty(directory: &Path) {
 }
 
 #[test]
-fn tui_requires_terminal_before_loading_and_keeps_help_available() {
+fn lazy_requires_terminal_before_loading_and_keeps_help_available() {
     let root = tempfile::tempdir().unwrap();
     let temp = root.path().join("isolated-temp");
     std::fs::create_dir(&temp).unwrap();
     write(root.path(), "invalid.csv", b"value\n\xff\n");
-    let help = qlt(root.path(), &["--tui", "--help"]);
+    let help = qlt(root.path(), &["--lazy", "--help"]);
     assert!(help.status.success());
     assert!(String::from_utf8(help.stdout)
         .unwrap()
-        .contains(":write PATH"));
+        .contains("Ctrl+A opens the command menu"));
     let result = qlt_in_temp(
         root.path(),
         &temp,
-        &["--tui", "--rejects", "rejects.jsonl", "invalid.csv"],
+        &["--lazy", "--rejects", "rejects.jsonl", "invalid.csv"],
     );
     assert!(!result.status.success());
     assert!(result.stdout.is_empty());
