@@ -12,6 +12,7 @@ const MAX_EXPRESSION_TOKENS: usize = 256;
 #[derive(Clone, Debug, PartialEq)]
 enum Tok {
     Ident(String),
+    QuotedIdent(String),
     Str(String),
     Int(i128),
     Float(f64),
@@ -69,7 +70,7 @@ fn lex(input: &str) -> Result<Vec<Tok>, QuiltError> {
                 if !closed || s.is_empty() {
                     return Err(parse_err("invalid backtick quoted column name"));
                 }
-                out.push(Tok::Ident(s));
+                out.push(Tok::QuotedIdent(s));
             }
             b'\'' | b'"' => {
                 let quote = b[i];
@@ -92,13 +93,25 @@ fn lex(input: &str) -> Result<Vec<Tok>, QuiltError> {
                             break;
                         }
                         let c = match b[i] {
-                            b'n' => '\n',
-                            b'r' => '\r',
-                            b't' => '\t',
-                            x => x as char,
+                            b'n' => {
+                                i += 1;
+                                '\n'
+                            }
+                            b'r' => {
+                                i += 1;
+                                '\r'
+                            }
+                            b't' => {
+                                i += 1;
+                                '\t'
+                            }
+                            _ => {
+                                let c = input[i..].chars().next().unwrap();
+                                i += c.len_utf8();
+                                c
+                            }
                         };
                         s.push(c);
-                        i += 1;
                     } else {
                         let c = input[i..].chars().next().unwrap();
                         s.push(c);
@@ -344,6 +357,7 @@ impl Parser {
             Tok::Ident(s) if s.eq_ignore_ascii_case("false") => Ok(Node::Bool(false)),
             Tok::Ident(s) if s.eq_ignore_ascii_case("null") => Ok(Node::Null),
             Tok::Ident(s) => Ok(Node::Col(s)),
+            Tok::QuotedIdent(s) => Ok(Node::Col(s)),
             Tok::Str(s) => Ok(Node::Str(s)),
             Tok::Int(n) => Ok(Node::Int(n)),
             Tok::Float(n) => Ok(Node::Float(n)),
@@ -837,6 +851,32 @@ mod tests {
             resolve(&ast, &schema),
             Ok(Val::Expr(_, DataType::Boolean))
         ));
+    }
+
+    #[test]
+    fn quoted_strings_and_reserved_columns_keep_their_contents() {
+        for (source, expected) in [
+            (r#"x == '\日'"#, "日"),
+            (r#"x == '\😀'"#, "😀"),
+            (r#"x == 'a\\b'"#, "a\\b"),
+            (r#"x == '\n\t\r'"#, "\n\t\r"),
+        ] {
+            let tokens = lex(source).unwrap();
+            assert!(matches!(&tokens[2], Tok::Str(value) if value == expected));
+        }
+        assert!(lex("x == 'unfinished\\").is_err());
+
+        for name in ["true", "false", "null", "not"] {
+            let frame =
+                DataFrame::new_infer_height(vec![Series::new(name.into(), &[1i64, 2]).into()])
+                    .unwrap();
+            let filtered = filter(&frame.lazy(), &format!("`{name}` == 2"))
+                .unwrap()
+                .collect()
+                .unwrap();
+            assert_eq!(filtered.height(), 1, "quoted column {name}");
+            assert_eq!(filtered[name].i64().unwrap().get(0), Some(2));
+        }
     }
 
     #[test]
