@@ -5,12 +5,7 @@ use crate::operations::datetime::{
 };
 use polars::prelude::*;
 
-pub fn cast_with_config(
-    df: &LazyFrame,
-    column: &str,
-    target: &str,
-    datetime: &DateTimeConfig,
-) -> Result<LazyFrame, QuiltError> {
+pub fn validate_config(target: &str, datetime: &DateTimeConfig) -> Result<(), QuiltError> {
     let target = target.to_ascii_lowercase();
     if !matches!(
         target.as_str(),
@@ -25,6 +20,17 @@ pub fn cast_with_config(
             "datetime parsing options apply only to datetime casts",
         ));
     }
+    Ok(())
+}
+
+pub fn cast_with_config(
+    df: &LazyFrame,
+    column: &str,
+    target: &str,
+    datetime: &DateTimeConfig,
+) -> Result<LazyFrame, QuiltError> {
+    validate_config(target, datetime)?;
+    let target = target.to_ascii_lowercase();
     let diagnostics = ParserDiagnostics::new();
 
     let schema = df

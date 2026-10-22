@@ -244,23 +244,18 @@ pub(super) fn execute_concat_stage(
                 .next()
                 .ok_or_else(|| format!("Concat stage '{stage_name}' has no valid sources."))?;
             for df in iter {
-                result = polars::prelude::concat(
-                    [result, df],
-                    polars::prelude::UnionArgs::default(),
-                )
-                .map_err(|e| {
-                    format!(
+                result =
+                    polars::prelude::concat([result, df], polars::prelude::UnionArgs::default())
+                        .map_err(|e| {
+                            format!(
                         "Failed to concatenate DataFrames vertically in stage '{stage_name}': {e}"
                     )
-                })?;
+                        })?;
             }
             Ok(result)
         }
-        "horizontal" | "h" => Err(format!(
-            "Horizontal concatenation is not yet implemented for stage '{stage_name}'. Use 'vertical' instead."
-        )),
         _ => Err(format!(
-            "Invalid concat method '{concat_how}' for stage '{stage_name}'. Use 'vertical' or 'horizontal'."
+            "Invalid concat method '{concat_how}' for stage '{stage_name}'. Use 'vertical'."
         )),
     }
 }
@@ -275,16 +270,15 @@ enum JoinKeySpec {
     },
 }
 
-fn parse_join_type(_stage_name: &str, how_str: &str) -> JoinType {
+fn parse_join_type(stage_name: &str, how_str: &str) -> Result<JoinType, String> {
     match how_str.to_lowercase().as_str() {
-        "inner" => JoinType::Inner,
-        "left" => JoinType::Left,
-        "outer" | "full" => JoinType::Full,
-        "cross" => JoinType::Cross,
-        _ => {
-            LogController::warn("Unsupported join type; defaulting to inner join");
-            JoinType::Inner
-        }
+        "inner" => Ok(JoinType::Inner),
+        "left" => Ok(JoinType::Left),
+        "outer" | "full" => Ok(JoinType::Full),
+        "cross" => Ok(JoinType::Cross),
+        _ => Err(format!(
+            "Unsupported join type '{how_str}' for stage '{stage_name}'."
+        )),
     }
 }
 
@@ -371,7 +365,7 @@ pub(super) fn execute_join_stage(
         .how
         .clone()
         .unwrap_or_else(|| "inner".to_string());
-    let join_type = parse_join_type(stage_name, &how_str);
+    let join_type = parse_join_type(stage_name, &how_str)?;
     let coalesce = stage_config.join.coalesce.unwrap_or(false);
     let key_spec = if let Some(on) = &stage_config.join.on {
         JoinKeySpec::Symmetric(on.clone())

@@ -158,7 +158,14 @@ pub fn parse_typed_commands(argv: &[String]) -> Result<Vec<TypedCommand>, QuiltE
     if raws.is_empty() {
         return Err(QuiltError::usage("Error: No commands provided"));
     }
-    raws.into_iter().map(build_typed).collect()
+    raws.into_iter()
+        .map(build_typed)
+        .map(|command| {
+            let command = command?;
+            crate::controllers::command_model::validate_command(&command)?;
+            Ok(command)
+        })
+        .collect()
 }
 
 fn args(raw: &Raw, min: usize, max: Option<usize>, usage: &str) -> Result<(), QuiltError> {
@@ -423,11 +430,6 @@ fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
         OperationId::Cast => {
             args(&raw, 2, Some(2), "cast <column> <type>")?;
             let datetime = datetime_config(&raw)?;
-            if !a[1].eq_ignore_ascii_case("datetime") && datetime.options_present {
-                return Err(QuiltError::usage(
-                    "Error: datetime parsing options apply only to datetime casts",
-                ));
-            }
             Ok(TypedCommand::Cast(CastArgs {
                 column: a[0].clone(),
                 target: a[1].clone(),

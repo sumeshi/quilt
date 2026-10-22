@@ -263,19 +263,6 @@ pub(super) fn preflight(
                     };
                     match parse_automation_step(command, args) {
                         Ok(mut typed) => {
-                            if let TypedCommand::Bucket(bucket) = &typed {
-                                if let Err(error) =
-                                    crate::operations::chainables::bucket::validate_interval(
-                                        &bucket.interval,
-                                    )
-                                {
-                                    diagnostics.push(diagnostic(
-                                        config_path,
-                                        format!("{stage_path}.steps[{step_index}].bucket.interval"),
-                                        error.to_string(),
-                                    ));
-                                }
-                            }
                             if finalizer_seen && typed.category() != CommandCategory::Finalizer {
                                 diagnostics.push(diagnostic(
                                     config_path,

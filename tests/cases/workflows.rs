@@ -206,6 +206,29 @@ fn output_conflicts_are_preflight_errors_and_later_failures_report_completed_fil
         rows(&std::fs::read_to_string(root.path().join("completed.csv")).unwrap()).len(),
         2
     );
+
+    let config = document(
+        root.path(),
+        "static-error.yaml",
+        json!({"version":1,"stages":[
+            {"name":"earlier","steps":[
+                {"load":{"paths":["events.csv"]}},
+                {"dump":{"output":"before-static-error.csv"}}
+            ]},
+            {"name":"invalid","steps":[
+                {"load":{"paths":["events.csv"]}},
+                {"cast":{"column":"id","type":"int","input-format":"%F"}}
+            ]}
+        ]}),
+    );
+    for check in [false, true] {
+        let mut args = vec!["run", config.to_str().unwrap()];
+        if check {
+            args.push("--check");
+        }
+        assert!(failure(&args).contains("datetime parsing options apply only"));
+        assert!(!root.path().join("before-static-error.csv").exists());
+    }
 }
 
 #[test]

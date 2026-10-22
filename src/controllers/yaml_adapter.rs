@@ -347,7 +347,7 @@ pub fn parse_automation_step(
 ) -> Result<TypedCommand, QuiltError> {
     let operation = OperationId::parse(name)
         .ok_or_else(|| QuiltError::usage(format!("Error: Unknown automation command '{name}'")))?;
-    match operation {
+    let command = match operation {
         OperationId::Load => {
             let a: YLoad = yaml_args(value, name)?;
             let paths = a.paths.map(YamlStrings::into_vec).unwrap_or_default();
@@ -774,7 +774,9 @@ pub fn parse_automation_step(
         OperationId::Run => Err(QuiltError::usage(
             "Error: nested run steps are not record-processing commands",
         )),
-    }
+    }?;
+    crate::controllers::command_model::validate_command(&command)?;
+    Ok(command)
 }
 
 #[cfg(test)]
@@ -840,6 +842,54 @@ mod tests {
             assert!(
                 parse_automation_step(name, &yaml(source)).is_err(),
                 "{name} accepted an unknown datetime field"
+            );
+        }
+    }
+
+    #[test]
+    fn schema_independent_datetime_validation_matches_cli_and_yaml() {
+        for (command, yaml_args, cli_args, expected_valid) in [
+            (
+                "cast",
+                "column: value\ntype: int\ninput-format: '%F'",
+                vec!["cast", "value", "int", "--input-format", "%F"],
+                false,
+            ),
+            (
+                "cast",
+                "column: value\ntype: made-up",
+                vec!["cast", "value", "made-up"],
+                false,
+            ),
+            (
+                "cast",
+                "column: when\ntype: datetime\ninput-format: '%F'",
+                vec!["cast", "when", "datetime", "--input-format", "%F"],
+                true,
+            ),
+            (
+                "bucket",
+                "column: when\ninterval: nonsense",
+                vec!["bucket", "when", "nonsense"],
+                false,
+            ),
+        ] {
+            let yaml_result = parse_automation_step(command, &yaml(yaml_args));
+            let cli_result = crate::controllers::cli_adapter::parse_typed_commands(
+                &cli_args
+                    .iter()
+                    .map(|arg| (*arg).to_owned())
+                    .collect::<Vec<_>>(),
+            );
+            assert_eq!(
+                yaml_result.is_ok(),
+                expected_valid,
+                "YAML {command}: {yaml_args}"
+            );
+            assert_eq!(
+                cli_result.is_ok(),
+                expected_valid,
+                "CLI {command}: {cli_args:?}"
             );
         }
     }

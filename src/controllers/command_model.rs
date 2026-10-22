@@ -7,6 +7,21 @@ pub use crate::controllers::definitions::{
 pub use crate::controllers::cli_adapter::parse_typed_commands;
 pub use crate::controllers::yaml_adapter::parse_automation_step;
 
+/// Validate command arguments that do not depend on an input schema.
+/// Adapters call this after constructing the canonical typed command so CLI
+/// execution and automation preflight enforce the same static contract.
+pub fn validate_command(command: &TypedCommand) -> Result<(), crate::error::QuiltError> {
+    match command {
+        TypedCommand::Cast(args) => {
+            crate::operations::chainables::cast::validate_config(&args.target, &args.datetime)
+        }
+        TypedCommand::Bucket(args) => {
+            crate::operations::chainables::bucket::validate_interval(&args.interval)
+        }
+        _ => Ok(()),
+    }
+}
+
 pub fn render_registry_help() -> String {
     let mut out = String::from("Commands:\n");
     for cat in [
