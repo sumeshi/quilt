@@ -7,10 +7,7 @@ use crate::error::QuiltError;
 use crate::operations::automation::model::{
     BranchPredicate, MaterializePolicy, PlannedStep, ResolvedParameter, StageConfig,
 };
-use polars::prelude::{
-    FileWriteFormat, LazyFrame, PlRefPath, ScanArgsParquet, SinkDestination, SinkTarget,
-    UnifiedSinkArgs,
-};
+use polars::prelude::LazyFrame;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
@@ -67,51 +64,12 @@ pub(super) fn materialize_frame(
         ));
     }
 
-    let owned = resources.fork(Vec::new());
-    let mut reservation = owned
-        .reserve_temp_file("qlt-stage-materialized", "parquet")
-        .map_err(|error| {
-            QuiltError::io(
-                "create stage materialization",
-                None::<String>,
-                error.to_string(),
-            )
-        })?;
-    let path = reservation.path().to_path_buf();
-    reservation.close_file();
-    let sink = frame
-        .sink(
-            SinkDestination::File {
-                target: SinkTarget::Path(PlRefPath::try_from_path(&path)?),
-            },
-            FileWriteFormat::Parquet(
-                polars::prelude::ParquetWriteOptions {
-                    compression: polars::prelude::ParquetCompression::Snappy,
-                    ..Default::default()
-                }
-                .into(),
-            ),
-            UnifiedSinkArgs::default(),
-        )
-        .map_err(|error| QuiltError::operation("materialize stage", error.to_string()))?;
-    sink.collect()
-        .map_err(|error| QuiltError::operation("materialize stage", error.to_string()))?;
-    owned.retain_temp_file(reservation).map_err(|error| {
-        QuiltError::io(
-            "retain stage materialization",
-            Some(path.display().to_string()),
-            error.to_string(),
-        )
-    })?;
-    let frame =
-        LazyFrame::scan_parquet(PlRefPath::try_from_path(&path)?, ScanArgsParquet::default())
-            .map_err(|error| {
-                QuiltError::io(
-                    "scan stage materialization",
-                    Some(path.display().to_string()),
-                    error.to_string(),
-                )
-            })?;
+    let (frame, owned, _) = crate::controllers::materialization::materialize_parquet(
+        frame,
+        resources,
+        "qlt-stage-materialized",
+        None,
+    )?;
     Ok((frame, owned))
 }
 

@@ -6,6 +6,7 @@ pub(crate) mod csv_input;
 pub(crate) mod definitions;
 pub mod executor;
 pub(crate) mod log;
+pub(crate) mod materialization;
 pub(crate) mod nested;
 pub(crate) mod pipeline;
 pub mod resources;
