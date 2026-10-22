@@ -77,7 +77,7 @@ pub fn parse_typed_commands(argv: &[String]) -> Result<Vec<TypedCommand>, QuiltE
             {
                 let (key, inline) = if let Some((key, value)) = flag.split_once('=') {
                     (key, Some(value))
-                } else if !token.starts_with("--") && flag.len() > 1 {
+                } else if !token.starts_with("--") && flag.len() > 1 && flag.is_char_boundary(1) {
                     let (short, attached) = flag.split_at(1);
                     if opt(s, short).is_some_and(|option| option.takes_value) {
                         (short, Some(attached))
@@ -263,7 +263,7 @@ pub(crate) fn select_columns_from_input(input: &str) -> Result<Vec<String>, Quil
         if name.starts_with('"')
             && name.ends_with('"')
             && name.len() >= 2
-            && !name.contains("\":\"")
+            && !has_unquoted_colon(name)
         {
             *name = name[1..name.len() - 1].replace("\"\"", "\"");
         }
@@ -272,6 +272,25 @@ pub(crate) fn select_columns_from_input(input: &str) -> Result<Vec<String>, Quil
         return Err(QuiltError::usage("Error: select columns must not be empty"));
     }
     Ok(columns)
+}
+
+fn has_unquoted_colon(input: &str) -> bool {
+    let bytes = input.as_bytes();
+    let mut quoted = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'"' {
+            if quoted && bytes.get(index + 1) == Some(&b'"') {
+                index += 2;
+                continue;
+            }
+            quoted = !quoted;
+        } else if bytes[index] == b':' && !quoted {
+            return true;
+        }
+        index += 1;
+    }
+    false
 }
 
 fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
@@ -721,5 +740,23 @@ fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
                 stage: val(&raw, "stage"),
             }))
         }
+    }
+}
+
+#[cfg(test)]
+mod select_columns_tests {
+    use super::select_columns_from_input;
+
+    #[test]
+    fn select_column_names_unescape_csv_quotes_without_unquoting_ranges() {
+        let escaped_header = format!("\"{}\"", r#"a":"b"#.replace('"', "\"\""));
+        assert_eq!(
+            select_columns_from_input(&escaped_header).unwrap(),
+            [r#"a":"b"#]
+        );
+        assert_eq!(
+            select_columns_from_input(r#""ns:a":"ns:b""#).unwrap(),
+            [r#""ns:a":"ns:b""#]
+        );
     }
 }

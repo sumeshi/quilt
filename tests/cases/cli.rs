@@ -1,5 +1,6 @@
 use crate::support::*;
 use flate2::{write::GzEncoder, Compression};
+use quilt::controllers::command_model::parse_typed_commands;
 use serde_json::json;
 use std::io::Write;
 use std::path::Path;
@@ -77,6 +78,21 @@ fn tui_requires_terminal_before_loading_and_keeps_help_available() {
         .contains("interactive terminal"));
     assert!(!root.path().join("rejects.jsonl").exists());
     assert_temp_directory_empty(&temp);
+}
+
+#[test]
+fn unicode_short_looking_options_return_unknown_option_errors() {
+    let args = ["load", "-🙂"];
+    let parsed = parse_typed_commands(&args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>());
+    assert!(matches!(
+        parsed,
+        Err(error) if error.to_string().contains("Unknown option '-🙂'")
+    ));
+
+    let root = tempfile::tempdir().unwrap();
+    let result = qlt(root.path(), &args);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("Unknown option '-🙂'"));
 }
 
 #[test]
