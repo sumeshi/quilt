@@ -877,8 +877,8 @@ normal CSV quoting. Null cells remain empty; empty lists are `[]`. Duration valu
 use exact integer counts in their declared unit (for example, `delta` uses microseconds).
 JSONL preserves supported nested values, nulls and exact integers; datetime values
 are strings and durations follow the same integer rule. Non-finite JSON numbers
-are rejected. JSONL does not recover distinctions already unified during loading,
-such as missing fields versus nulls.
+are rejected, including inside CSV object/list cells. JSONL does not recover
+distinctions already unified during loading, such as missing fields versus nulls.
 
 ```bash
 $ qlt load data.csv - head 5 - show

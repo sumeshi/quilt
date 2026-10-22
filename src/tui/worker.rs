@@ -898,7 +898,7 @@ fn preview_frame(frame: &LazyFrame, task: &TaskControl) -> Result<FramePreview, 
         .map(|(name, dtype)| {
             let column = crate::controllers::nested::literal_col(name.as_str());
             if matches!(dtype, DataType::Struct(_) | DataType::List(_)) {
-                crate::controllers::nested::json_expr(column).alias(name.clone())
+                crate::controllers::nested::json_expr(column, dtype).alias(name.clone())
             } else {
                 column
             }
@@ -947,7 +947,7 @@ fn input_columns(frame: &LazyFrame) -> Result<Vec<(String, String)>, QuiltError>
 fn detail_expression(name: &str, dtype: &DataType) -> Expr {
     let column = crate::controllers::nested::literal_col(name);
     if matches!(dtype, DataType::Struct(_) | DataType::List(_)) {
-        crate::controllers::nested::json_expr(column).alias(name)
+        crate::controllers::nested::json_expr(column, dtype).alias(name)
     } else {
         column
     }

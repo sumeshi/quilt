@@ -80,25 +80,7 @@ fn checked_jsonl_frame(df: &LazyFrame, operation: &str) -> Result<LazyFrame, Qui
         .iter()
         .map(|(name, dtype)| {
             let column = crate::controllers::nested::literal_col(name.as_str());
-            let column = if dtype_contains_float(dtype) {
-                let column_name = name.to_string();
-                column.map(
-                    move |column| {
-                        if series_has_non_finite(column.as_materialized_series())? {
-                            return Err(PolarsError::ComputeError(
-                                format!(
-                                    "non-finite float in column '{column_name}' cannot be represented in JSON"
-                                )
-                                .into(),
-                            ));
-                        }
-                        Ok(column)
-                    },
-                    |_, field| Ok(field.clone()),
-                )
-            } else {
-                column
-            };
+            let column = crate::controllers::nested::checked_json_column(column, dtype);
             let normalized = super::csv::duration_counts_dtype(dtype);
             if normalized != *dtype {
                 column.cast(normalized)
@@ -108,39 +90,6 @@ fn checked_jsonl_frame(df: &LazyFrame, operation: &str) -> Result<LazyFrame, Qui
         })
         .collect::<Vec<_>>();
     Ok(df.clone().select(expressions))
-}
-
-fn dtype_contains_float(dtype: &DataType) -> bool {
-    match dtype {
-        DataType::Float16 | DataType::Float32 | DataType::Float64 => true,
-        DataType::List(inner) => dtype_contains_float(inner),
-        DataType::Struct(fields) => fields
-            .iter()
-            .any(|field| dtype_contains_float(field.dtype())),
-        _ => false,
-    }
-}
-
-fn series_has_non_finite(series: &Series) -> PolarsResult<bool> {
-    for row in 0..series.len() {
-        if value_has_non_finite(series.get(row)?) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn value_has_non_finite(value: AnyValue<'_>) -> bool {
-    match value {
-        AnyValue::Float16(value) => !value.is_finite(),
-        AnyValue::Float32(value) => !value.is_finite(),
-        AnyValue::Float64(value) => !value.is_finite(),
-        AnyValue::List(values) => (0..values.len())
-            .any(|index| values.get(index).map(value_has_non_finite).unwrap_or(false)),
-        AnyValue::Struct(_, _, _) => value._iter_struct_av().any(value_has_non_finite),
-        AnyValue::StructOwned(values) => values.0.iter().cloned().any(value_has_non_finite),
-        _ => false,
-    }
 }
 
 #[cfg(test)]
@@ -186,6 +135,33 @@ mod tests {
             remaining.is_empty(),
             "remaining output artifacts: {remaining:?}"
         );
+    }
+
+    #[test]
+    fn dump_jsonl_rejects_non_finite_nested_values_without_publishing() {
+        let directory = tempfile::tempdir().unwrap();
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let nested = StructChunked::from_series(
+                "nested".into(),
+                1,
+                [&Series::new("value".into(), &[value])].into_iter(),
+            )
+            .unwrap()
+            .into_series();
+            let items = Series::new(
+                "items".into(),
+                &[Some(Series::new(PlSmallStr::EMPTY, &[value]))],
+            );
+            for nested_column in [nested, items] {
+                let path = directory.path().join("rows.jsonl");
+                let frame = DataFrame::new_infer_height(vec![nested_column.into()])
+                    .unwrap()
+                    .lazy();
+                assert!(dump_jsonl(&frame, path.to_str().unwrap()).is_err());
+                assert!(!path.exists());
+                assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+            }
+        }
     }
 
     #[test]

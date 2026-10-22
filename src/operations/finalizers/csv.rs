@@ -39,7 +39,7 @@ fn output_frame(
             } else {
                 column
             };
-            crate::controllers::nested::json_expr(column).alias(name.clone())
+            crate::controllers::nested::json_expr(column, dtype).alias(name.clone())
         } else if durations_as_counts && matches!(dtype, DataType::Duration(_)) {
             column.cast(DataType::Int64).alias(name.clone())
         } else {
@@ -114,5 +114,33 @@ mod tests {
             Some("[3,4]")
         );
         assert_eq!(output.column("items").unwrap().str().unwrap().get(1), None);
+    }
+
+    #[test]
+    fn csv_nested_json_rejects_non_finite_float_leaves() {
+        let directory = tempfile::tempdir().unwrap();
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let nested = StructChunked::from_series(
+                "nested".into(),
+                1,
+                [&Series::new("value".into(), &[value])].into_iter(),
+            )
+            .unwrap()
+            .into_series();
+            let items = Series::new(
+                "items".into(),
+                &[Some(Series::new(PlSmallStr::EMPTY, &[value]))],
+            );
+            for nested_column in [nested, items] {
+                let frame = DataFrame::new_infer_height(vec![nested_column.into()])
+                    .unwrap()
+                    .lazy();
+                let path = directory.path().join("output.csv");
+                let error = super::super::dump::dump(&frame, path.to_str(), ',').unwrap_err();
+                assert!(error.to_string().contains("non-finite float"));
+                assert!(!path.exists());
+                assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+            }
+        }
     }
 }
