@@ -57,6 +57,44 @@ This command:
 3. Sorts by `Date and Time`
 4. Shows the first 3 rows as a table
 
+### Interactive mode
+
+```bash
+$ qlt --tui Security.jsonl
+$ qlt --tui --all-strings events.csv
+```
+
+Enter CLI pipeline commands such as `grep ERROR` or `filter 'id == 4624'`.
+The table previews the current draft; Enter applies it.
+The right pane shows completion candidates and help for the current command.
+
+| Key / command | Action |
+| --- | --- |
+| Tab; Up / Down | Complete a command, option, or column; choose a candidate |
+| Page Up / Down; Alt-Left / Right | Scroll rows or columns |
+| Ctrl-Z / Ctrl-Y | Undo / redo applied pipeline changes |
+| `:edit STEP` | Edit an applied step, numbered from 1 |
+| F5 | Switch between a source sample and full-data evaluation |
+| F6 or `:cache` | Save the confirmed pipeline as a temporary Parquet checkpoint |
+| `:cache PATH` | Save a persistent Parquet file |
+| Ctrl-S or `:write PATH` | Save the confirmed pipeline as a YAML workflow |
+| `:clear-cache`; Ctrl-C or `:quit` | Release the checkpoint; leave the TUI |
+
+Sample mode uses up to 10,000 source rows within a 32 MiB estimated data budget.
+Counts, sorting, and aggregates in this mode describe that sample. Full mode applies the
+pipeline to all input data; global operations can take longer. Initial loading
+still validates the complete input. The table shows up to 100 result rows.
+
+Full-data evaluation can reuse temporary checkpoints. They have a 512 MiB total
+budget and are released when no longer used or on normal exit. Editing a cached
+prefix or reloading changed input invalidates the checkpoint. Cache/export
+failures preserve existing files.
+Parquet restrictions, including empty objects, also apply to checkpoints.
+Saved YAML refers to the original inputs and confirmed commands, without sample
+limits or temporary cache paths, and can be executed with `qlt run`.
+On exit, queued operations are cancelled and any active operation finishes before
+the terminal closes.
+
 ### Command Structure
 
 qlt commands are composed of three types of steps:
