@@ -15,6 +15,20 @@ fn main() -> ExitCode {
 
 fn run() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|arg| arg == "--tui") {
+        if args.len() == 3 && matches!(args[2].as_str(), "-h" | "--help") {
+            println!("Usage: qlt --tui [load options] [files...]\n\nInteractive pipeline editor with live previews, completion, and YAML export.\n\nEnter applies a command; Tab completes commands and columns.\nF5 switches sample/full preview; F6 caches the confirmed pipeline.\nCtrl-Z/Ctrl-Y undo/redo; Ctrl-S saves YAML; Ctrl-C exits.\nUse :write PATH for YAML, :cache [PATH] for temporary/persistent Parquet,\n:clear-cache, :edit STEP, :undo, :redo, or :quit.\n\nRequires an interactive terminal. Preview samples the first 10,000 input rows;\nfull preview applies the pipeline to all input data.");
+            return ExitCode::SUCCESS;
+        }
+        log::set_max_level(log::LevelFilter::Off);
+        return match quilt::tui::run(&args[2..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("Error: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     if args.len() == 1 {
         print_registry_help();
         return ExitCode::SUCCESS;
@@ -79,6 +93,7 @@ fn print_registry_help() {
     );
     println!("Built for ad-hoc analysis of logs, event exports, and forensic datasets.\n");
     println!("Usage: qlt <initializer> <args> - <chainable> <args> - <finalizer> <args>\n");
+    println!("       qlt --tui [load options] [files...]\n");
     print!("{}", render_registry_help());
     println!("\nIf an option value is '-', use an attached form such as --separator=- or -s-.");
     println!("If a positional value begins with '-', pass -- first.");

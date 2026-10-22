@@ -1,6 +1,7 @@
 pub mod controllers;
 pub mod error;
 pub mod operations;
+pub mod tui;
 
 pub use error::QuiltError;
 
