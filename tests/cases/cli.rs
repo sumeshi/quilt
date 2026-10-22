@@ -63,9 +63,9 @@ fn lazy_requires_terminal_before_loading_and_keeps_help_available() {
     write(root.path(), "invalid.csv", b"value\n\xff\n");
     let help = qlt(root.path(), &["--lazy", "--help"]);
     assert!(help.status.success());
-    assert!(String::from_utf8(help.stdout)
-        .unwrap()
-        .contains("Ctrl+A opens the command menu"));
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("Ctrl+A"));
+    assert!(help.contains(":export PATH"));
     let result = qlt_in_temp(
         root.path(),
         &temp,

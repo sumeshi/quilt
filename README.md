@@ -66,23 +66,35 @@ $ qlt --lazy --all-strings events.csv
 
 Type pipeline commands such as `grep ERROR` or `filter 'id == 4624'`. Enter
 confirms the draft; valid drafts preview live, and Tab completes commands,
-options, and columns. Use `:edit STEP` to bring an applied command back into the
-input. An incomplete or invalid edit shows marked context before that step until
-you enter a valid command.
+options, and columns. `:edit STEP` reopens the original command group containing
+that 1-based step; the TUI shows the group's step range. An incomplete or invalid
+edit shows marked context before that group until you enter a valid command.
 
 | Key / command | Action |
 | --- | --- |
 | Tab; Up / Down | Complete commands, options, or columns; choose a completion |
-| Page Up / Down; Alt-Left / Right | Scroll rows or move across table columns |
-| Ctrl+A, then `?` / `c` | Open keyboard help / select columns |
-| Ctrl+A, then `w` | Save the confirmed pipeline as a YAML workflow |
+| Ctrl+A, then `t` / `b` / `i` | Focus the table / pipeline / input |
+| Table focus: arrows or `hjkl`; Enter; Esc | Move; open cell details; focus input |
+| Pipeline focus: arrows or `j` / `k`; Enter; Esc | Move; edit a source group; focus input |
+| Ctrl+A, then `f` | Expand or shrink the focused pane |
+| Ctrl+A, then `?` / `h` / `e` / `d` | Keyboard help / command help / error details / row details |
+| Ctrl+A, then `c` | Select columns |
+| Ctrl+A, then `w` / `o` | Save YAML / export the confirmed result |
 | Ctrl+A, then `C` / `x` | Create a checkpoint / clear the cache |
 | Ctrl+A, then `p` | Switch between sample and full-data preview |
 | Ctrl+A, then `u` / `r` | Undo / redo pipeline changes |
+| Ctrl+A, then `z` | Cancel busy work (best effort) |
 | Ctrl+A, then `q`; Ctrl-C | Quit / exit |
-| `:edit STEP` | Edit an applied command, numbered from 1 |
-| `:write PATH`; `:cache [PATH]`; `:clear-cache` | Save YAML; create a checkpoint; clear cache |
+| Details: arrows or `j` / `k`; PgUp/PgDn; Home/End; `w`; Esc | Scroll; page; jump to ends; toggle wrapping; close |
+| `:edit STEP` | Reopen the original command group containing the 1-based step |
+| `:write PATH`; `:export PATH [--format csv\|jsonl]` | Save YAML; export the full confirmed result |
+| `:cache [PATH]`; `:clear-cache` | Create a checkpoint; clear cache |
 | `:undo`; `:redo`; `:quit` | Undo; redo; quit |
+
+Export chooses JSONL for `.jsonl` and `.ndjson` paths and CSV for other paths;
+`--format` overrides the extension. Exports do not overwrite existing files.
+Busy work shows elapsed time, and cancellation may take time to finish.
+Detail text is capped at 256 KiB and marked when truncated.
 
 For frequency summaries, `select hoge,fuga - count` reports counts for each
 unique combination, while `count hoge` lists `hoge` values by descending

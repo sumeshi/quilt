@@ -17,7 +17,33 @@ fn run() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).is_some_and(|arg| arg == "--lazy") {
         if args.len() == 3 && matches!(args[2].as_str(), "-h" | "--help") {
-            println!("Usage: qlt --lazy [load options] [files...]\n\nInteractive pipeline editor with live previews, completion, and YAML export.\n\nEnter applies a command; Tab completes commands, options, and columns.\nCtrl+A opens the command menu: ? help, c select columns, w write YAML,\nC checkpoint, x clear cache, p sample/full, u undo, r redo, q quit.\nIn the column picker, Space toggles a column, arrows or hjkl move, / filters,\na selects filtered columns, i inverts, u clears, Enter applies, and Esc cancels.\nPage Up/Down scroll rows; Alt-Left/Right scroll columns. Ctrl-C exits.\nUse :edit STEP, :write PATH, :cache [PATH], :clear-cache, :undo, :redo, or :quit.\n\nRequires an interactive terminal. Preview samples the first 10,000 input rows;\nfull preview applies the pipeline to all input data.");
+            println!(
+                r#"Usage: qlt --lazy [load options] [files...]
+
+Interactive pipeline editor with live previews and completion.
+
+Enter applies a command; Tab completes commands, options, and columns.
+Ctrl+A actions: ? help, c columns, w YAML, o export, C checkpoint, x clear,
+p sample/full, u/r undo/redo, z cancel, q quit.
+t/b/i focus table/pipeline/input; f expands or shrinks the focused pane; h command help;
+e error details; d row details. Ctrl-C exits.
+Table: arrows or hjkl move, Enter opens cell details, Esc focuses input.
+Pipeline: arrows or j/k move, Enter edits a source group, Esc focuses input.
+Details: arrows or j/k scroll, PgUp/PgDn page, Home/End jump, w toggles wrap,
+Esc closes. Column picker: Space toggles, arrows or hjkl move, / filters,
+a selects filtered columns, i inverts, u clears, Enter applies, Esc cancels.
+Detail text is capped at 256 KiB and marked when truncated.
+
+Use :edit STEP to reopen its original command group (the step range is shown),
+:write PATH, :export PATH [--format csv|jsonl],
+:cache [PATH], :clear-cache, :undo, :redo, or :quit. Export writes the full
+confirmed result; .jsonl/.ndjson paths select JSONL, other paths select CSV.
+Exports do not overwrite existing files. Busy work shows elapsed time; cancel
+is best effort and may take time to finish.
+
+Requires an interactive terminal. Preview samples up to 10,000 input rows;
+full preview applies the pipeline to all input data."#
+            );
             return ExitCode::SUCCESS;
         }
         log::set_max_level(log::LevelFilter::Off);
