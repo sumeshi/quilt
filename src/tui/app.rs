@@ -395,6 +395,9 @@ impl App {
     }
     fn handle_event(&mut self, event: Event) {
         let Event { id, result } = event;
+        if !matches!(&result, Ok(Outcome::Working(_))) {
+            self.working = self.working.take().filter(|(task, _, _)| *task != id);
+        }
         match result {
             Ok(Outcome::Preview(p)) => {
                 if self.cancelled.remove(&id) {
@@ -423,7 +426,6 @@ impl App {
                 let draft_issue = p.draft_issue.clone();
                 self.preview = Some(p);
                 self.preview_pending = false;
-                self.working = None;
                 self.error.clear();
                 self.status = draft_issue.map_or_else(
                     || "Preview updated".into(),
@@ -2692,6 +2694,39 @@ mod tests {
         assert!(app.error.contains("invalid column"));
         assert!(app.pending_commit.is_none());
         assert_eq!(app.draft, "select x");
+
+        let stale_preview = || Preview {
+            columns: Vec::new(),
+            total_columns: 0,
+            input_columns: Vec::new(),
+            rows: Vec::new(),
+            has_more_rows: false,
+            mode: PreviewMode::Sample,
+            sample_rows: Some(10_000),
+            draft_issue: None,
+            cache: None,
+            commands: Vec::new(),
+            source_version: String::new(),
+        };
+        app.pending_commit = None;
+        app.latest_preview = 0;
+        app.draft = ":cache".into();
+        app.status = "Built-in draft; Enter executes it".into();
+        app.working = Some((1, TaskPhase::Computing, Instant::now()));
+        app.handle_event(Event {
+            id: 1,
+            result: Ok(Outcome::Preview(stale_preview())),
+        });
+        assert!(app.working.is_none());
+        assert_eq!(app.draft, ":cache");
+        assert_eq!(app.status, "Built-in draft; Enter executes it");
+
+        app.working = Some((2, TaskPhase::Saving, Instant::now()));
+        app.handle_event(Event {
+            id: 1,
+            result: Ok(Outcome::Preview(stale_preview())),
+        });
+        assert_eq!(app.working.as_ref().map(|(id, _, _)| *id), Some(2));
     }
 
     #[test]
