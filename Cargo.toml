@@ -28,7 +28,7 @@ yaml_serde = "0.10.7"
 # - is_in: membership filtering
 # - parquet: parquet load + dumpcache
 # - dtype-decimal: lossless Decimal128 intermediate for integer delta
-polars = { version = "0.55.2", features = ["lazy", "csv", "json", "temporal", "timezones", "strings", "regex", "is_in", "parquet", "dtype-decimal"], default-features = false }
+polars = { version = "0.55.2", features = ["lazy", "csv", "json", "temporal", "timezones", "strings", "regex", "is_in", "parquet", "ipc", "dtype-decimal"], default-features = false }
 regex = "1.9"
 chrono = "0.4"
 chrono-tz = "0.10"

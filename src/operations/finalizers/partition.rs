@@ -5,16 +5,14 @@ use crate::operations::finalizers::{
 };
 use polars::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 const NULL_PARTITION: &str = "_null";
 const MAX_PARTITION_NAME_BYTES: usize = 120;
 const PARTITION_BATCH_ROWS: usize = 4096;
 const MAX_OPEN_PARTITION_WRITERS: usize = 16;
-static PARTITION_STAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Default)]
 struct PartitionMetrics {
@@ -112,17 +110,19 @@ where
     }
     let output_path = Path::new(output_dir).to_path_buf();
     let stage = create_staging_directory(&output_path)?;
+    let stage_path = stage.path();
     let partition_resources = resources.fork(Vec::new());
     let mut before_write = hooks.before_write.take();
     let metrics = hooks.metrics.take();
-    let mut writers = PartitionWriterPool::new(&stage, before_write.take(), &partition_resources);
+    let mut writers =
+        PartitionWriterPool::new(stage_path, before_write.take(), &partition_resources);
     let result = (|| {
         let (spool_resources, spool) = spool_partition_input(df, &partition_resources)?;
         let partition_names = discover_partition_names(&spool, colname)?;
         write_partition_batches(&spool, colname, &partition_names, &mut writers, metrics)?;
         let names = writers.finish()?;
         drop(spool_resources);
-        publish(&stage, &output_path)?;
+        publish(stage_path, &output_path)?;
         Ok(names
             .into_iter()
             .map(|name| output_path.join(name))
@@ -130,9 +130,6 @@ where
     })();
     drop(writers);
     drop(partition_resources);
-    if result.is_err() {
-        let _ = fs::remove_dir_all(&stage);
-    }
     result.map(FinalizerResult::Files)
 }
 
@@ -150,7 +147,7 @@ fn spool_partition_input(
             PlanCallback::new(move |mut batch: DataFrame| {
                 batch.align_chunks_par();
                 let mut reservation = callback_resources
-                    .reserve_temp_file("qlt-partition-input", "parquet")
+                    .reserve_temp_file("qlt-partition-input", "arrow-ipc")
                     .map_err(|error| {
                         polars::error::PolarsError::ComputeError(error.to_string().into())
                     })?;
@@ -158,8 +155,8 @@ fn spool_partition_input(
                 let writer = reservation.file_mut().ok_or_else(|| {
                     polars::error::PolarsError::ComputeError("partition spool unavailable".into())
                 })?;
-                ParquetWriter::new(writer)
-                    .with_compression(ParquetCompression::Snappy)
+                IpcWriter::new(writer)
+                    .with_compression(Some(IpcCompression::LZ4))
                     .finish(&mut batch)?;
                 callback_resources
                     .retain_temp_file(reservation)
@@ -197,15 +194,13 @@ where
     F: FnMut(DataFrame) -> Result<(), QuiltError>,
 {
     for batch_path in spool {
-        let reader = ParquetReader::new(File::open(batch_path).map_err(|error| {
+        let reader = IpcReader::new(File::open(batch_path).map_err(|error| {
             QuiltError::io(
                 "open partition input batch",
                 Some(batch_path.display().to_string()),
                 error.to_string(),
             )
-        })?)
-        .set_low_memory(true)
-        .read_parallel(ParallelStrategy::None);
+        })?);
         let batch = reader.finish().map_err(|error| {
             QuiltError::operation(
                 "partition",
@@ -621,7 +616,7 @@ fn write_partition_csv<W: Write>(
         .map_err(|error| QuiltError::finalizer("write partition file", error.to_string()))
 }
 
-fn create_staging_directory(output: &Path) -> Result<PathBuf, QuiltError> {
+fn create_staging_directory(output: &Path) -> Result<super::AtomicStage, QuiltError> {
     if output.exists() {
         return Err(QuiltError::io(
             "create partition directory",
@@ -640,30 +635,7 @@ fn create_staging_directory(output: &Path) -> Result<PathBuf, QuiltError> {
             "destination directory does not exist",
         ));
     }
-    let name = output
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("partitions");
-    for _ in 0..64 {
-        let nonce = PARTITION_STAGE_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let stage = parent.join(format!(".{name}.qlt-stage-{}-{nonce}", std::process::id()));
-        match fs::create_dir(&stage) {
-            Ok(()) => return Ok(stage),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => {
-                return Err(QuiltError::io(
-                    "create partition staging directory",
-                    Some(stage.display().to_string()),
-                    error.to_string(),
-                ));
-            }
-        }
-    }
-    Err(QuiltError::io(
-        "create partition staging directory",
-        Some(output.display().to_string()),
-        "could not reserve unique staging directory",
-    ))
+    super::reserve_atomic_stage(output, "partition")
 }
 
 fn partition_value(value: AnyValue<'_>) -> String {
@@ -1431,6 +1403,115 @@ mod tests {
         assert_eq!(
             fs::read_to_string(target.join("a.csv")).unwrap(),
             "part,payload\na,\"[1,2]\"\na,\n"
+        );
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn partition_ipc_spool_preserves_empty_struct_arrays_and_large_integers() {
+        let parent = test_parent("empty-struct-ipc");
+        let input_path = parent.join("input.jsonl");
+        fs::write(
+            &input_path,
+            concat!(
+                "{\"key\":\"a\",\"object\":{},\"nested\":[{}],\"huge\":9007199254740993}\n",
+                "{\"key\":\"b\",\"object\":{},\"nested\":[{}],\"huge\":9007199254740995}\n"
+            ),
+        )
+        .unwrap();
+        let resources = ExecutionResources::new();
+        let frame = crate::operations::initializers::load::load_with_options(
+            std::slice::from_ref(&input_path),
+            ",",
+            false,
+            false,
+            None,
+            None,
+            None,
+            Default::default(),
+            &resources,
+        )
+        .unwrap();
+        let target = parent.join("partitions");
+        let FinalizerResult::Files(files) =
+            partition_with_resources(&frame, "key", target.to_str().unwrap(), &resources).unwrap()
+        else {
+            panic!("partition must return file paths");
+        };
+        for (key, huge) in [
+            ("a", 9_007_199_254_740_993i64),
+            ("b", 9_007_199_254_740_995i64),
+        ] {
+            let partition_path = target.join(format!("{key}.csv"));
+            let csv_frame = crate::operations::initializers::load::load_with_options(
+                std::slice::from_ref(&partition_path),
+                ",",
+                false,
+                false,
+                None,
+                None,
+                None,
+                Default::default(),
+                &resources,
+            )
+            .unwrap()
+            .collect()
+            .unwrap();
+            assert_eq!(csv_frame.height(), 1);
+            assert_eq!(
+                csv_frame
+                    .column("object")
+                    .unwrap()
+                    .get(0)
+                    .unwrap()
+                    .get_str(),
+                Some("{}")
+            );
+            assert_eq!(
+                csv_frame
+                    .column("nested")
+                    .unwrap()
+                    .get(0)
+                    .unwrap()
+                    .get_str(),
+                Some("[{}]")
+            );
+            assert_eq!(
+                csv_frame
+                    .column("huge")
+                    .unwrap()
+                    .get(0)
+                    .unwrap()
+                    .to_string(),
+                huge.to_string()
+            );
+
+            let dump_path = parent.join(format!("{key}-dump.csv"));
+            crate::operations::finalizers::dump::dump(
+                &frame.clone().filter(col("key").eq(lit(key))),
+                Some(dump_path.to_str().unwrap()),
+                ',',
+            )
+            .unwrap();
+            assert_eq!(
+                fs::read_to_string(&partition_path).unwrap(),
+                fs::read_to_string(&dump_path).unwrap()
+            );
+        }
+        assert_eq!(files.len(), 2);
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn partition_stages_inside_parent_for_long_destination_basename() {
+        let parent = test_parent("long-destination");
+        let target = parent.join("p".repeat(240));
+        let frame = df!("part" => &["a"], "value" => &[7i64]).unwrap().lazy();
+        partition(&frame, "part", target.to_str().unwrap()).unwrap();
+        assert_eq!(
+            fs::read_to_string(target.join("a.csv")).unwrap(),
+            "part,value\na,7\n"
         );
         fs::remove_dir_all(parent).unwrap();
     }

@@ -42,17 +42,17 @@ impl Drop for AtomicStage {
     }
 }
 
-fn reserve_atomic_stage(
-    parent: &Path,
-    file_name: &str,
-    operation: &str,
-) -> Result<AtomicStage, QuiltError> {
+fn reserve_atomic_stage(target: &Path, operation: &str) -> Result<AtomicStage, QuiltError> {
+    let parent = target
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     for _ in 0..64 {
         let nonce = ATOMIC_STAGE_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let candidate = parent.join(format!(
-            ".{file_name}.qlt-stage-{}-{nonce}",
-            std::process::id()
-        ));
+        let candidate = parent.join(format!(".qlt-stage-{}-{nonce}", std::process::id()));
+        if candidate.file_name() == target.file_name() {
+            continue;
+        }
         match fs::create_dir(&candidate) {
             Ok(()) => return Ok(AtomicStage { path: candidate }),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -167,11 +167,7 @@ where
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let file_name = target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("output");
-    let stage = reserve_atomic_stage(parent, file_name, operation)?;
+    let stage = reserve_atomic_stage(target, operation)?;
     let temp = stage.path().join("payload");
     let result = write(&temp).and_then(|_| {
         // Windows FlushFileBuffers requires a handle with write access.
@@ -560,7 +556,12 @@ mod tests {
     #[test]
     fn atomic_checked_guard_runs_after_staging_and_before_publication() {
         let directory = tempfile::tempdir().unwrap();
-        let target = directory.path().join("cancelled.parquet");
+        let basename = if cfg!(unix) {
+            format!("{}.parquet", "a".repeat(240))
+        } else {
+            "cancelled.parquet".into()
+        };
+        let target = directory.path().join(basename);
         let mut staged = false;
         let result = atomic_path_checked(
             &target,

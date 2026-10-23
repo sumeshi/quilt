@@ -816,9 +816,9 @@ Unsafe filename characters and path separators become `_`; null
 uses `_null`, empty values use `_empty`, reserved names are prefixed with `_`,
 and sanitization collisions receive deterministic `-2`, `-3`, ... suffixes.
 Files are written through same-filesystem temporary siblings and are never
-silently overwritten. Partition input is staged in a schema-preserving Parquet
-spool and replayed in bounded batches through a capped open-writer pool; each
-partition receives one header.
+silently overwritten. Partition input is staged on temporary disk with nested
+values and types preserved, then replayed in bounded batches through a capped
+open-writer pool; each partition receives one header.
 Partition files are published only after the complete directory has been built,
 so a failed partition leaves no partial output.
 
@@ -1020,7 +1020,7 @@ contextual error at evaluation time.
 | `extract` | String source plus named Rust regex groups; adds nullable String columns | Unmatched/absent optional groups are null; invalid regex, no names, non-string, and collisions error | Lazy extraction UDF; sink-time evaluation |
 | `flatten` | Nested JSON Struct fields; recursively adds dot-named scalar fields, preserving lists | Missing/null nested fields remain null; collisions and mixed/non-object records error | Lazy struct projection; lists are not exploded |
 | `calc` | Numeric source and exactly one aggregation; outputs one raw scalar line | Null-only/empty is `null`; non-numeric/missing source errors | Finalizer aggregate barrier |
-| `partition` | Any source dtype; writes one CSV per distinct value with sanitized names | Null is `_null`, empty is `_empty`; unsafe names/collisions are sanitized; existing destination rejected | Global finalizer; schema-preserving Parquet spool, bounded batches, capped open writers, atomic staged directory |
+| `partition` | Any source dtype; writes one CSV per distinct value with sanitized names | Null is `_null`, empty is `_empty`; unsafe names/collisions are sanitized; existing destination rejected | Global finalizer; typed temporary spool, bounded batches, capped open writers, atomic staged directory |
 | `headers` | Any schema; outputs names (plain one-per-line or formatted) | Empty schema is valid; no row evaluation required | Finalizer/schema inspection only |
 | `stats` | Supported Polars dtypes; outputs one summary table per column | Null counts are reported; unsupported measures use `-`; empty/all-null inputs do not panic | Finalizer aggregate barrier; may use input-sized memory |
 | `showquery` | Any LazyFrame; outputs logical/optimized plan text | No row conversion; plan errors are returned | Inspection finalizer; does not collect rows |
@@ -1376,7 +1376,7 @@ Not all commands stream. Before running a pipeline on a large file, check the me
 | **Lazy / Polars-optimized** | `select`, `filter`, `derive`, `array-contains`, `array-get`, `explode`, `isin`, `contains`, `grep`, `sed`, `renamecol`, `cast`, `parse-size`, `bucket`, `delta`, `extract`, `flatten`, `changetz`, `timeslice` | `explode` can increase row count; grouped `delta` keeps group state |
 | **Global barriers** ⚠️ | `sort`, `uniq`, `count`, `tail` | Polars may maintain input-proportional state to produce a global result |
 | **Aggregate operations** | `aggregate`, `timeinfo`, `stats`, `calc` | Read all selected rows; group cardinality and the chosen statistic determine memory requirements |
-| **Global / disk-backed finalizers** ⚠️ | `partition` | Scans the complete input through a schema-preserving Parquet spool and bounded batches; output directory is fully staged before publication |
+| **Global / disk-backed finalizers** ⚠️ | `partition` | Scans the complete input through a typed temporary spool and bounded batches; output directory is fully staged before publication |
 
 > **Warning:** Running a global barrier or aggregate finalizer on a multi-GB file may require substantial input-proportional state. `partition` bounds in-memory writer state but consumes disk proportional to the input and output. Use `head`, `timeslice`, or `isin` to reduce the dataset first.
 
@@ -1420,7 +1420,7 @@ Gzip expansion, stdin, rejected-record filtering, `show`, run materialization, a
 partition staging use temporary disk.
 `dump`/`dumpcache` stage beside their destination so completed files can be published
 without overwriting existing data. Partition staging includes the complete output
-directory as well as its intermediate Parquet. Available disk must cover these files
+directory as well as its input spool. Available disk must cover these files
 as well as the final result; lazy execution is not a guarantee of constant memory or disk.
 
 Normal completion and handled errors remove execution-owned temporary files. SIGKILL
