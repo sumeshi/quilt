@@ -63,6 +63,7 @@ This command:
 ```bash
 $ qlt --lazy Security.jsonl
 $ qlt --lazy --all-strings events.csv
+$ qlt --lazy --recipe workflow.yaml events.jsonl --var event_id=4624
 ```
 
 Type pipeline commands such as `grep ERROR` or `filter 'id == 4624'`. Enter
@@ -114,6 +115,12 @@ overwrite existing files. YAML saves confirmed commands as a reusable `qlt run`
 recipe, with input files supplied at execution time and no sample limits or
 checkpoint paths. On exit, queued work is cancelled and any active operation
 finishes before the terminal closes.
+
+`--recipe` reopens a linear v2 workflow for editing; output steps are omitted.
+Branches, joins, multiple loads, and secret parameters used in data-processing
+steps cannot be opened in the editor. Use `--cache-input` when repeatedly previewing
+large inputs: it creates a temporary Parquet snapshot after validation. Initial
+loading takes extra time and disk space; later queries reuse the snapshot.
 
 ### Command Structure
 
@@ -182,6 +189,8 @@ Load one or more CSV, JSONL/NDJSON, or Parquet files.
 | --schema | `column=type` | none | Override a CSV column's type; repeatable. Types: `string`, `int`, `uint`, `float`, `bool`. |
 | --stdin-format | str | none | Read finite stdin as `csv`, `tsv`, `jsonl`, or `ndjson`; cannot be combined with paths. |
 | --rejects | path | none | Write rejected CSV/NDJSON records and reasons to a new JSONL report; keep accepted records. |
+| --json-string | JSON Pointer | none | Normalize selected JSONL values to String before schema inference; repeatable. |
+| --cache-input | flag | `false` | Create a temporary Parquet input snapshot for repeated queries. |
 | --source-column | str | none | Add each input's expanded path as a String column. Available for all input formats; an existing column with this name is an error. |
 
 CSV separators must be one ASCII character; TSV requires an explicit tab separator.
@@ -196,8 +205,13 @@ can accompany nonempty files. Inputs with no columns cannot be loaded.
 
 Integer IDs are preserved exactly as Int64 or UInt64, including values above 2^53.
 Incompatible types (including integer/float mixtures), out-of-range integers, and
-negative values mixed with values above Int64::MAX are rejected. Normalize such
-fields to strings before loading.
+negative values mixed with values above Int64::MAX are rejected. Use
+`--json-string /event/id` to normalize a field with varying types before loading.
+JSON Pointers use `~1` for `/` and `~0` for `~`; array elements can be addressed
+by index. Existing strings, nulls, and missing values are unchanged; other selected
+values become compact JSON text, preserving integer digits. In YAML, use
+`json-string: ["/event/id"]`. Normalization uses temporary disk and keeps the
+default strict policy for unselected fields.
 Duplicate object keys, including escaped-equivalent names at any nesting depth,
 are rejected with the input path, physical line, and key path.
 
@@ -235,6 +249,7 @@ not resolve that mismatch.
 
 **Environment Variables:**
 - `QLT_CHUNK_SIZE`: Positive default chunk size for CSV processing. An explicit `--chunk-size` takes precedence and bypasses this variable; malformed, zero, or overflowing environment values are errors.
+- `QLT_TEMP_LIMIT`: Optional positive byte limit shared by Quilt-managed temporary files, including decompressed inputs, input caches, and output spools. Files are cleaned up on normal exit; the interactive preview shows current usage. This does not limit final output sizes or Polars' internal spill files.
 
 Example:
 ```bash
@@ -298,6 +313,8 @@ keep first-seen order, and the result can continue through the pipeline.
 `min`, `max`, `p0`, and `p100` retain the input type and exact integer values.
 Average, median, standard deviation, and interior percentiles use floating-point
 statistics and can round large integers; use exact endpoints for identifier ranges.
+For names containing colons, pass a JSON metric instead, such as
+`'{"mode":"sum","column":"bytes:sent","output":"total"}'`.
 
 ```bash
 $ qlt load events.jsonl - cast timestamp datetime - bucket timestamp 5m - aggregate count:events sum:bytes:total_bytes avg:latency:mean_latency p95:latency:p95_latency --by host,timestamp_bucket - show
@@ -378,6 +395,7 @@ Explicit input offsets and Unix epochs determine the instant. Without an offset 
 use a UTC-naive timeline; the investigation machine's local timezone is not assumed.
 Datetime parsing options are rejected for non-datetime casts. They are also rejected
 by `bucket` and `timeslice` when their input is already typed datetime.
+Both operations retain native datetime columns' original time unit and precision.
 
 Precedence is explicit format, strict RFC3339/ISO and known formats, explicit
 epoch unit, then bounded fuzzy forms. Strict disables fuzzy parsing; ambiguous
@@ -659,7 +677,7 @@ a typed datetime column.
 | --from-tz | str |         | Source timezone (e.g., `UTC`, `America/New_York`, `local`). Required. |
 | --to-tz | str |         | Target timezone (e.g., `Asia/Tokyo`). Required. |
 | --input-format | str | none | Chrono/strftime format; takes precedence over automatic parsing. |
-| --output-format | str | ISO-like | Output format; default `%Y-%m-%dT%H:%M:%S%.6f%:z`. |
+| --output-format | str | ISO-like | Output format; default `%Y-%m-%dT%H:%M:%S%.6f%:z` (9 fractional digits for native nanosecond columns). |
 | --strict | flag | false | Disable bounded fuzzy parsing. |
 | --epoch-unit | s/ms/us/ns | none | Interpret numeric input only with this explicit unit. |
 | --ambiguous | error/earliest/latest | error | DST fall-back policy. |
@@ -671,6 +689,8 @@ in `--to-tz`. Without an offset, `--from-tz` localizes the wall-clock value.
 Shift policies move to the nearest valid wall-clock minute in the requested
 direction. Invalid options fail before execution; row errors remain lazy and
 include operation/column/row context without echoing raw values.
+Native datetime columns are converted directly at their original precision;
+omit parsing options and use `--output-format` to choose the rendered precision.
 
 **Understanding `--ambiguous` option:**
 
@@ -727,7 +747,9 @@ Filters data based on time ranges, extracting records within specified time boun
 At least one of `--start` or `--end` must be specified. Both boundaries are inclusive
 (`[start, end]`); a date-only end means midnight at the start of that date. For string
 input, the parser options listed under `cast` apply, including `--timezone` for naive
-wall-clock values. For already-typed datetime input, omit parsing options. Embedded
+wall-clock values. For already-typed datetime input, omit parsing options. Boundaries
+retain nanosecond precision when the column uses nanoseconds; boundaries
+finer than the source time unit are errors. Embedded
 offsets are authoritative instants; naive values without `--timezone` use the UTC-naive
 timeline. Null timestamps are excluded. Invalid non-null values fail the command.
 
@@ -988,9 +1010,9 @@ contextual error at evaluation time.
 | `count` | Optional grouping columns of any supported dtype; output is group columns plus `count` | Nulls form groups; missing columns and a grouping-column name collision with `count` error | Lazy grouped barrier; Polars observes the complete input |
 | `timeinfo` | Datetime plus optional group keys; outputs counts and first/last timestamps | Null timestamps count separately; empty ungrouped input gives zero counts and null bounds | Lazy aggregate over all selected rows; no input sort |
 | `uniq` | Any schema; output removes duplicate rows | Nulls compare using Polars equality semantics | Lazy distinct barrier; Polars may maintain global state |
-| `changetz` | Datetime or parseable string source; output preserves source column after timezone rendering | Nulls remain null; invalid timezone/DST/row values error lazily | Lazy chunk UDF; parsing is per execution chunk |
+| `changetz` | Datetime or parseable string source; output preserves source column after timezone rendering | Nulls remain null; invalid timezone/DST/row values error lazily | Lazy timezone conversion for typed datetime; string parsing is per execution chunk |
 | `renamecol` | Existing source name to a new unique name; schema changes only the name | Missing source or destination collision errors | Lazy projection/schema operation |
-| `timeslice` | Datetime or parseable string source; output keeps schema and rows within inclusive bounds | At least one bound required; nulls are excluded; invalid bounds/rows error lazily | Lazy filter with per-chunk parsing |
+| `timeslice` | Datetime or parseable string source; output keeps schema and rows within inclusive bounds | At least one bound required; nulls are excluded; invalid bounds/rows error lazily | Lazy filter; typed datetime keeps its original precision, strings use per-chunk parsing |
 | `cast` | `int`→Int64, `uint`→UInt64, `float`→Float64, `string`, `bool`, or datetime; replaces source in place | Nulls remain null; strict invalid values and overflow error at finalization | Lazy expression/UDF; conversion occurs at sink |
 | `parse-size` | String size values with SI/IEC units; replaces source as UInt64 | Nulls remain null; negative, malformed, fractional-byte, and overflow values error at finalization | Lazy conversion UDF; sink-time evaluation |
 | `bucket` | Datetime/string source plus positive interval; adds `<column>_bucket` or `--output` as Datetime[μs] | Nulls remain null; invalid interval, parse, collision, and overflow errors | Lazy expression/UDF; checked floor at sink |
@@ -1080,7 +1102,7 @@ numeric options keep the CLI defaults, and unknown fields are errors.
 
 | Step | Fields |
 |---|---|
-| `load` | `paths` (optional with CLI input files or `stdin-format`), `source-column`, `separator`, `low-memory`, `no-headers`, `chunk-size`, `infer-schema-length`, `all-strings`, `schema` (column-to-type mapping), `stdin-format`, `rejects` |
+| `load` | `paths` (optional with CLI input files or `stdin-format`), `source-column`, `separator`, `low-memory`, `no-headers`, `chunk-size`, `infer-schema-length`, `all-strings`, `schema` (column-to-type mapping), `stdin-format`, `rejects`, `json-string` (JSON Pointer array), `cache-input` |
 | `select` | `columns` |
 | `filter` | `expression` |
 | `derive` | `output`, `expression` |
@@ -1102,7 +1124,7 @@ numeric options keep the CLI defaults, and unknown fields are errors.
 | `sort` | `columns`, optional `desc` |
 | `count` | optional `columns` (all columns by default) |
 | `timeinfo` | `column`, optional `by` |
-| `changetz` | `column`, required `from-tz`, `to-tz`; optional `input-format`, `output-format`, `epoch-unit`, `strict`, `ambiguous`, `nonexistent`, `timezone` (YAML only) |
+| `changetz` | `column`, required `from-tz`, `to-tz`; optional `input-format`, `output-format`, `epoch-unit`, `strict`, `ambiguous`, `nonexistent`, `timezone` |
 | `renamecol` | `old`, `new` |
 | `timeslice` | `column`, at least one of `start` or `end`; optional datetime fields |
 | `show` | optional `format` (`csv` or `jsonl`) |
