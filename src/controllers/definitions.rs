@@ -27,6 +27,310 @@ pub struct CommandSpec {
     pub summary: &'static str,
 }
 
+/// What kind of value a positional argument accepts. Shared by help, editor
+/// hints, validation, and completion so each command has one argument model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArgumentKind {
+    Column,
+    ColumnList,
+    Path,
+    Choice(&'static [&'static str]),
+    Expression,
+    Value,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ArgumentSpec {
+    pub name: &'static str,
+    pub kind: ArgumentKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct OptionMetadata {
+    pub description: &'static str,
+    pub value_hint: Option<&'static str>,
+    pub choices: &'static [&'static str],
+    pub kind: ArgumentKind,
+}
+
+fn option_value(
+    description: &'static str,
+    value_hint: &'static str,
+    choices: &'static [&'static str],
+    kind: ArgumentKind,
+) -> OptionMetadata {
+    OptionMetadata {
+        description,
+        value_hint: Some(value_hint),
+        choices,
+        kind,
+    }
+}
+
+pub fn option_metadata(command: &CommandSpec, option: &OptionSpec) -> OptionMetadata {
+    let flag = OptionMetadata {
+        description: "Enable this behavior",
+        value_hint: None,
+        choices: &[],
+        kind: ArgumentKind::Value,
+    };
+    match (command.name, option.name) {
+        ("load", "stdin-format") => option_value(
+            "Format of data read from stdin",
+            "format",
+            &["csv", "tsv", "jsonl", "ndjson"],
+            ArgumentKind::Choice(&["csv", "tsv", "jsonl", "ndjson"]),
+        ),
+        ("show", "format") | ("dump", "format") => option_value(
+            "Output format",
+            "format",
+            &["csv", "jsonl"],
+            ArgumentKind::Choice(&["csv", "jsonl"]),
+        ),
+        (_, "output-format") => {
+            option_value("Datetime output format", "format", &[], ArgumentKind::Value)
+        }
+        (_, "input-format") => {
+            option_value("Input datetime format", "format", &[], ArgumentKind::Value)
+        }
+        (_, "epoch-unit") => option_value(
+            "Unit used to interpret epoch values",
+            "unit",
+            &["s", "ms", "us", "ns"],
+            ArgumentKind::Choice(&["s", "ms", "us", "ns"]),
+        ),
+        (_, "ambiguous") => option_value(
+            "How to resolve ambiguous local times",
+            "policy",
+            &["earliest", "latest", "error"],
+            ArgumentKind::Choice(&["earliest", "latest", "error"]),
+        ),
+        (_, "nonexistent") => option_value(
+            "How to resolve nonexistent local times",
+            "policy",
+            &["shift-forward", "shift-backward", "error"],
+            ArgumentKind::Choice(&["shift-forward", "shift-backward", "error"]),
+        ),
+        (_, "from-tz" | "to-tz" | "timezone") => {
+            option_value("Time zone name", "timezone", &[], ArgumentKind::Value)
+        }
+        ("sed", "column") => option_value(
+            "Restrict replacement to one column",
+            "column",
+            &[],
+            ArgumentKind::Column,
+        ),
+        ("grep", "column") | (_, "by") => option_value(
+            "Column name or list of names",
+            "columns",
+            &[],
+            ArgumentKind::ColumnList,
+        ),
+        ("load", "source-column") => option_value(
+            "Name for the source filename column",
+            "name",
+            &[],
+            ArgumentKind::Value,
+        ),
+        ("load", "json-string") => option_value(
+            "Normalize a JSONL field to a string using a JSON Pointer",
+            "pointer",
+            &[],
+            ArgumentKind::Value,
+        ),
+        ("load", "cache-input") => OptionMetadata {
+            description: "Cache decoded input data for reuse",
+            value_hint: None,
+            choices: &[],
+            kind: ArgumentKind::Value,
+        },
+        ("load", "schema") => option_value(
+            "Column schema in NAME=TYPE form",
+            "column=type",
+            &[],
+            ArgumentKind::Value,
+        ),
+        ("load", "rejects") | ("dumpcache", "output") | ("dump", "output") | ("run", "output") => {
+            option_value("File path", "path", &[], ArgumentKind::Path)
+        }
+        (_, "output") => option_value("Output column name", "name", &[], ArgumentKind::Value),
+        (_, "separator") => {
+            option_value("CSV field separator", "character", &[], ArgumentKind::Value)
+        }
+        (
+            _,
+            "strict" | "ignore-case" | "invert-match" | "desc" | "plain" | "low-memory"
+            | "no-headers" | "all-strings",
+        ) => flag,
+        _ if option.takes_value => option_value("Option value", "value", &[], ArgumentKind::Value),
+        _ => flag,
+    }
+}
+
+const A_COLUMN: &[ArgumentSpec] = &[ArgumentSpec {
+    name: "column",
+    kind: ArgumentKind::Column,
+}];
+const A_COLUMNS: &[ArgumentSpec] = &[ArgumentSpec {
+    name: "columns",
+    kind: ArgumentKind::ColumnList,
+}];
+const A_EXPR: &[ArgumentSpec] = &[ArgumentSpec {
+    name: "expression",
+    kind: ArgumentKind::Expression,
+}];
+const A_LOAD: &[ArgumentSpec] = &[ArgumentSpec {
+    name: "files",
+    kind: ArgumentKind::Path,
+}];
+const A_DERIVE: &[ArgumentSpec] = &[
+    ArgumentSpec {
+        name: "output",
+        kind: ArgumentKind::Value,
+    },
+    ArgumentSpec {
+        name: "expression",
+        kind: ArgumentKind::Expression,
+    },
+];
+const A_TWO_COLUMNS: &[ArgumentSpec] = &[
+    ArgumentSpec {
+        name: "column",
+        kind: ArgumentKind::Column,
+    },
+    ArgumentSpec {
+        name: "value",
+        kind: ArgumentKind::Value,
+    },
+];
+const A_CONTAINS: &[ArgumentSpec] = &[
+    ArgumentSpec {
+        name: "column",
+        kind: ArgumentKind::Column,
+    },
+    ArgumentSpec {
+        name: "pattern",
+        kind: ArgumentKind::Value,
+    },
+];
+const A_RENAME: &[ArgumentSpec] = &[
+    ArgumentSpec {
+        name: "old",
+        kind: ArgumentKind::Column,
+    },
+    ArgumentSpec {
+        name: "new",
+        kind: ArgumentKind::Value,
+    },
+];
+const A_PATH: &[ArgumentSpec] = &[ArgumentSpec {
+    name: "file",
+    kind: ArgumentKind::Path,
+}];
+const A_PARTITION: &[ArgumentSpec] = &[
+    ArgumentSpec {
+        name: "column",
+        kind: ArgumentKind::Column,
+    },
+    ArgumentSpec {
+        name: "directory",
+        kind: ArgumentKind::Path,
+    },
+];
+const A_COUNT: &[ArgumentSpec] = &[ArgumentSpec {
+    name: "columns",
+    kind: ArgumentKind::ColumnList,
+}];
+const A_CAST: &[ArgumentSpec] = &[
+    ArgumentSpec {
+        name: "column",
+        kind: ArgumentKind::Column,
+    },
+    ArgumentSpec {
+        name: "type",
+        kind: ArgumentKind::Choice(&["string", "int", "uint", "float", "bool", "datetime"]),
+    },
+];
+const A_BUCKET: &[ArgumentSpec] = &[
+    ArgumentSpec {
+        name: "column",
+        kind: ArgumentKind::Column,
+    },
+    ArgumentSpec {
+        name: "interval",
+        kind: ArgumentKind::Value,
+    },
+];
+const A_ARRAY_GET: &[ArgumentSpec] = &[
+    ArgumentSpec {
+        name: "column",
+        kind: ArgumentKind::Column,
+    },
+    ArgumentSpec {
+        name: "index",
+        kind: ArgumentKind::Value,
+    },
+];
+const A_EXTRACT: &[ArgumentSpec] = &[
+    ArgumentSpec {
+        name: "column",
+        kind: ArgumentKind::Column,
+    },
+    ArgumentSpec {
+        name: "regex",
+        kind: ArgumentKind::Value,
+    },
+];
+const A_PATTERN: &[ArgumentSpec] = &[ArgumentSpec {
+    name: "pattern",
+    kind: ArgumentKind::Value,
+}];
+const A_SED: &[ArgumentSpec] = &[
+    ArgumentSpec {
+        name: "pattern",
+        kind: ArgumentKind::Value,
+    },
+    ArgumentSpec {
+        name: "replacement",
+        kind: ArgumentKind::Value,
+    },
+];
+const A_NUMBER: &[ArgumentSpec] = &[ArgumentSpec {
+    name: "number",
+    kind: ArgumentKind::Value,
+}];
+const A_AGGREGATE: &[ArgumentSpec] = &[ArgumentSpec {
+    name: "metrics",
+    kind: ArgumentKind::Value,
+}];
+
+/// Positional arguments for each public command. The returned list follows
+/// the parser's positional order; command-specific flags remain in `options`.
+pub fn argument_specs(spec: &CommandSpec) -> &'static [ArgumentSpec] {
+    match spec.name {
+        "load" => A_LOAD,
+        "select" | "sort" | "explode" => A_COLUMNS,
+        "count" => A_COUNT,
+        "filter" => A_EXPR,
+        "derive" => A_DERIVE,
+        "array-contains" | "isin" => A_TWO_COLUMNS,
+        "array-get" => A_ARRAY_GET,
+        "cast" => A_CAST,
+        "bucket" => A_BUCKET,
+        "delta" | "parse-size" | "timeinfo" | "changetz" | "timeslice" | "calc" => A_COLUMN,
+        "contains" => A_CONTAINS,
+        "grep" => A_PATTERN,
+        "sed" => A_SED,
+        "extract" => A_EXTRACT,
+        "renamecol" => A_RENAME,
+        "partition" => A_PARTITION,
+        "run" => A_PATH,
+        "head" | "tail" => A_NUMBER,
+        "aggregate" => A_AGGREGATE,
+        _ => &[],
+    }
+}
+
 impl TypedCommand {
     pub fn category(&self) -> CommandCategory {
         self.operation_id().category()
@@ -272,6 +576,12 @@ const DESC: &[OptionSpec] = &[OptionSpec {
     repeated: false,
 }];
 const TZ: &[OptionSpec] = &[
+    OptionSpec {
+        name: "timezone",
+        short: None,
+        takes_value: true,
+        repeated: false,
+    },
     OptionSpec {
         name: "from-tz",
         short: None,
@@ -535,7 +845,7 @@ define_operations! {
     Headers(HeadersArgs) => { name: "headers", category: Finalizer, max_args: Some(0), options: HEADERS, help: "headers [--plain]", summary: "Print column names" },
     Stats(UnitArgs) => { name: "stats", category: Finalizer, max_args: Some(0), options: NONE, help: "stats", summary: "Show row and column statistics" },
     ShowQuery(UnitArgs) => { name: "showquery", category: Finalizer, max_args: Some(0), options: NONE, help: "showquery", summary: "Show the query plan" },
-    Dump(DumpArgs) => { name: "dump", category: Finalizer, max_args: Some(0), options: DUMP, help: "dump [options]", summary: "Write rows to a file or standard output" },
+    Dump(DumpArgs) => { name: "dump", category: Finalizer, max_args: Some(0), options: DUMP, help: "dump [options]", summary: "Write rows to a file" },
     DumpCache(DumpCacheArgs) => { name: "dumpcache", category: Finalizer, max_args: Some(0), options: OUTPUT, help: "dumpcache [--output <file>]", summary: "Save the query result as a Parquet cache" },
     Partition(PartitionArgs) => { name: "partition", category: Finalizer, max_args: Some(2), options: NONE, help: "partition <column> [directory]", summary: "Write separate output files for each column value" },
     Calc(CalcArgs) => { name: "calc", category: Finalizer, max_args: Some(1), options: CALC, help: "calc <column> --sum|--avg|--min|--max|--median|--std", summary: "Calculate a statistic for one column" },

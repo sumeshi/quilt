@@ -1,5 +1,6 @@
 pub(crate) mod arguments;
 pub(crate) mod cli_adapter;
+pub(crate) mod cli_export;
 pub mod command_model;
 pub(crate) mod csv;
 pub(crate) mod csv_input;

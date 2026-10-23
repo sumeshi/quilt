@@ -96,25 +96,10 @@ pub fn render_registry_help() -> String {
 }
 pub fn render_command_help(name: &str) -> Option<String> {
     let s = crate::controllers::definitions::by_name(name)?;
-    if name == "run" {
-        return Some(
-            format!(
-                "run\n\nUsage: qlt {}\n{}\n\nExecute a version-2 YAML workflow. Version 1 documents are rejected; update the version, use arrays for multiple columns, and map aggregate metrics as {{mode, column?, output}}. If a load step omits paths, positional files ",
-                s.help, s.summary
-            )
-                + "after the config path are supplied to that step.\n"
-                + "  --check                 Parse and statically validate the run document without reading input data or writing output\n"
-                + "  --stage STAGE           Execute only the selected stage and its dependencies\n"
-                + "  --var name=value        Supply a value for a declared typed parameter (repeatable)\n"
-                + "  --output, -o PATH       Output destination, relative to the caller. Replaces the selected stage's single dump path and retains its format; defaults to CSV when adding an output. Existing files are rejected.\n"
-                + "  --show-plan STAGE       Print a selected process, join, or concat stage plan without evaluating rows or running finalizers. Dynamic branch stages are rejected.\n"
-                + "A parameter path default is relative to the run file; a --var path is relative to the caller.\n"
-                + "Parameter placeholders are whole YAML values: {\"$param\": name}; partial interpolation is rejected.\n",
-        );
-    }
     let details = match name {
+        "run" => "\nExecute a version-2 YAML workflow. Version 1 requires migration to version 2. Omitted load paths take positional input files. --stage selects one stage and its dependencies; --output replaces the selected stage's single dump path. CLI paths are relative to the caller; YAML paths and path defaults are relative to the recipe. --check validates without input reads or output writes. --show-plan inspects a selected non-branch stage without evaluating rows. Parameter references occupy a whole YAML value: {$param: name}.\n",
         "count" => "\nCount repeated rows with `count`, or count values in selected columns with `count <columns>` (for example, `count hoge`). Select multiple columns to count each combination (for example, `select hoge,fuga - count`). Results are sorted by count, highest first; null values form a group and are counted.\n",
-        "load" => "\nCSV and JSONL: full schema discovery and strict record validation by default.\n  --infer-schema-length full|N  Bound discovery but validate all later records.\n  --all-strings                 Read CSV fields as String, preserving identifiers.\n  --schema column=type          Override a CSV column (repeatable): string,int,uint,float,bool.\n  --stdin-format csv|tsv|jsonl   Read finite stdin instead of files.\n  --rejects PATH                Quarantine rejected records in a new JSONL report.\nCSV inference preserves leading-zero identifiers and integers outside a lossless numeric common type as strings. Unsupported encodings fail with the source path. JSONL duplicate keys and incompatible types fail unless quarantined. Gzip/stdin/reject filtering use managed temporary disk.\n",
+        "load" => "\nCSV and JSONL use complete schema discovery and strict record validation by default. Bounded discovery still validates later records. CSV schema options preserve identifiers; --json-string /path normalizes selected JSONL fields. --cache-input materializes validated input once for reuse in the current session. Managed temporary disk can be limited with QLT_TEMP_LIMIT (bytes).\n",
         "filter" => "\nTyped Boolean expressions: == != < <= > >=, and/or/not (also && || !), parentheses, IS NULL/IS NOT NULL. Strings are quoted; backticks quote literal column names. Column comparisons preserve exact integers and reject incompatible types.\n",
         "derive" => "\nCreate a new column with + - * / and typed column/literal expressions. Integer results are checked Int64 values. Use cast <column> float before floating-point rates; integer columns are never silently promoted to Float64. Existing output columns are rejected.\n",
         "aggregate" => "\nOne or more metric arguments: count:output or mode:column:output. Modes: count,sum,avg,min,max,median,std,p0..p100,nunique. --by selects comma-separated grouping columns; groups keep first-seen order. Integer sums fail on overflow; sum over no non-null values is null; nunique excludes null. Min/max/p0/p100 retain exact source values. Other statistics use floating-point results and may round large integers. The result remains chainable.\n",
@@ -131,8 +116,32 @@ pub fn render_command_help(name: &str) -> Option<String> {
         "isin" => "\nMembership keys must be scalar; nested columns are rejected. Use flatten for a scalar field or grep/contains for JSON text search.\n",
         _ => "",
     };
+    let mut options = String::new();
+    for option in s.options {
+        let meta = crate::controllers::definitions::option_metadata(s, option);
+        let short = option
+            .short
+            .map(|short| format!("-{short}, "))
+            .unwrap_or_default();
+        let value = if option.takes_value {
+            format!(" <{}>", meta.value_hint.unwrap_or("value"))
+        } else {
+            String::new()
+        };
+        options.push_str(&format!(
+            "  {short}--{}{value}  {}",
+            option.name, meta.description
+        ));
+        if !meta.choices.is_empty() {
+            options.push_str(&format!(" [{}]", meta.choices.join("|")));
+        }
+        if option.repeated {
+            options.push_str(" (repeatable)");
+        }
+        options.push('\n');
+    }
     Some(format!(
-        "{}\n\nUsage: {}\n{}\n{details}",
-        s.name, s.help, s.summary
+        "{}\n\nUsage: qlt {}\n{}\n{}{}",
+        s.name, s.help, s.summary, options, details
     ))
 }
