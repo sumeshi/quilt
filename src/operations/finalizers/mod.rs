@@ -147,6 +147,21 @@ pub(crate) fn atomic_path<F>(target: &Path, operation: &str, write: F) -> Result
 where
     F: FnOnce(&Path) -> Result<(), QuiltError>,
 {
+    atomic_path_checked(target, operation, write, || Ok(()))
+}
+
+/// Variant of `atomic_path` with a final guard after the staged file is
+/// flushed and immediately before the no-clobber publication step.
+pub(crate) fn atomic_path_checked<F, C>(
+    target: &Path,
+    operation: &str,
+    write: F,
+    before_publish: C,
+) -> Result<(), QuiltError>
+where
+    F: FnOnce(&Path) -> Result<(), QuiltError>,
+    C: FnOnce() -> Result<(), QuiltError>,
+{
     validate_destination(target, operation)?;
     let parent = target
         .parent()
@@ -178,6 +193,7 @@ where
             )
         })?;
         drop(payload);
+        before_publish()?;
         publish_file_and_sync(&NativePublicationBackend, &temp, target, parent, operation)?;
         let _ = fs::remove_file(&temp);
         Ok(())
@@ -203,6 +219,35 @@ pub(crate) fn file_sink_target(path: &Path, operation: &str) -> Result<SinkTarge
         })?;
     Ok(SinkTarget::Dyn(SpecialEq::new(Arc::new(Mutex::new(Some(
         Writable::Local(file),
+    ))))))
+}
+
+pub(crate) fn temp_sink_target(
+    path: &Path,
+    operation: &str,
+    resources: &crate::controllers::resources::ExecutionResources,
+) -> Result<SinkTarget, QuiltError> {
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|error| {
+            QuiltError::io(
+                operation,
+                Some(path.display().to_string()),
+                error.to_string(),
+            )
+        })?;
+    let file = resources.accounted_file(path, file).map_err(|error| {
+        QuiltError::io(
+            operation,
+            Some(path.display().to_string()),
+            error.to_string(),
+        )
+    })?;
+    Ok(SinkTarget::Dyn(SpecialEq::new(Arc::new(Mutex::new(Some(
+        Writable::Dyn(Box::new(file)),
     ))))))
 }
 
@@ -511,6 +556,29 @@ mod tests {
     use crate::controllers::resources::ExecutionResources;
     use polars::prelude::*;
     use std::io;
+
+    #[test]
+    fn atomic_checked_guard_runs_after_staging_and_before_publication() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("cancelled.parquet");
+        let mut staged = false;
+        let result = atomic_path_checked(
+            &target,
+            "test guarded write",
+            |path| {
+                std::fs::write(path, b"private stage").map_err(|error| {
+                    QuiltError::operation("test guarded write", error.to_string())
+                })?;
+                staged = true;
+                Ok(())
+            },
+            || Err(QuiltError::operation("test guarded write", "cancelled")),
+        );
+        assert!(staged);
+        assert!(result.is_err());
+        assert!(!target.exists());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
 
     struct BoundedWriter {
         max: usize,

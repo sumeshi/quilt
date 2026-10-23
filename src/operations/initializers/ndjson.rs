@@ -31,10 +31,10 @@ pub(super) fn prepare_path(
         .reserve_temp_file("qlt-jsonl-spool", "jsonl")
         .map_err(|error| diagnostic(path, 0, error))?;
     let destination = reservation.path().to_path_buf();
-    let file = reservation
+    let mut file = reservation
         .file_mut()
         .ok_or_else(|| diagnostic(path, 0, "spool reservation unavailable"))?;
-    std::io::copy(&mut decoder, file)
+    std::io::copy(&mut decoder, &mut file)
         .map_err(|error| diagnostic(path, 0, format!("decompress gzip: {error}")))?;
     resources
         .retain_temp_file(reservation)
@@ -354,7 +354,7 @@ pub(super) fn quarantine(
             .reserve_temp_file("qlt-jsonl-accepted", "jsonl")
             .map_err(|error| diagnostic(source, 0, error))?;
         let accepted_path = accepted.path().to_path_buf();
-        let accepted_file = accepted
+        let mut accepted_file = accepted
             .file_mut()
             .ok_or_else(|| diagnostic(source, 0, "accepted spool reservation unavailable"))?;
         let mut line_no = 0usize;

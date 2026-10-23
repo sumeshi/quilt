@@ -1,7 +1,8 @@
 use crate::controllers::log::LogController;
+use crate::controllers::resources::{AccountedFile, ExecutionResources};
 use crate::error::QuiltError;
 use serde::Serialize;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -20,14 +21,24 @@ struct RejectRecord<'a> {
 pub(crate) struct RejectedReport {
     target: PathBuf,
     staging: PathBuf,
-    file: Option<File>,
+    file: Option<AccountedFile>,
+    _resources: ExecutionResources,
     record_count: usize,
 }
 
 pub(crate) type SharedRejectedReport = Arc<Mutex<RejectedReport>>;
 
 impl RejectedReport {
+    #[cfg(test)]
     pub(crate) fn new(target: &Path) -> Result<Self, QuiltError> {
+        Self::new_with_resources(target, &ExecutionResources::new())
+    }
+
+    pub(crate) fn new_with_resources(
+        target: &Path,
+        resources: &ExecutionResources,
+    ) -> Result<Self, QuiltError> {
+        let resources = resources.fork(Vec::new());
         if target.exists() {
             return Err(QuiltError::usage(format!(
                 "rejects report already exists: {}",
@@ -56,10 +67,21 @@ impl RejectedReport {
             std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
             match options.open(&staging) {
                 Ok(file) => {
+                    let file = match resources.adopt_temp_file(&staging, file) {
+                        Ok(file) => file,
+                        Err(error) => {
+                            let _ = std::fs::remove_file(&staging);
+                            return Err(QuiltError::operation(
+                                "create rejects report",
+                                error.to_string(),
+                            ));
+                        }
+                    };
                     return Ok(Self {
                         target: target.to_path_buf(),
                         staging,
                         file: Some(file),
+                        _resources: resources,
                         record_count: 0,
                     });
                 }
@@ -108,10 +130,8 @@ impl RejectedReport {
     }
 
     pub(crate) fn publish(mut self) -> Result<(), QuiltError> {
-        self.file
-            .take()
-            .expect("report file is open")
-            .sync_all()
+        let file = self.file.take().expect("report file is open");
+        file.sync_all()
             .map_err(|error| QuiltError::operation("publish rejects report", error.to_string()))?;
         let parent = self
             .target

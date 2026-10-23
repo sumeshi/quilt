@@ -1,6 +1,6 @@
 use crate::controllers::resources::ExecutionResources;
 use crate::error::QuiltError;
-use crate::operations::finalizers::{file_sink_target, FinalizerResult, OutputArtifact};
+use crate::operations::finalizers::{temp_sink_target, FinalizerResult, OutputArtifact};
 use polars::prelude::*;
 use std::sync::Arc;
 
@@ -32,7 +32,7 @@ pub fn show(df: &LazyFrame, resources: &ExecutionResources) -> Result<FinalizerR
         include_header: true,
         ..Default::default()
     };
-    let target = file_sink_target(&path, "show CSV")?;
+    let target = temp_sink_target(&path, "show CSV", &output_resources)?;
     let sink = super::csv::csv_frame(df, "show CSV")?
         .sink(
             SinkDestination::File { target },

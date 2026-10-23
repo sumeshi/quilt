@@ -9,7 +9,7 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
 struct CappedWriter {
-    file: std::fs::File,
+    file: crate::controllers::resources::AccountedFile,
     written: u64,
     limit: Option<u64>,
 }
@@ -48,6 +48,13 @@ pub(crate) fn materialize_parquet(
         .map_err(|e| QuiltError::io("create materialization", None::<String>, e.to_string()))?;
     let path = reservation.path().to_path_buf();
     reservation.close_file();
+    owned.retain_temp_file(reservation).map_err(|e| {
+        QuiltError::io(
+            "retain materialization",
+            Some(path.display().to_string()),
+            e.to_string(),
+        )
+    })?;
     let file = OpenOptions::new()
         .write(true)
         .truncate(true)
@@ -60,7 +67,13 @@ pub(crate) fn materialize_parquet(
             )
         })?;
     let writer = CappedWriter {
-        file,
+        file: owned.accounted_file(&path, file).map_err(|e| {
+            QuiltError::io(
+                "open materialization",
+                Some(path.display().to_string()),
+                e.to_string(),
+            )
+        })?,
         written: 0,
         limit: byte_limit,
     };
@@ -102,13 +115,6 @@ pub(crate) fn materialize_parquet(
     let size = batched
         .finish()
         .map_err(|e| QuiltError::operation("materialize frame", e.to_string()))?;
-    owned.retain_temp_file(reservation).map_err(|e| {
-        QuiltError::io(
-            "retain materialization",
-            Some(path.display().to_string()),
-            e.to_string(),
-        )
-    })?;
     let scan =
         LazyFrame::scan_parquet(PlRefPath::try_from_path(&path)?, ScanArgsParquet::default())
             .map_err(|e| {

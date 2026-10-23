@@ -411,7 +411,7 @@ impl Pipeline {
         colname: &str,
         output_dir: &str,
     ) -> Result<crate::operations::finalizers::FinalizerResult, QuiltError> {
-        partition::partition(&self.frame, colname, output_dir)
+        partition::partition_with_resources(&self.frame, colname, output_dir, &self.resources)
     }
     pub fn dumpcache_result(
         &self,

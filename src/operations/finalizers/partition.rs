@@ -1,3 +1,4 @@
+use crate::controllers::resources::ExecutionResources;
 use crate::error::QuiltError;
 use crate::operations::finalizers::{
     publish_directory_and_sync, FinalizerResult, NativePublicationBackend,
@@ -33,19 +34,35 @@ pub fn partition(
     colname: &str,
     output_dir: &str,
 ) -> Result<FinalizerResult, QuiltError> {
-    partition_with_publisher(df, colname, output_dir, |stage, target| {
-        let parent = target
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        publish_directory_and_sync(
-            &NativePublicationBackend,
-            stage,
-            target,
-            parent,
-            "publish partition directory",
-        )
-    })
+    let resources = ExecutionResources::new();
+    partition_with_resources(df, colname, output_dir, &resources)
+}
+
+pub(crate) fn partition_with_resources(
+    df: &LazyFrame,
+    colname: &str,
+    output_dir: &str,
+    resources: &ExecutionResources,
+) -> Result<FinalizerResult, QuiltError> {
+    partition_with_publisher(
+        df,
+        colname,
+        output_dir,
+        |stage, target| {
+            let parent = target
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            publish_directory_and_sync(
+                &NativePublicationBackend,
+                stage,
+                target,
+                parent,
+                "publish partition directory",
+            )
+        },
+        resources,
+    )
 }
 
 fn partition_with_publisher<P>(
@@ -53,6 +70,7 @@ fn partition_with_publisher<P>(
     colname: &str,
     output_dir: &str,
     publish: P,
+    resources: &ExecutionResources,
 ) -> Result<FinalizerResult, QuiltError>
 where
     P: Fn(&Path, &Path) -> Result<(), QuiltError>,
@@ -63,6 +81,7 @@ where
         output_dir,
         publish,
         PartitionRunHooks::default(),
+        resources,
     )
 }
 
@@ -72,6 +91,7 @@ fn partition_with_publisher_inner<P>(
     output_dir: &str,
     publish: P,
     mut hooks: PartitionRunHooks<'_>,
+    resources: &ExecutionResources,
 ) -> Result<FinalizerResult, QuiltError>
 where
     P: Fn(&Path, &Path) -> Result<(), QuiltError>,
@@ -92,49 +112,16 @@ where
     }
     let output_path = Path::new(output_dir).to_path_buf();
     let stage = create_staging_directory(&output_path)?;
+    let partition_resources = resources.fork(Vec::new());
     let mut before_write = hooks.before_write.take();
     let metrics = hooks.metrics.take();
-    let mut writers = PartitionWriterPool::new(&stage, before_write.take());
+    let mut writers = PartitionWriterPool::new(&stage, before_write.take(), &partition_resources);
     let result = (|| {
-        let spool = stage.join(".qlt-partition-input");
-        fs::create_dir(&spool).map_err(|error| {
-            QuiltError::io(
-                "create partition input spool",
-                Some(spool.display().to_string()),
-                error.to_string(),
-            )
-        })?;
-        // The max-size partition sink is the streaming row-group iterator:
-        // it emits bounded Parquet files in one source pass. Reading those
-        // files independently avoids offset-slicing one growing Parquet file,
-        // which would otherwise rescan preceding row-group metadata per batch.
-        df.clone()
-            .sink(
-                SinkDestination::Partitioned {
-                    base_path: PlRefPath::try_from_path(&spool)?,
-                    file_path_provider: None,
-                    partition_strategy: PartitionStrategy::FileSize,
-                    max_rows_per_file: PARTITION_BATCH_ROWS as IdxSize,
-                    approximate_bytes_per_file: u64::MAX,
-                },
-                FileWriteFormat::Parquet(ParquetWriteOptions::default().into()),
-                UnifiedSinkArgs::default(),
-            )
-            .and_then(|frame| frame.collect_with_engine(Engine::Streaming))
-            .map_err(|error| {
-                QuiltError::operation("partition", format!("failed to evaluate input: {error}"))
-            })?;
-
+        let (spool_resources, spool) = spool_partition_input(df, &partition_resources)?;
         let partition_names = discover_partition_names(&spool, colname)?;
         write_partition_batches(&spool, colname, &partition_names, &mut writers, metrics)?;
         let names = writers.finish()?;
-        fs::remove_dir_all(&spool).map_err(|error| {
-            QuiltError::io(
-                "remove partition input spool",
-                Some(spool.display().to_string()),
-                error.to_string(),
-            )
-        })?;
+        drop(spool_resources);
         publish(&stage, &output_path)?;
         Ok(names
             .into_iter()
@@ -142,40 +129,75 @@ where
             .collect())
     })();
     drop(writers);
+    drop(partition_resources);
     if result.is_err() {
         let _ = fs::remove_dir_all(&stage);
     }
     result.map(FinalizerResult::Files)
 }
 
-fn for_each_partition_batch<F>(spool: &Path, mut visit: F) -> Result<(), QuiltError>
+fn spool_partition_input(
+    frame: &LazyFrame,
+    resources: &ExecutionResources,
+) -> Result<(ExecutionResources, Vec<PathBuf>), QuiltError> {
+    let spool_resources = resources.fork(Vec::new());
+    let paths = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let callback_paths = paths.clone();
+    let callback_resources = spool_resources.clone();
+    let sink = frame
+        .clone()
+        .sink_batches(
+            PlanCallback::new(move |mut batch: DataFrame| {
+                batch.align_chunks_par();
+                let mut reservation = callback_resources
+                    .reserve_temp_file("qlt-partition-input", "parquet")
+                    .map_err(|error| {
+                        polars::error::PolarsError::ComputeError(error.to_string().into())
+                    })?;
+                let path = reservation.path().to_path_buf();
+                let writer = reservation.file_mut().ok_or_else(|| {
+                    polars::error::PolarsError::ComputeError("partition spool unavailable".into())
+                })?;
+                ParquetWriter::new(writer)
+                    .with_compression(ParquetCompression::Snappy)
+                    .finish(&mut batch)?;
+                callback_resources
+                    .retain_temp_file(reservation)
+                    .map_err(|error| {
+                        polars::error::PolarsError::ComputeError(error.to_string().into())
+                    })?;
+                callback_paths
+                    .lock()
+                    .map_err(|_| {
+                        polars::error::PolarsError::ComputeError(
+                            "partition spool lock poisoned".into(),
+                        )
+                    })?
+                    .push(path);
+                Ok(false)
+            }),
+            true,
+            std::num::NonZeroUsize::new(PARTITION_BATCH_ROWS),
+        )
+        .map_err(|error| {
+            QuiltError::operation("partition", format!("failed to evaluate input: {error}"))
+        })?;
+    sink.collect().map_err(|error| {
+        QuiltError::operation("partition", format!("failed to evaluate input: {error}"))
+    })?;
+    let paths = paths
+        .lock()
+        .map_err(|_| QuiltError::operation("partition", "partition spool lock poisoned"))?
+        .clone();
+    Ok((spool_resources, paths))
+}
+
+fn for_each_partition_batch<F>(spool: &[PathBuf], mut visit: F) -> Result<(), QuiltError>
 where
     F: FnMut(DataFrame) -> Result<(), QuiltError>,
 {
-    // The row frame is read one batch at a time, but this is not constant
-    // memory: enumerating the spool retains one path per batch, and partition
-    // discovery/final-name reservation retains state for every distinct key.
-    let mut batches = fs::read_dir(spool)
-        .map_err(|error| {
-            QuiltError::io(
-                "read partition input spool",
-                Some(spool.display().to_string()),
-                error.to_string(),
-            )
-        })?
-        .map(|entry| {
-            entry.map(|entry| entry.path()).map_err(|error| {
-                QuiltError::io(
-                    "read partition input spool entry",
-                    Some(spool.display().to_string()),
-                    error.to_string(),
-                )
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    batches.sort();
-    for batch_path in batches {
-        let reader = ParquetReader::new(File::open(&batch_path).map_err(|error| {
+    for batch_path in spool {
+        let reader = ParquetReader::new(File::open(batch_path).map_err(|error| {
             QuiltError::io(
                 "open partition input batch",
                 Some(batch_path.display().to_string()),
@@ -196,7 +218,7 @@ where
 }
 
 fn discover_partition_names(
-    spool: &Path,
+    spool: &[PathBuf],
     colname: &str,
 ) -> Result<HashMap<Vec<u8>, String>, QuiltError> {
     // Typed identities are canonical binary encodings; display strings are
@@ -257,7 +279,7 @@ fn discover_partition_names(
 }
 
 fn write_partition_batches(
-    spool: &Path,
+    spool: &[PathBuf],
     colname: &str,
     partition_names: &HashMap<Vec<u8>, String>,
     writers: &mut PartitionWriterPool<'_>,
@@ -470,18 +492,20 @@ fn unsupported_partition_value() -> QuiltError {
 
 struct PartitionWriterPool<'a> {
     stage: PathBuf,
-    writers: HashMap<String, File>,
+    writers: HashMap<String, crate::controllers::resources::AccountedFile>,
     order: VecDeque<String>,
     header_written: HashSet<String>,
     names: std::collections::BTreeSet<String>,
     peak_open: usize,
     before_write: Option<&'a mut dyn FnMut(usize) -> Result<(), QuiltError>>,
+    resources: ExecutionResources,
 }
 
 impl<'a> PartitionWriterPool<'a> {
     fn new(
         stage: &Path,
         before_write: Option<&'a mut dyn FnMut(usize) -> Result<(), QuiltError>>,
+        resources: &ExecutionResources,
     ) -> Self {
         Self {
             stage: stage.to_path_buf(),
@@ -491,6 +515,7 @@ impl<'a> PartitionWriterPool<'a> {
             names: std::collections::BTreeSet::new(),
             peak_open: 0,
             before_write,
+            resources: resources.clone(),
         }
     }
 
@@ -519,6 +544,16 @@ impl<'a> PartitionWriterPool<'a> {
                 .create(true)
                 .append(true)
                 .open(&path)
+                .map_err(|error| {
+                    QuiltError::io(
+                        "open partition file",
+                        Some(path.display().to_string()),
+                        error.to_string(),
+                    )
+                })?;
+            let file = self
+                .resources
+                .tracked_temp_file(&path, file)
                 .map_err(|error| {
                     QuiltError::io(
                         "open partition file",
@@ -817,6 +852,7 @@ mod tests {
                                 "publish partition directory",
                             )
                         },
+                        &ExecutionResources::new(),
                     )
                     .is_ok()
                 })
@@ -848,6 +884,7 @@ mod tests {
             "part",
             target.to_str().unwrap(),
             |_stage, _target| Err(QuiltError::operation("test publish", "injected failure")),
+            &ExecutionResources::new(),
         );
         assert!(result.is_err());
         assert!(!target.exists());
@@ -882,6 +919,7 @@ mod tests {
             target.to_str().unwrap(),
             |_stage, _target| panic!("publication must not run after write failure"),
             hooks,
+            &ExecutionResources::new(),
         );
         assert!(result.is_err());
         assert!(!target.exists());
@@ -908,7 +946,8 @@ mod tests {
     fn partition_writer_open_failure_is_reported_without_partial_file() {
         let parent = test_parent("failed-writer");
         let stage = parent.join("missing-stage");
-        let mut writers = PartitionWriterPool::new(&stage, None);
+        let resources = ExecutionResources::new();
+        let mut writers = PartitionWriterPool::new(&stage, None, &resources);
         let mut group = df!("part" => &["a"], "value" => &[1i64]).unwrap();
         assert!(writers.write_batch("a", &mut group).is_err());
         assert!(!stage.exists());
@@ -966,7 +1005,8 @@ mod tests {
         let parent = test_parent("bounded-writers");
         let stage = parent.join("stage");
         fs::create_dir(&stage).unwrap();
-        let mut writers = PartitionWriterPool::new(&stage, None);
+        let resources = ExecutionResources::new();
+        let mut writers = PartitionWriterPool::new(&stage, None, &resources);
         let mut expected = HashMap::new();
         for row in 0..(MAX_OPEN_PARTITION_WRITERS * 4) {
             let name = format!("part-{row}");
@@ -987,6 +1027,40 @@ mod tests {
                 contents
             );
         }
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn partition_budget_counts_evicted_staging_files_until_cleanup() {
+        let parent = test_parent("budgeted-evicted-writers");
+        let stage = parent.join("stage");
+        fs::create_dir(&stage).unwrap();
+        // Leave seven bytes after the first 16 complete files. The next
+        // header needs eleven bytes, so it must fail even after one writer is
+        // evicted. Releasing charges with handles would incorrectly pass.
+        let first_sixteen_bytes = (0..16)
+            .map(|row| {
+                let name = format!("p{row}");
+                format!("part,value\n{name},{row}\n").len() as u64
+            })
+            .sum::<u64>();
+        let resources = ExecutionResources::new().with_temp_limit_for_test(first_sixteen_bytes + 7);
+        let mut writers = PartitionWriterPool::new(&stage, None, &resources);
+        for row in 0..17 {
+            let name = format!("p{row}");
+            let value = row as i64;
+            let mut group = df!("part" => &[name.as_str()], "value" => &[value]).unwrap();
+            let result = writers.write_batch(&name, &mut group);
+            if row < 16 {
+                result.unwrap();
+            } else {
+                assert!(result.is_err());
+            }
+        }
+        assert_eq!(writers.peak_open(), MAX_OPEN_PARTITION_WRITERS);
+        assert_eq!(resources.temp_usage().0, first_sixteen_bytes);
+        drop(writers);
+        drop(resources);
         fs::remove_dir_all(parent).unwrap();
     }
 
@@ -1026,6 +1100,7 @@ mod tests {
                 )
             },
             hooks,
+            &ExecutionResources::new(),
         )
         .unwrap() else {
             panic!("partition must return file paths");

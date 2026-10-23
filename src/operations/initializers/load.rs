@@ -219,9 +219,9 @@ fn load_ndjson_files(
     resources: &ExecutionResources,
 ) -> Result<LazyFrame, QuiltError> {
     if let Some(report_path) = rejects_path {
-        let report = Arc::new(std::sync::Mutex::new(super::rejected::RejectedReport::new(
-            report_path,
-        )?));
+        let report = Arc::new(std::sync::Mutex::new(
+            super::rejected::RejectedReport::new_with_resources(report_path, resources)?,
+        ));
         let inputs = original_paths
             .iter()
             .map(|path| super::ndjson::prepare_path(path, resources))
@@ -440,7 +440,7 @@ fn load_csv_files(
         .rejects
         .as_ref()
         .map(|path| {
-            super::rejected::RejectedReport::new(path)
+            super::rejected::RejectedReport::new_with_resources(path, resources)
                 .map(|report| Arc::new(std::sync::Mutex::new(report)))
         })
         .transpose()?;

@@ -1,7 +1,8 @@
 use crate::controllers::resources::ExecutionResources;
 use crate::error::QuiltError;
 use crate::operations::finalizers::{
-    atomic_path, file_sink_target, validate_destination, FinalizerResult, OutputArtifact,
+    atomic_path, file_sink_target, temp_sink_target, validate_destination, FinalizerResult,
+    OutputArtifact,
 };
 use polars::prelude::*;
 use std::path::{Path, PathBuf};
@@ -28,7 +29,7 @@ pub fn show_jsonl(
                 error.to_string(),
             )
         })?;
-    sink_jsonl(df, &path, "show JSONL")?;
+    sink_jsonl(df, &path, "show JSONL", Some(&output_resources))?;
     Ok(FinalizerResult::Artifact(Arc::new(OutputArtifact::new(
         path,
         output_resources,
@@ -48,14 +49,22 @@ pub fn dump_jsonl(df: &LazyFrame, path: &str) -> Result<FinalizerResult, QuiltEr
     }
     validate_destination(&path, "write dump")?;
     atomic_path(&path, "write dump", |temp| {
-        sink_jsonl(df, temp, "write dump")
+        sink_jsonl(df, temp, "write dump", None)
     })?;
     Ok(FinalizerResult::File(path))
 }
 
-fn sink_jsonl(df: &LazyFrame, path: &Path, operation: &str) -> Result<(), QuiltError> {
+fn sink_jsonl(
+    df: &LazyFrame,
+    path: &Path,
+    operation: &str,
+    resources: Option<&ExecutionResources>,
+) -> Result<(), QuiltError> {
     let frame = checked_jsonl_frame(df, operation)?;
-    let target = file_sink_target(path, operation)?;
+    let target = match resources {
+        Some(resources) => temp_sink_target(path, operation, resources)?,
+        None => file_sink_target(path, operation)?,
+    };
     frame
         .sink(
             SinkDestination::File { target },

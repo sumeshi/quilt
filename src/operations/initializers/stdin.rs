@@ -35,10 +35,10 @@ pub(super) fn spool(format: &str, resources: &ExecutionResources) -> Result<Path
         .reserve_temp_file("qlt-stdin-spool", extension)
         .map_err(|error| QuiltError::operation("spool stdin", error.to_string()))?;
     let destination = reservation.path().to_path_buf();
-    let file = reservation
+    let mut file = reservation
         .file_mut()
         .ok_or_else(|| QuiltError::operation("spool stdin", "spool reservation unavailable"))?;
-    io::copy(&mut io::stdin().lock(), file)
+    io::copy(&mut io::stdin().lock(), &mut file)
         .map_err(|error| QuiltError::operation("read stdin", error.to_string()))?;
     resources
         .retain_temp_file(reservation)

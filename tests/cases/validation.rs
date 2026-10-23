@@ -1,7 +1,9 @@
 use crate::support::*;
+use flate2::{write::GzEncoder, Compression};
 use serde_json::json;
+use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 fn qlt(directory: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_qlt"))
@@ -110,4 +112,63 @@ fn invalid_search_and_static_commands_preflight_before_any_dump() {
     assert!(!result.status.success());
     let error = String::from_utf8_lossy(&result.stderr);
     assert!(error.contains("Invalid grep regex"), "{error}");
+}
+
+#[test]
+fn managed_temp_limit_is_reported_and_failed_spills_are_cleaned_up() {
+    let root = tempfile::tempdir().unwrap();
+    let temp = root.path().join("isolated-temp");
+    std::fs::create_dir(&temp).unwrap();
+    let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
+    gzip.write_all(b"id,message\n1,large-enough-to-spill\n")
+        .unwrap();
+    write(root.path(), "input.csv.gz", gzip.finish().unwrap());
+
+    let gzip_failure = Command::new(env!("CARGO_BIN_EXE_qlt"))
+        .args(["load", "input.csv.gz", "-", "show"])
+        .current_dir(root.path())
+        .env("RUST_LOG", "debug")
+        .env("TMPDIR", &temp)
+        .env("TMP", &temp)
+        .env("TEMP", &temp)
+        .env("QLT_TEMP_LIMIT", "1")
+        .output()
+        .unwrap();
+    assert!(!gzip_failure.status.success());
+    assert!(gzip_failure.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&gzip_failure.stderr).contains("QLT_TEMP_LIMIT (1 bytes)"),
+        "{}",
+        String::from_utf8_lossy(&gzip_failure.stderr)
+    );
+    assert_temp_directory_empty(&temp);
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_qlt"))
+        .args(["load", "--stdin-format", "jsonl", "-", "show"])
+        .current_dir(root.path())
+        .env("RUST_LOG", "debug")
+        .env("TMPDIR", &temp)
+        .env("TMP", &temp)
+        .env("TEMP", &temp)
+        .env("QLT_TEMP_LIMIT", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"{\"id\":1,\"message\":\"large-enough-to-spill\"}\n")
+        .unwrap();
+    let stdin_failure = child.wait_with_output().unwrap();
+    assert!(!stdin_failure.status.success());
+    assert!(stdin_failure.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&stdin_failure.stderr).contains("QLT_TEMP_LIMIT (1 bytes)"),
+        "{}",
+        String::from_utf8_lossy(&stdin_failure.stderr)
+    );
+    assert_temp_directory_empty(&temp);
 }
