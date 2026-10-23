@@ -1,10 +1,32 @@
 use std::fmt;
+use std::path::PathBuf;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidationDiagnostic {
+    pub file: Option<PathBuf>,
+    pub path: String,
+    pub line: Option<usize>,
+    pub column: Option<usize>,
+    pub message: String,
+}
+
+impl ValidationDiagnostic {
+    pub fn new(file: Option<PathBuf>, path: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            file,
+            path: path.into(),
+            line: None,
+            column: None,
+            message: message.into(),
+        }
+    }
+}
 
 /// Errors returned by reusable Quilt operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QuiltError {
     Validation {
-        diagnostics: Vec<String>,
+        diagnostics: Vec<ValidationDiagnostic>,
     },
     Usage {
         message: String,
@@ -50,7 +72,7 @@ impl QuiltError {
             message: message.into(),
         }
     }
-    pub fn validation(diagnostics: Vec<String>) -> Self {
+    pub fn validation(diagnostics: Vec<ValidationDiagnostic>) -> Self {
         Self::Validation { diagnostics }
     }
     pub fn schema(
@@ -141,7 +163,14 @@ impl fmt::Display for QuiltError {
                     if index > 0 {
                         writeln!(f)?;
                     }
-                    write!(f, "{diagnostic}")?;
+                    if let Some(file) = &diagnostic.file {
+                        write!(f, "{}", file.display())?;
+                        if let (Some(line), Some(column)) = (diagnostic.line, diagnostic.column) {
+                            write!(f, ":{line}:{column}")?;
+                        }
+                        write!(f, ": ")?;
+                    }
+                    write!(f, "{}: {}", diagnostic.path, diagnostic.message)?;
                 }
                 Ok(())
             }

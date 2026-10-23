@@ -9,7 +9,7 @@ use super::diagnostics::{
 };
 use super::planner;
 use crate::controllers::command_model::{parse_automation_step, CommandCategory, TypedCommand};
-use crate::error::QuiltError;
+use crate::error::{QuiltError, ValidationDiagnostic};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use yaml_serde::Value;
@@ -25,31 +25,19 @@ pub(super) fn diagnostic(
     file: &Path,
     yaml_path: impl AsRef<str>,
     message: impl Into<String>,
-) -> String {
-    format!(
-        "{}: {}: {}",
-        file.display(),
-        yaml_path.as_ref(),
-        message.into()
-    )
+) -> ValidationDiagnostic {
+    ValidationDiagnostic::new(Some(file.to_path_buf()), yaml_path.as_ref(), message)
 }
 
-pub(super) fn with_source_locations(error: QuiltError, raw: &str, file: &Path) -> QuiltError {
+pub(super) fn with_source_locations(error: QuiltError, raw: &str, _file: &Path) -> QuiltError {
     let QuiltError::Validation { diagnostics } = error else {
         return error;
     };
-    let prefix = format!("{}: ", file.display());
     QuiltError::validation(
         diagnostics
             .into_iter()
-            .map(|diagnostic| {
-                let Some((path, message)) = diagnostic
-                    .strip_prefix(&prefix)
-                    .and_then(|s| s.split_once(": "))
-                else {
-                    return diagnostic;
-                };
-                let mut parent = path;
+            .map(|mut diagnostic| {
+                let mut parent = diagnostic.path.as_str();
                 let position = loop {
                     if let Some(position) = super::location::source_location(raw, parent) {
                         break Some(position);
@@ -59,12 +47,11 @@ pub(super) fn with_source_locations(error: QuiltError, raw: &str, file: &Path) -
                         None => break None,
                     }
                 };
-                match position {
-                    Some((line, column)) => {
-                        format!("{}:{line}:{column}: {path}: {message}", file.display())
-                    }
-                    None => diagnostic,
+                if let Some((line, column)) = position {
+                    diagnostic.line = Some(line);
+                    diagnostic.column = Some(column);
                 }
+                diagnostic
             })
             .collect(),
     )

@@ -95,12 +95,24 @@ impl DiagnosticPolicy {
         }
         text
     }
+    fn sanitize_diagnostic_file(
+        &self,
+        file: Option<std::path::PathBuf>,
+    ) -> Option<std::path::PathBuf> {
+        file.map(|file| {
+            std::path::PathBuf::from(self.sanitize(file.to_string_lossy().into_owned()))
+        })
+    }
     pub(super) fn sanitize_sensitive_error(&self, error: QuiltError) -> QuiltError {
         match error {
             QuiltError::Validation { diagnostics } => QuiltError::Validation {
                 diagnostics: diagnostics
                     .into_iter()
-                    .map(|_| "<redacted diagnostic>".to_string())
+                    .map(|mut d| {
+                        d.file = self.sanitize_diagnostic_file(d.file);
+                        d.message = "<redacted diagnostic>".into();
+                        d
+                    })
                     .collect(),
             },
             QuiltError::Usage { .. } => QuiltError::Usage {
@@ -160,7 +172,15 @@ impl DiagnosticPolicy {
     pub(super) fn sanitize_error(&self, error: QuiltError) -> QuiltError {
         match error {
             QuiltError::Validation { diagnostics } => QuiltError::Validation {
-                diagnostics: diagnostics.into_iter().map(|v| self.sanitize(v)).collect(),
+                diagnostics: diagnostics
+                    .into_iter()
+                    .map(|mut d| {
+                        d.file = self.sanitize_diagnostic_file(d.file);
+                        d.path = self.sanitize(d.path);
+                        d.message = self.sanitize(d.message);
+                        d
+                    })
+                    .collect(),
             },
             QuiltError::Usage { message } => QuiltError::Usage {
                 message: self.sanitize(message),
@@ -232,33 +252,20 @@ impl DiagnosticPolicy {
             QuiltError::Validation { diagnostics } => QuiltError::Validation {
                 diagnostics: diagnostics
                     .into_iter()
-                    .map(|d| {
+                    .map(|mut d| {
+                        d.file = self.sanitize_diagnostic_file(d.file);
                         if self
                             .sensitive_locations
                             .iter()
-                            .any(|l| location_matches(&d, l))
+                            .any(|l| location_matches(&d.path, l))
                         {
-                            self.sensitive_locations
-                                .iter()
-                                .filter(|location| location_matches(&d, location))
-                                .find_map(|location| {
-                                    // Match only in the diagnostic path/message region,
-                                    // after the source file prefix. A path can itself
-                                    // contain text that resembles a YAML location.
-                                    let prefix_end = d.find(": ")? + 2;
-                                    d[prefix_end..].find(location).map(|relative_start| {
-                                        let start = prefix_end + relative_start;
-                                        self.sanitize(format!(
-                                            "{}{}: <redacted diagnostic>",
-                                            &d[..start],
-                                            location
-                                        ))
-                                    })
-                                })
-                                .unwrap_or_else(|| "<redacted diagnostic>".into())
+                            d.path = self.sanitize(d.path);
+                            d.message = "<redacted diagnostic>".into();
                         } else {
-                            self.sanitize(d)
+                            d.path = self.sanitize(d.path);
+                            d.message = self.sanitize(d.message);
                         }
+                        d
                     })
                     .collect(),
             },

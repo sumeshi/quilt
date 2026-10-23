@@ -31,13 +31,26 @@ fn sensitive_preflight_diagnostics_redact_messages_without_losing_locations() {
     policy
         .sensitive_locations
         .insert("stages[0].steps[0]".into());
-    let error = crate::QuiltError::validation(vec![
-        "run.yaml:12:4: stages[0].steps[0].head: Invalid bucket interval 'TOPSECRET': x".into(),
-        "run.yaml:13:4: stages[0].steps[0].head: Invalid bucket interval 'x': parser detail".into(),
-    ]);
+    let mut first = crate::error::ValidationDiagnostic::new(
+        Some("run-TOPSECRET.yaml".into()),
+        "stages[0].steps[0].head",
+        "Invalid bucket interval 'TOPSECRET': x",
+    );
+    first.line = Some(12);
+    first.column = Some(4);
+    let mut second = crate::error::ValidationDiagnostic::new(
+        Some("run-TOPSECRET.yaml".into()),
+        "stages[0].steps[0].head",
+        "Invalid bucket interval 'x': parser detail",
+    );
+    second.line = Some(13);
+    second.column = Some(4);
+    let error = crate::QuiltError::validation(vec![first, second]);
     let rendered = policy.sanitize_preflight_error(error).to_string();
-    assert!(rendered.contains("run.yaml:12:4: stages[0].steps[0]: <redacted diagnostic>"));
-    assert!(rendered.contains("run.yaml:13:4: stages[0].steps[0]: <redacted diagnostic>"));
+    assert!(rendered
+        .contains("run-<redacted>.yaml:12:4: stages[0].steps[0].head: <redacted diagnostic>"));
+    assert!(rendered
+        .contains("run-<redacted>.yaml:13:4: stages[0].steps[0].head: <redacted diagnostic>"));
     assert!(!rendered.contains("TOPSECRET"));
     assert!(!rendered.contains("parser detail"));
     assert!(!rendered.contains("Invalid bucket interval"));

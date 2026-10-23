@@ -499,7 +499,7 @@ fn absolute_path(path: &Path) -> Result<PathBuf, QuiltError> {
         .map_err(|error| QuiltError::io("run current directory", None::<String>, error.to_string()))
 }
 
-fn prepare_document(
+pub(super) fn prepare_document(
     raw: &str,
     path: &Path,
     vars: &[String],
@@ -519,13 +519,21 @@ fn prepare_document(
                 {
                     let mut diagnostics = match parameter_error {
                         QuiltError::Validation { diagnostics } => diagnostics,
-                        other => vec![other.to_string()],
+                        other => vec![crate::error::ValidationDiagnostic::new(
+                            Some(path.to_path_buf()),
+                            "parameters",
+                            other.to_string(),
+                        )],
                     };
                     match stage_error {
                         QuiltError::Validation {
                             diagnostics: stage_diagnostics,
                         } => diagnostics.extend(stage_diagnostics),
-                        other => diagnostics.push(other.to_string()),
+                        other => diagnostics.push(crate::error::ValidationDiagnostic::new(
+                            Some(path.to_path_buf()),
+                            "stages",
+                            other.to_string(),
+                        )),
                     }
                     return Err(QuiltError::validation(diagnostics));
                 }
