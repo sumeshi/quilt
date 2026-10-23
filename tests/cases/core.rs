@@ -274,6 +274,50 @@ fn numeric_finalizers_keep_null_and_sample_standard_deviation_semantics() {
         panic!("scalar expected")
     };
     assert!((std.parse::<f64>().unwrap() - (5f64 / 3.).sqrt()).abs() < 1e-12);
+    for values in [
+        Series::new("value".into(), &[1.2345678901234567f64, 1.2345679901234567]),
+        Series::new("value".into(), &[1.2345678f32, 1.2345679]),
+    ] {
+        let floating = DataFrame::new_infer_height(vec![values.into()])
+            .unwrap()
+            .lazy();
+        use chainables::aggregate::{aggregate, AggregateMode, AggregateSpec};
+        for (mode, kind) in [
+            ("sum", AggregateMode::Sum),
+            ("avg", AggregateMode::Avg),
+            ("min", AggregateMode::Min),
+            ("max", AggregateMode::Max),
+            ("median", AggregateMode::Median),
+            ("std", AggregateMode::Std),
+        ] {
+            let finalizers::FinalizerResult::Scalar(actual) =
+                finalizers::calc::calc(&floating, "value", mode).unwrap()
+            else {
+                panic!("expected scalar")
+            };
+            let expected = aggregate(
+                &floating,
+                &[AggregateSpec::new(kind, Some("value".into()), "result")],
+                &[],
+            )
+            .unwrap()
+            .collect()
+            .unwrap();
+            match expected.column("result").unwrap().get(0).unwrap() {
+                AnyValue::Float32(number) => assert_eq!(
+                    actual.parse::<f32>().unwrap().to_bits(),
+                    number.to_bits(),
+                    "{mode}: {actual}"
+                ),
+                AnyValue::Float64(number) => assert_eq!(
+                    actual.parse::<f64>().unwrap().to_bits(),
+                    number.to_bits(),
+                    "{mode}: {actual}"
+                ),
+                other => panic!("unexpected float result: {other:?}"),
+            }
+        }
+    }
     let empty = input.clone().limit(0);
     assert_eq!(
         finalizers::calc::calc(&empty, "value", "sum").unwrap(),

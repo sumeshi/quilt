@@ -9,6 +9,8 @@ pub const MODES: [&str; 6] = ["sum", "avg", "min", "max", "median", "std"];
 fn scalar_text(value: &AnyValue<'_>) -> String {
     match value {
         AnyValue::Null => "null".to_string(),
+        AnyValue::Float32(value) => value.to_string(),
+        AnyValue::Float64(value) => value.to_string(),
         _ => value.to_string(),
     }
 }
@@ -78,15 +80,7 @@ pub fn calc(df: &LazyFrame, column: &str, mode: &str) -> Result<FinalizerResult,
     if count == 0 || (mode_name == "std" && count < 2) {
         return Ok(FinalizerResult::Scalar("null".into()));
     }
-    let output = if mode_name == "std" {
-        value
-            .try_extract::<f64>()
-            .map(|number| number.to_string())
-            .unwrap_or_else(|_| scalar_text(&value))
-    } else {
-        scalar_text(&value)
-    };
-    Ok(FinalizerResult::Scalar(output))
+    Ok(FinalizerResult::Scalar(scalar_text(&value)))
 }
 
 #[cfg(test)]
