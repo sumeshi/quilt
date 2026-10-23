@@ -1,5 +1,6 @@
 pub mod calc;
 mod csv;
+mod display;
 pub mod dump;
 pub mod dumpcache;
 pub mod headers;

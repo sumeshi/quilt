@@ -30,7 +30,7 @@ pub fn stats(df: &LazyFrame) -> Result<FinalizerResult, QuiltError> {
 
         let mut header_cells = vec![Cell::new("Statistic").fg(Color::Green)];
         for name in &column_names {
-            header_cells.push(Cell::new(name).fg(Color::Green));
+            header_cells.push(Cell::new(super::display::escape_controls(name)).fg(Color::Green));
         }
         table.set_header(header_cells);
 
@@ -256,7 +256,7 @@ fn format_string_stat(val: AnyValue) -> String {
 fn build_stat_row(stat_name: &str, values: &[String]) -> Vec<Cell> {
     let mut row = vec![Cell::new(stat_name)];
     for value in values {
-        row.push(Cell::new(value));
+        row.push(Cell::new(super::display::escape_controls(value)));
     }
     row
 }

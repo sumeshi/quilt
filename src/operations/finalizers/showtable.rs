@@ -137,18 +137,7 @@ fn format_anyvalue(val: &AnyValue) -> String {
 
 fn truncate_display(value: &str) -> String {
     let mut escaped = String::new();
-    for character in value.chars() {
-        let token = match character {
-            '\n' => "\\n".to_string(),
-            '\r' => "\\r".to_string(),
-            '\t' => "\\t".to_string(),
-            c if c.is_control()
-                || matches!(c, '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}') =>
-            {
-                c.escape_unicode().to_string()
-            }
-            c => c.to_string(),
-        };
+    for token in super::display::escaped_tokens(value) {
         escaped.push_str(&token);
         if escaped.width() > MAX_DISPLAY_WIDTH {
             while escaped.width() >= MAX_DISPLAY_WIDTH {
