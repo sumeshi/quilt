@@ -106,6 +106,7 @@ impl Pipeline {
                 stdin_format: args.stdin_format.as_deref(),
                 rejects_path: args.rejects.as_deref(),
                 csv_options: Some(&csv),
+                json_strings: &args.json_strings,
             },
             &resources,
         )?;
@@ -128,7 +129,17 @@ impl Pipeline {
                 }
             })
             .transpose()?;
-        Ok(Self::new(frame, resources).with_source_inventory(inventory))
+        if args.cache_input && resources.temp_files_enabled() {
+            let (frame, resources, _) = crate::controllers::materialization::materialize_parquet(
+                frame,
+                &resources,
+                "qlt-input-cache",
+                None,
+            )?;
+            Ok(Self::new(frame, resources).with_source_inventory(inventory))
+        } else {
+            Ok(Self::new(frame, resources).with_source_inventory(inventory))
+        }
     }
     pub fn filter(&mut self, expression: &str) -> Result<&mut Self, QuiltError> {
         self.frame = crate::operations::chainables::filter::filter(&self.frame, expression)?;

@@ -6,6 +6,8 @@ mod cli;
 mod core;
 #[path = "cases/jsonl.rs"]
 mod jsonl;
+#[path = "cases/jsonl_options.rs"]
+mod jsonl_options;
 mod support;
 #[path = "cases/validation.rs"]
 mod validation;

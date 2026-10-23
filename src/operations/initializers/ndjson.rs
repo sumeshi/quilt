@@ -8,6 +8,272 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
+pub fn validate_json_pointers(pointers: &[String]) -> Result<(), QuiltError> {
+    let mut decoded: Vec<Vec<String>> = Vec::new();
+    for pointer in pointers {
+        let parts = pointer_parts(pointer)?;
+        if decoded
+            .iter()
+            .any(|prior| prior.starts_with(&parts) || parts.starts_with(prior))
+        {
+            return Err(QuiltError::usage("--json-string pointers must not overlap"));
+        }
+        decoded.push(parts);
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+enum JsonNode {
+    Null,
+    Bool(bool),
+    Number(String),
+    String(String),
+    Array(Vec<JsonNode>),
+    Object(Vec<(String, JsonNode)>),
+}
+
+struct NodeSeed(usize);
+impl<'de> DeserializeSeed<'de> for NodeSeed {
+    type Value = JsonNode;
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<JsonNode, D::Error> {
+        let raw = <&RawValue>::deserialize(d)?;
+        parse_node_at(raw.get(), self.0).map_err(serde::de::Error::custom)
+    }
+}
+struct NodeMap(usize);
+impl<'de> Visitor<'de> for NodeMap {
+    type Value = JsonNode;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("object")
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<JsonNode, A::Error> {
+        let mut fields = Vec::new();
+        let mut seen = HashSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if !seen.insert(key.clone()) {
+                return Err(serde::de::Error::custom(format!(
+                    "duplicate object key {key:?}"
+                )));
+            }
+            fields.push((key, map.next_value_seed(NodeSeed(self.0 + 1))?));
+        }
+        Ok(JsonNode::Object(fields))
+    }
+}
+struct NodeSeq(usize);
+impl<'de> Visitor<'de> for NodeSeq {
+    type Value = JsonNode;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("array")
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<JsonNode, A::Error> {
+        let mut values = Vec::new();
+        while let Some(v) = seq.next_element_seed(NodeSeed(self.0 + 1))? {
+            values.push(v);
+        }
+        Ok(JsonNode::Array(values))
+    }
+}
+fn parse_node(input: &str) -> Result<JsonNode, String> {
+    parse_node_at(input, 1)
+}
+fn parse_node_at(input: &str, depth: usize) -> Result<JsonNode, String> {
+    let input = input.trim_start_matches([' ', '\t', '\r', '\n']);
+    let token = *input.as_bytes().first().ok_or("empty JSON value")?;
+    if depth >= 128 && (token == b'{' || token == b'[') {
+        return Err("recursion limit exceeded".into());
+    }
+    if token == b'{' {
+        let mut d = serde_json::Deserializer::from_str(input);
+        let n = d
+            .deserialize_map(NodeMap(depth))
+            .map_err(|e| e.to_string())?;
+        d.end().map_err(|e| e.to_string())?;
+        return Ok(n);
+    }
+    if token == b'[' {
+        let mut d = serde_json::Deserializer::from_str(input);
+        let n = d
+            .deserialize_seq(NodeSeq(depth))
+            .map_err(|e| e.to_string())?;
+        d.end().map_err(|e| e.to_string())?;
+        return Ok(n);
+    }
+    if token == b'"' {
+        return serde_json::from_str::<String>(input)
+            .map(JsonNode::String)
+            .map_err(|e| e.to_string());
+    }
+    if token == b't' || token == b'f' {
+        return serde_json::from_str::<bool>(input)
+            .map(JsonNode::Bool)
+            .map_err(|e| e.to_string());
+    }
+    if token == b'n' {
+        serde_json::from_str::<()>(input).map_err(|e| e.to_string())?;
+        return Ok(JsonNode::Null);
+    }
+    let _: Number = serde_json::from_str(input).map_err(|e| e.to_string())?;
+    Ok(JsonNode::Number(input.to_owned()))
+}
+fn node_json(node: &JsonNode) -> String {
+    match node {
+        JsonNode::Null => "null".into(),
+        JsonNode::Bool(v) => v.to_string(),
+        JsonNode::Number(v) => v.clone(),
+        JsonNode::String(v) => serde_json::to_string(v).expect("string serialization cannot fail"),
+        JsonNode::Array(v) => format!(
+            "[{}]",
+            v.iter().map(node_json).collect::<Vec<_>>().join(",")
+        ),
+        JsonNode::Object(v) => format!(
+            "{{{}}}",
+            v.iter()
+                .map(|(k, x)| format!(
+                    "{}:{}",
+                    serde_json::to_string(k).expect("key serialization cannot fail"),
+                    node_json(x)
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+    }
+}
+fn stringify_at(value: &mut JsonNode, parts: &[String]) {
+    if parts.is_empty() {
+        if !matches!(value, JsonNode::Null | JsonNode::String(_)) {
+            *value = JsonNode::String(node_json(value));
+        }
+        return;
+    }
+    match value {
+        JsonNode::Object(fields) => {
+            if let Some((_, child)) = fields.iter_mut().find(|(key, _)| key == &parts[0]) {
+                stringify_at(child, &parts[1..]);
+            }
+        }
+        JsonNode::Array(items) => {
+            let part = &parts[0];
+            let canonical = part == "0"
+                || (!part.is_empty()
+                    && !part.starts_with('0')
+                    && part.bytes().all(|b| b.is_ascii_digit()));
+            if canonical {
+                if let Ok(index) = part.parse::<usize>() {
+                    if let Some(child) = items.get_mut(index) {
+                        stringify_at(child, &parts[1..]);
+                    }
+                }
+            }
+        }
+        _ => (),
+    }
+}
+
+fn pointer_parts(pointer: &str) -> Result<Vec<String>, QuiltError> {
+    if pointer.is_empty() {
+        return Err(QuiltError::usage(
+            "--json-string cannot select the NDJSON record root",
+        ));
+    }
+    let Some(path) = pointer.strip_prefix('/') else {
+        return Err(QuiltError::usage(format!(
+            "invalid JSON pointer '{pointer}': expected leading /"
+        )));
+    };
+    path.split('/')
+        .map(|part| {
+            let mut out = String::new();
+            let mut chars = part.chars();
+            while let Some(c) = chars.next() {
+                if c == '~' {
+                    match chars.next() {
+                        Some('0') => out.push('~'),
+                        Some('1') => out.push('/'),
+                        _ => {
+                            return Err(QuiltError::usage(format!(
+                                "invalid JSON pointer '{pointer}': malformed ~ escape"
+                            )))
+                        }
+                    }
+                } else {
+                    out.push(c);
+                }
+            }
+            Ok(out)
+        })
+        .collect()
+}
+
+pub(super) fn normalize_file(
+    path: &Path,
+    source_path: &Path,
+    pointers: &[String],
+    resources: &crate::controllers::resources::ExecutionResources,
+) -> Result<PathBuf, QuiltError> {
+    if !resources.temp_files_enabled() {
+        return Err(QuiltError::usage(
+            "run --show-plan cannot normalize NDJSON values",
+        ));
+    }
+    let mut input = BufReader::new(File::open(path).map_err(|e| diagnostic(source_path, 0, e))?);
+    let mut spool = resources
+        .reserve_temp_file("qlt-jsonl-normalized", "jsonl")
+        .map_err(|e| diagnostic(source_path, 0, e))?;
+    let dest = spool.path().to_path_buf();
+    let mut out = spool
+        .file_mut()
+        .ok_or_else(|| diagnostic(source_path, 0, "spool unavailable"))?;
+    let decoded = pointers
+        .iter()
+        .map(|p| pointer_parts(p))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut bytes = Vec::new();
+    let mut line = 0;
+    loop {
+        bytes.clear();
+        if input
+            .read_until(b'\n', &mut bytes)
+            .map_err(|e| diagnostic(source_path, line + 1, e))?
+            == 0
+        {
+            break;
+        }
+        line += 1;
+        let raw = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
+        let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
+        if raw.iter().all(u8::is_ascii_whitespace) {
+            out.write_all(&bytes)
+                .map_err(|e| diagnostic(source_path, line, e))?;
+            continue;
+        }
+        let text = std::str::from_utf8(raw).map_err(|e| diagnostic(source_path, line, e))?;
+        let mut value = parse_node(text).map_err(|e| diagnostic(source_path, line, e))?;
+        if !matches!(value, JsonNode::Object(_)) {
+            return Err(diagnostic(
+                source_path,
+                line,
+                "NDJSON records must be objects",
+            ));
+        }
+        for parts in &decoded {
+            stringify_at(&mut value, parts);
+        }
+        let encoded = node_json(&value);
+        infer_record(&encoded).map_err(|e| diagnostic(source_path, line, e))?;
+        out.write_all(encoded.as_bytes())
+            .map_err(|e| diagnostic(source_path, line, e))?;
+        out.write_all(b"\n")
+            .map_err(|e| diagnostic(source_path, line, e))?;
+    }
+    spool.close_file();
+    resources
+        .retain_temp_file(spool)
+        .map_err(|e| diagnostic(source_path, 0, e))?;
+    Ok(dest)
+}
+
 pub(super) fn is_gzip(path: &Path) -> bool {
     let name = path.to_string_lossy().to_ascii_lowercase();
     name.ends_with(".jsonl.gz") || name.ends_with(".ndjson.gz")
@@ -329,6 +595,7 @@ pub(super) fn quarantine(
     sources: &[PathBuf],
     report: &super::rejected::SharedRejectedReport,
     infer_schema_length: Option<usize>,
+    json_strings: &[String],
     resources: &crate::controllers::resources::ExecutionResources,
 ) -> Result<(Vec<PathBuf>, Schema, Vec<bool>, usize), QuiltError> {
     if !resources.temp_files_enabled() {
@@ -342,6 +609,10 @@ pub(super) fn quarantine(
             "input paths and source labels have different lengths",
         ));
     }
+    let decoded = json_strings
+        .iter()
+        .map(|p| pointer_parts(p))
+        .collect::<Result<Vec<_>, _>>()?;
     let mut merged = JsonType::Unknown;
     let mut rejected = 0usize;
     let mut accepted_paths = Vec::with_capacity(input_paths.len());
@@ -380,7 +651,16 @@ pub(super) fn quarantine(
             let result = std::str::from_utf8(raw)
                 .map_err(|error| format!("invalid UTF-8 at byte {}", error.valid_up_to()))
                 .and_then(|text| {
-                    let incoming = infer_record(text).map_err(|error| error.to_string())?;
+                    let encoded = if json_strings.is_empty() {
+                        std::borrow::Cow::Borrowed(text)
+                    } else {
+                        let mut normalized = parse_node(text)?;
+                        for parts in &decoded {
+                            stringify_at(&mut normalized, parts);
+                        }
+                        std::borrow::Cow::Owned(node_json(&normalized))
+                    };
+                    let incoming = infer_record(&encoded).map_err(|error| error.to_string())?;
                     if !matches!(incoming, JsonType::Object(..)) {
                         return Err("NDJSON records must be objects".into());
                     }
@@ -392,16 +672,25 @@ pub(super) fn quarantine(
                     )?;
                     let mut merged_candidate = merged.clone();
                     merged_candidate.merge(incoming, "", false)?;
-                    Ok((local_candidate, merged_candidate))
+                    Ok((local_candidate, merged_candidate, encoded))
                 });
             match result {
-                Ok((local_candidate, merged_candidate)) => {
+                Ok((local_candidate, merged_candidate, encoded)) => {
                     local = local_candidate;
                     merged = merged_candidate;
                     file_records += 1;
                     accepted_file
-                        .write_all(&bytes)
+                        .write_all(if json_strings.is_empty() {
+                            &bytes
+                        } else {
+                            encoded.as_bytes()
+                        })
                         .map_err(|error| diagnostic(source, line_no, error))?;
+                    if !json_strings.is_empty() {
+                        accepted_file
+                            .write_all(b"\n")
+                            .map_err(|error| diagnostic(source, line_no, error))?;
+                    }
                 }
                 Err(reason) => {
                     report
@@ -521,13 +810,14 @@ mod tests {
             &[source.clone(), source_two.clone()],
             &report,
             None,
+            &[],
             &resources,
         )
         .unwrap();
         assert_eq!(rejected, 1);
         assert_eq!(schema.len(), 2);
         let rows = fs::read_to_string(&accepted[0]).unwrap();
-        assert!(rows.contains("\"id\":1"));
+        assert_eq!(rows, "{\"id\":1}\n");
         let rows_two = fs::read_to_string(&accepted[1]).unwrap();
         assert!(rows_two.contains("\"later\":true"));
         assert!(!rows_two.contains("bad"));
@@ -554,6 +844,7 @@ mod tests {
             &[bounded_one, bounded_two.clone()],
             &bounded_report,
             Some(1),
+            &[],
             &resources,
         )
         .unwrap();
@@ -585,6 +876,7 @@ mod tests {
             &[local_one, local_two.clone()],
             &local_report,
             Some(1),
+            &[],
             &resources,
         )
         .unwrap();
@@ -612,5 +904,35 @@ mod tests {
         let resources = crate::controllers::resources::ExecutionResources::new_plan();
         let error = prepare_path(Path::new("input.jsonl.gz"), &resources).unwrap_err();
         assert!(error.to_string().contains("cannot inspect gzipped NDJSON"));
+    }
+
+    #[test]
+    fn json_string_pointers_decode_escapes_and_reject_overlap() {
+        validate_json_pointers(&["/event/id".into(), "/a~1b".into()]).unwrap();
+        assert!(validate_json_pointers(&["/a".into(), "/a/b".into()]).is_err());
+        assert!(validate_json_pointers(&["/bad~2escape".into()]).is_err());
+        assert!(parse_node(r#"{"x":1,"x":2}"#).is_err());
+        let mut value =
+            parse_node(r#"{"event":{"id":18446744073709551616},"list":[1,"x"],"s":"ok","n":null}"#)
+                .unwrap();
+        stringify_at(&mut value, &pointer_parts("/event/id").unwrap());
+        stringify_at(&mut value, &pointer_parts("/list").unwrap());
+        stringify_at(&mut value, &pointer_parts("/s").unwrap());
+        stringify_at(&mut value, &pointer_parts("/n").unwrap());
+        let encoded = node_json(&value);
+        assert!(encoded.contains(r#""id":"18446744073709551616""#));
+        assert!(encoded.contains(r#""list":"[1,\"x\"]""#));
+        assert!(encoded.contains(r#""s":"ok""#));
+        assert!(encoded.contains(r#""n":null"#));
+        let reserved =
+            parse_node(r#"{"id":1,"other":{"$serde_json::private::Number":"123"}}"#).unwrap();
+        let mut reserved = reserved;
+        stringify_at(&mut reserved, &pointer_parts("/id").unwrap());
+        assert!(node_json(&reserved).contains(r#""other":{"$serde_json::private::Number":"123"}"#));
+        let mut array = parse_node(r#"{"array":[10,20]}"#).unwrap();
+        stringify_at(&mut array, &pointer_parts("/array/01").unwrap());
+        assert_eq!(node_json(&array), r#"{"array":[10,20]}"#);
+        stringify_at(&mut array, &pointer_parts("/array/1").unwrap());
+        assert_eq!(node_json(&array), r#"{"array":[10,"20"]}"#);
     }
 }

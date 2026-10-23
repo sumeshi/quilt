@@ -2406,6 +2406,49 @@
                               "title": "YLoad",
                               "type": "object",
                               "properties": {
+                                "json-string": {
+                                  "type": "array",
+                                  "items": {
+                                    "anyOf": [
+                                      {
+                                        "type": "string"
+                                      },
+                                      {
+                                        "type": "object",
+                                        "properties": {
+                                          "$param": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "$param"
+                                        ],
+                                        "additionalProperties": false
+                                      }
+                                    ]
+                                  },
+                                  "default": []
+                                },
+                                "cache-input": {
+                                  "anyOf": [
+                                    {
+                                      "type": "boolean",
+                                      "default": false
+                                    },
+                                    {
+                                      "type": "object",
+                                      "properties": {
+                                        "$param": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "$param"
+                                      ],
+                                      "additionalProperties": false
+                                    }
+                                  ]
+                                },
                                 "all-strings": {
                                   "anyOf": [
                                     {

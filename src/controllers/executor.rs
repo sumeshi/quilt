@@ -405,6 +405,8 @@ mod tests {
 
     fn load_command() -> TypedCommand {
         TypedCommand::Load(LoadArgs {
+            json_strings: Vec::new(),
+            cache_input: false,
             paths: vec![fixture()],
             separator: ',',
             low_memory: false,
@@ -492,6 +494,8 @@ mod tests {
         let mut executor = CommandExecutor::new_with_resources(resources.clone());
         let error = executor
             .execute(&TypedCommand::Load(LoadArgs {
+                json_strings: Vec::new(),
+                cache_input: false,
                 paths: vec![PathBuf::from("/definitely/missing.csv")],
                 separator: ',',
                 low_memory: false,
@@ -616,6 +620,8 @@ mod tests {
         let resources = ExecutionResources::new_in(root.clone());
         let result = CommandExecutor::new_with_resources(resources.clone()).execute(
             &TypedCommand::Load(LoadArgs {
+                json_strings: Vec::new(),
+                cache_input: false,
                 paths: vec![source],
                 separator: ',',
                 low_memory: false,

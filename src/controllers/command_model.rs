@@ -12,6 +12,9 @@ pub use crate::controllers::yaml_adapter::parse_automation_step;
 /// execution and automation preflight enforce the same static contract.
 pub fn validate_command(command: &TypedCommand) -> Result<(), crate::error::QuiltError> {
     match command {
+        TypedCommand::Load(args) => {
+            crate::operations::initializers::ndjson::validate_json_pointers(&args.json_strings)
+        }
         TypedCommand::Grep(args) => {
             crate::operations::chainables::grep::validate(&args.pattern, args.ignore_case)
         }

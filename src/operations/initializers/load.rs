@@ -17,6 +17,7 @@ pub struct LoadOptions<'a> {
     pub stdin_format: Option<&'a str>,
     pub rejects_path: Option<&'a Path>,
     pub csv_options: Option<&'a crate::controllers::csv_input::CsvInputOptions>,
+    pub json_strings: &'a [String],
 }
 
 fn has_glob_pattern(path: &Path) -> bool {
@@ -88,6 +89,7 @@ pub fn load_with_options(
     if source_column.is_some_and(|name| name.trim().is_empty()) {
         return Err(QuiltError::usage("source column name must not be empty"));
     }
+    super::ndjson::validate_json_pointers(options.json_strings)?;
     if let Some(format) = options.stdin_format {
         super::stdin::validate_format(format)?;
         if !paths.is_empty() {
@@ -178,6 +180,11 @@ pub fn load_with_options(
             "CSV schema options cannot be used with NDJSON or parquet inputs",
         ));
     }
+    if !options.json_strings.is_empty() && (has_csv || has_parquet || !has_ndjson) {
+        return Err(QuiltError::usage(
+            "--json-string is supported only for NDJSON inputs",
+        ));
+    }
     if has_parquet {
         if rejects_path.is_some() {
             return Err(QuiltError::usage(
@@ -192,6 +199,7 @@ pub fn load_with_options(
             infer_schema_length,
             source_column,
             rejects_path,
+            options.json_strings,
             resources,
         )
     } else {
@@ -216,6 +224,7 @@ fn load_ndjson_files(
     infer_schema_length: Option<usize>,
     source_column: Option<&str>,
     rejects_path: Option<&Path>,
+    json_strings: &[String],
     resources: &ExecutionResources,
 ) -> Result<LazyFrame, QuiltError> {
     if let Some(report_path) = rejects_path {
@@ -231,6 +240,7 @@ fn load_ndjson_files(
             source_labels,
             &report,
             infer_schema_length,
+            json_strings,
             resources,
         )?;
         if schema.is_empty() {
@@ -301,10 +311,17 @@ fn load_ndjson_files(
             .publish()?;
         return Ok(frame);
     }
-    let paths = original_paths
+    let mut paths = original_paths
         .iter()
         .map(|path| super::ndjson::prepare_path(path, resources))
         .collect::<Result<Vec<_>, _>>()?;
+    if !json_strings.is_empty() {
+        paths = paths
+            .iter()
+            .zip(source_labels)
+            .map(|(p, source)| super::ndjson::normalize_file(p, source, json_strings, resources))
+            .collect::<Result<Vec<_>, _>>()?;
+    }
     let (merged_schema, empty_files) =
         super::ndjson::schema(&paths, source_labels, infer_schema_length)?;
 

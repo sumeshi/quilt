@@ -235,21 +235,13 @@ fn datetime_config(raw: &Raw) -> Result<DateTimeConfig, QuiltError> {
     })
 }
 fn split_values(value: &str) -> Result<Vec<String>, QuiltError> {
-    let values = value
-        .split(',')
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(String::from)
-        .collect::<Vec<_>>();
-    if values.is_empty() {
-        Err(QuiltError::usage(
-            "Error: requires at least one non-empty value",
-        ))
-    } else {
-        Ok(values)
-    }
+    parse_list(value, true)
 }
 pub(crate) fn parse_column_list(input: &str) -> Result<Vec<String>, QuiltError> {
+    parse_list(input, false)
+}
+
+fn parse_list(input: &str, allow_quoted_empty: bool) -> Result<Vec<String>, QuiltError> {
     let mut columns = Vec::new();
     let mut quoted = false;
     let mut start = 0;
@@ -267,6 +259,7 @@ pub(crate) fn parse_column_list(input: &str) -> Result<Vec<String>, QuiltError> 
     }
     columns.push(input[start..].trim().to_string());
     for name in &mut columns {
+        let quoted_empty = name == "\"\"";
         if name.starts_with('"')
             && name.ends_with('"')
             && name.len() >= 2
@@ -274,9 +267,11 @@ pub(crate) fn parse_column_list(input: &str) -> Result<Vec<String>, QuiltError> 
         {
             *name = name[1..name.len() - 1].replace("\"\"", "\"");
         }
-    }
-    if columns.iter().any(String::is_empty) {
-        return Err(QuiltError::usage("Error: column list must not be empty"));
+        if name.is_empty() && !(allow_quoted_empty && quoted_empty) {
+            return Err(QuiltError::usage(
+                "list entries must not be empty; quote an empty membership value",
+            ));
+        }
     }
     Ok(columns)
 }
@@ -324,6 +319,8 @@ fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
             let separator = crate::controllers::csv::separator_byte(&separator)? as char;
             Ok(TypedCommand::Load(LoadArgs {
                 paths: a.iter().map(PathBuf::from).collect(),
+                json_strings: raw.repeated.get("json_string").cloned().unwrap_or_default(),
+                cache_input: flag(&raw, "cache_input"),
                 source_column: val(&raw, "source_column"),
                 all_strings: flag(&raw, "all_strings"),
                 schema: raw

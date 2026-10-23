@@ -71,6 +71,12 @@ fn step(
     }
     match c {
         Load(a) => {
+            if !a.json_strings.is_empty() {
+                s!("json-string", a.json_strings);
+            }
+            if a.cache_input {
+                s!("cache-input", true);
+            }
             // Input paths are supplied by `qlt run recipe.yaml file...` so
             // exported recipes can be replayed against different data.
             s!("separator", a.separator.to_string());
@@ -434,6 +440,8 @@ mod tests {
     fn typed_steps_roundtrip_through_version_two_yaml() {
         let commands = vec![
             TypedCommand::Load(LoadArgs {
+                json_strings: Vec::new(),
+                cache_input: false,
                 paths: vec!["input.csv".into()],
                 separator: ',',
                 low_memory: true,
@@ -549,6 +557,8 @@ mod tests {
         .unwrap();
         let commands = vec![
             TypedCommand::Load(LoadArgs {
+                json_strings: Vec::new(),
+                cache_input: false,
                 paths: vec![input.clone()],
                 separator: ',',
                 low_memory: false,
@@ -571,6 +581,8 @@ mod tests {
         ];
         let baseline_cmds = vec![
             TypedCommand::Load(LoadArgs {
+                json_strings: Vec::new(),
+                cache_input: false,
                 paths: vec![replay_input.clone()],
                 separator: ',',
                 low_memory: false,
@@ -636,6 +648,8 @@ mod tests {
         assert!(workflow_yaml(&[]).is_err());
         assert!(workflow_yaml(&[
             TypedCommand::Load(LoadArgs {
+                json_strings: Vec::new(),
+                cache_input: false,
                 paths: vec![],
                 separator: ',',
                 low_memory: false,

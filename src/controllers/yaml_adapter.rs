@@ -25,35 +25,28 @@ impl YamlStrings {
         }
     }
 }
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum YamlValues {
-    One(yaml_serde::Value),
-    Many(Vec<yaml_serde::Value>),
-}
-impl YamlValues {
-    fn into_vec(self) -> Result<Vec<String>, QuiltError> {
-        let values = match self {
-            Self::One(yaml_serde::Value::Sequence(v)) => v,
-            Self::One(v) => vec![v],
-            Self::Many(v) => v,
-        };
-        values
-            .into_iter()
-            .map(|v| match v {
-                yaml_serde::Value::String(s) => Ok(s),
-                yaml_serde::Value::Number(n) => Ok(n.to_string()),
-                _ => Err(QuiltError::usage(
-                    "Error: values must be strings or numbers",
-                )),
-            })
-            .collect()
-    }
+fn yaml_values(value: yaml_serde::Value) -> Result<Vec<String>, QuiltError> {
+    let values = match value {
+        yaml_serde::Value::Sequence(values) => values,
+        value => vec![value],
+    };
+    values
+        .into_iter()
+        .map(|value| match value {
+            yaml_serde::Value::String(value) => Ok(value),
+            yaml_serde::Value::Number(value) => Ok(value.to_string()),
+            _ => Err(QuiltError::usage("values must be strings or numbers")),
+        })
+        .collect()
 }
 #[derive(Debug, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct YLoad {
+    #[serde(rename = "json-string", default)]
+    json_strings: Vec<String>,
+    #[serde(rename = "cache-input", default)]
+    cache_input: bool,
     #[serde(rename = "all-strings", default)]
     all_strings: bool,
     #[serde(default)]
@@ -233,7 +226,7 @@ struct YExtract {
 struct YIsin {
     column: String,
     #[cfg_attr(test, schemars(schema_with = "yaml_values_schema"))]
-    values: YamlValues,
+    values: yaml_serde::Value,
 }
 #[cfg(test)]
 fn yaml_values_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
@@ -556,6 +549,8 @@ pub fn parse_automation_step(
                 }
             };
             Ok(TypedCommand::Load(LoadArgs {
+                json_strings: a.json_strings,
+                cache_input: a.cache_input,
                 paths: paths.into_iter().map(PathBuf::from).collect(),
                 source_column: a.source_column,
                 all_strings: a.all_strings,
@@ -733,7 +728,7 @@ pub fn parse_automation_step(
             let a: YIsin = yaml_args(value, name)?;
             Ok(TypedCommand::Isin(IsinArgs {
                 column: a.column,
-                values: a.values.into_vec()?,
+                values: yaml_values(a.values)?,
             }))
         }
         OperationId::Contains => {

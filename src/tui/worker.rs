@@ -1067,6 +1067,8 @@ mod tests {
 
     fn load(path: &std::path::Path) -> TypedCommand {
         TypedCommand::Load(LoadArgs {
+            json_strings: Vec::new(),
+            cache_input: false,
             paths: vec![path.to_owned()],
             separator: ',',
             low_memory: false,

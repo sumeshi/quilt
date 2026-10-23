@@ -14,6 +14,8 @@ pub enum Aggregation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadArgs {
     pub paths: Vec<PathBuf>,
+    pub json_strings: Vec<String>,
+    pub cache_input: bool,
     pub separator: char,
     pub low_memory: bool,
     pub no_headers: bool,
@@ -75,6 +77,23 @@ pub(crate) fn parse_metric(
     value: &str,
 ) -> Result<crate::operations::chainables::aggregate::AggregateSpec, crate::QuiltError> {
     use crate::operations::chainables::aggregate::{AggregateMode, AggregateSpec};
+    if value.starts_with('{') {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Metric {
+            mode: String,
+            column: Option<String>,
+            output: String,
+        }
+        let metric: Metric = serde_json::from_str(value).map_err(|error| {
+            crate::QuiltError::usage(format!("invalid aggregate metric: {error}"))
+        })?;
+        return Ok(AggregateSpec::new(
+            parse_aggregate_mode(&metric.mode)?,
+            metric.column,
+            metric.output,
+        ));
+    }
     let (mode, rest) = value.split_once(':').ok_or_else(|| {
         crate::QuiltError::usage("metric must be count:output or mode:column:output")
     })?;

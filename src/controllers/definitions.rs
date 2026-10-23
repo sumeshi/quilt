@@ -180,6 +180,18 @@ const LOAD: &[OptionSpec] = &[
         takes_value: true,
         repeated: false,
     },
+    OptionSpec {
+        name: "json-string",
+        short: None,
+        takes_value: true,
+        repeated: true,
+    },
+    OptionSpec {
+        name: "cache-input",
+        short: None,
+        takes_value: false,
+        repeated: false,
+    },
 ];
 const OUTPUT: &[OptionSpec] = &[OptionSpec {
     name: "output",
