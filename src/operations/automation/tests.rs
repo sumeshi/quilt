@@ -430,6 +430,56 @@ fn run_fanout_materializes_one_probed_source_evaluation() {
 }
 
 #[test]
+fn yaml_cache_input_survives_chained_steps_and_inherited_stages() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let input = dir.join("input.csv");
+    let config = dir.join("run.yaml");
+    std::fs::write(&input, "id,label\n9007199254740993,x\n").unwrap();
+    std::fs::write(&config, format!(
+        "version: 2\nstages:\n  - name: source\n    steps: [{{load: {{paths: [{}], cache-input: true}}}}, {{select: {{columns: [id, label]}}}}, {{sort: {{columns: [id]}}}}]\n  - name: inherited\n    from: source\n    steps: [{{load: {{}}}}, {{show: {{}}}}]\n",
+        input.display()
+    )).unwrap();
+    let cache_directory = dir.join("cache[1]");
+    std::fs::create_dir(&cache_directory).unwrap();
+    let resources = ExecutionResources::new_in(cache_directory);
+    let probe = resources.clone();
+    let mut controller = PipelineState::empty(resources);
+    let results = run(
+        &mut controller,
+        config.to_str().unwrap(),
+        None,
+        None,
+        &[],
+        false,
+        Some("inherited"),
+    )
+    .unwrap();
+    assert!(probe.temp_usage().0 > 0);
+    let rows = controller
+        .loaded("test")
+        .unwrap()
+        .frame()
+        .clone()
+        .collect()
+        .unwrap();
+    assert_eq!(rows.height(), 1);
+    assert_eq!(
+        rows.column("id").unwrap().i64().unwrap().get(0),
+        Some(9007199254740993)
+    );
+    drop(controller);
+    let mut bytes = Vec::new();
+    crate::operations::finalizers::write_stdout(&results[0], &mut bytes).unwrap();
+    assert_eq!(
+        String::from_utf8(bytes).unwrap(),
+        "id,label\n9007199254740993,x\n"
+    );
+    drop(results);
+    assert_eq!(probe.temp_usage().0, 0);
+}
+
+#[test]
 fn auto_materialization_preserves_empty_nested_struct_fanout_results() {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();

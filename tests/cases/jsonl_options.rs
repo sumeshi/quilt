@@ -164,6 +164,19 @@ fn cache_input_keeps_a_typed_snapshot_reusable_after_source_changes() {
         "snapshot.jsonl",
         r#"{"id":9007199254740993,"nested":{"name":"before"}}"#,
     );
+    let cli = text(&["load", source.to_str().unwrap(), "--cache-input"]);
+    let recipe = document(
+        root.path(),
+        "cached.yaml",
+        json!({
+            "version": 2,
+            "stages": [
+                {"name":"cached","steps":[{"load":{"paths":[source],"cache-input":true}}]},
+                {"name":"output","from":"cached","steps":[{"select":{"columns":["id","nested"]}},{"show":{}}]}
+            ]
+        }),
+    );
+    assert_eq!(rows(&text(&["run", recipe.to_str().unwrap()])), rows(&cli));
     let args = parse_typed_commands(&[
         "load".into(),
         source.to_string_lossy().into_owned(),

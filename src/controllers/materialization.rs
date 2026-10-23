@@ -115,15 +115,20 @@ pub(crate) fn materialize_parquet(
     let size = batched
         .finish()
         .map_err(|e| QuiltError::operation("materialize frame", e.to_string()))?;
-    let scan =
-        LazyFrame::scan_parquet(PlRefPath::try_from_path(&path)?, ScanArgsParquet::default())
-            .map_err(|e| {
-                QuiltError::io(
-                    "scan materialization",
-                    Some(path.display().to_string()),
-                    e.to_string(),
-                )
-            })?;
+    let scan = LazyFrame::scan_parquet(
+        PlRefPath::try_from_path(&path)?,
+        ScanArgsParquet {
+            glob: false,
+            ..Default::default()
+        },
+    )
+    .map_err(|e| {
+        QuiltError::io(
+            "scan materialization",
+            Some(path.display().to_string()),
+            e.to_string(),
+        )
+    })?;
     Ok((scan, owned, size))
 }
 
@@ -168,7 +173,9 @@ mod tests {
         );
 
         let dir = tempfile::tempdir().unwrap();
-        let resources = ExecutionResources::new_in(dir.path().to_path_buf());
+        let literal_directory = dir.path().join("cache[1]");
+        std::fs::create_dir(&literal_directory).unwrap();
+        let resources = ExecutionResources::new_in(literal_directory);
         let (replayed, _resources, _) =
             materialize_parquet(frame.lazy(), &resources, "qlt-test-aligned-batches", None)
                 .unwrap();

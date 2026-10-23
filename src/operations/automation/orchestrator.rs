@@ -14,7 +14,6 @@ use crate::controllers::log::LogController;
 use crate::controllers::pipeline::{Pipeline, PipelineState};
 use crate::controllers::resources::ExecutionResources;
 use crate::error::QuiltError;
-use polars::prelude::LazyFrame;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
@@ -203,10 +202,9 @@ pub(super) fn run_impl(
                         .map(Pipeline::resources)
                         .collect(),
                 ),
-                source_inventory: current_stage_input.and_then(Pipeline::source_inventory),
             };
 
-            let mut stage_output_df = match stage_config {
+            let mut stage_output_pipeline = match stage_config {
                 StageConfig::Process(process) => {
                     let mut overridden_steps;
                     let steps = if let Some(path) = cli_output_path.as_ref() {
@@ -224,7 +222,7 @@ pub(super) fn run_impl(
                     executor::execute_process(executor::ProcessRequest {
                         stage_name: &stage_name,
                         steps,
-                        input: current_stage_input.map(|pipeline| pipeline.frame().clone()),
+                        input: current_stage_input.cloned(),
                         context: &mut process_step_context,
                         materialize: materialization.should_materialize(&stage_name),
                         materialize_policy: materialization::stage_materialize_policy(stage_config),
@@ -232,7 +230,9 @@ pub(super) fn run_impl(
                 }
                 StageConfig::Join(join) => {
                     executor::execute_join_stage(&stage_name, join, &stage_results)
-                        .map(Some)
+                        .map(|frame| {
+                            Some(Pipeline::new(frame, process_step_context.resources.clone()))
+                        })
                         .map_err(|error| {
                             diagnostics.sanitize_step_error(
                                 QuiltError::automation(&stage_name, None, error),
@@ -242,7 +242,9 @@ pub(super) fn run_impl(
                 }
                 StageConfig::Concat(concat) => {
                     executor::execute_concat_stage(&stage_name, concat, &stage_results)
-                        .map(Some)
+                        .map(|frame| {
+                            Some(Pipeline::new(frame, process_step_context.resources.clone()))
+                        })
                         .map_err(|error| {
                             diagnostics.sanitize_step_error(
                                 QuiltError::automation(&stage_name, None, error),
@@ -323,41 +325,34 @@ pub(super) fn run_impl(
                             skipped_stages.insert(target.clone());
                         }
                     }
-                    Some(input_df)
+                    Some(
+                        Pipeline::new(input_df, process_step_context.resources.clone())
+                            .with_source_inventory(
+                                current_stage_input.and_then(Pipeline::source_inventory),
+                            ),
+                    )
                 }
             };
 
-            let source_inventory = if matches!(
-                stage_config,
-                StageConfig::Process(_) | StageConfig::Branch(_)
-            ) {
-                process_step_context.source_inventory.take()
-            } else {
-                None
-            };
-            let mut stage_resources = process_step_context.resources.clone();
             drop(process_step_context);
 
             if materialization.should_materialize(&stage_name)
                 && !matches!(stage_config, StageConfig::Process(_))
             {
-                if let Some(frame) = stage_output_df.take() {
-                    let (frame, resources) = materialization::materialize_frame(
-                        frame,
-                        &stage_resources,
-                        materialization::stage_materialize_policy(stage_config),
-                    )
+                stage_output_pipeline = stage_output_pipeline
+                    .map(|pipeline| {
+                        materialization::materialize_pipeline(
+                            pipeline,
+                            materialization::stage_materialize_policy(stage_config),
+                        )
+                    })
+                    .transpose()
                     .map_err(|error| {
                         diagnostics
                             .sanitize_step_error(error, diagnostics.frame_is_sensitive(&stage_name))
                     })?;
-                    stage_output_df = Some(frame);
-                    stage_resources = resources;
-                }
             }
-            if let Some(frame) = stage_output_df {
-                let pipeline =
-                    Pipeline::new(frame, stage_resources).with_source_inventory(source_inventory);
+            if let Some(pipeline) = stage_output_pipeline {
                 if !matches!(stage_config, StageConfig::Branch(_))
                     && output_stage.as_ref().is_none_or(|name| name == &stage_name)
                 {
@@ -675,27 +670,26 @@ pub(super) fn run_show_plan_impl(
             results: &mut Vec::new(),
             diagnostics: &diagnostics,
             resources: ExecutionResources::new_plan(),
-            source_inventory: None,
         };
-        let frame = build_plan_stage(
+        let pipeline = build_plan_stage(
             stage_name,
             &plan.stages,
             &mut HashMap::new(),
             &mut HashSet::new(),
             &mut context,
         )?;
-        let text =
-            match crate::operations::finalizers::showquery::showquery(&frame).map_err(|error| {
+        let text = match crate::operations::finalizers::showquery::showquery(pipeline.frame())
+            .map_err(|error| {
                 diagnostics.sanitize_step_error(error, diagnostics.frame_is_sensitive(stage_name))
             })? {
-                crate::operations::finalizers::FinalizerResult::PlanTable(text) => text,
-                _ => {
-                    return Err(QuiltError::operation(
-                        "run show-plan",
-                        "expected a query plan",
-                    ))
-                }
-            };
+            crate::operations::finalizers::FinalizerResult::PlanTable(text) => text,
+            _ => {
+                return Err(QuiltError::operation(
+                    "run show-plan",
+                    "expected a query plan",
+                ))
+            }
+        };
         let decisions = materialization::materialization_decisions_with_output(
             &plan.order,
             &plan.stages,
@@ -736,12 +730,12 @@ pub(super) fn run_show_plan_impl(
 pub(super) fn build_plan_stage(
     name: &str,
     stages: &HashMap<String, StageConfig<PlannedStep>>,
-    cache: &mut HashMap<String, LazyFrame>,
+    cache: &mut HashMap<String, Pipeline>,
     visiting: &mut HashSet<String>,
     context: &mut executor::ExecuteStepContext<'_>,
-) -> Result<LazyFrame, QuiltError> {
-    if let Some(frame) = cache.get(name) {
-        return Ok(frame.clone());
+) -> Result<Pipeline, QuiltError> {
+    if let Some(pipeline) = cache.get(name) {
+        return Ok(pipeline.clone());
     }
     if !visiting.insert(name.to_string()) {
         return Err(QuiltError::automation(
@@ -758,13 +752,10 @@ pub(super) fn build_plan_stage(
     for dependency in &dependencies {
         inputs.insert(
             dependency.clone(),
-            Pipeline::new(
-                build_plan_stage(dependency, stages, cache, visiting, context)?,
-                context.resources.clone(),
-            ),
+            build_plan_stage(dependency, stages, cache, visiting, context)?,
         );
     }
-    let frame = match stage {
+    let pipeline = match stage {
         StageConfig::Process(process) => {
             let filtered = process
                 .steps
@@ -778,7 +769,7 @@ pub(super) fn build_plan_stage(
                 input: dependencies
                     .first()
                     .and_then(|dependency| inputs.get(dependency))
-                    .map(|pipeline| pipeline.frame().clone()),
+                    .cloned(),
                 context,
                 materialize: false,
                 materialize_policy: materialization::stage_materialize_policy(stage),
@@ -787,21 +778,24 @@ pub(super) fn build_plan_stage(
                 QuiltError::usage(format!("run stage '{name}' did not produce a frame"))
             })?
         }
-        StageConfig::Join(join) => {
+        StageConfig::Join(join) => Pipeline::new(
             executor::execute_join_stage(name, join, &inputs).map_err(|error| {
                 context.diagnostics.sanitize_step_error(
                     QuiltError::automation(name, None, error),
                     context.diagnostics.frame_is_sensitive(name),
                 )
-            })?
-        }
-        StageConfig::Concat(concat) => executor::execute_concat_stage(name, concat, &inputs)
-            .map_err(|error| {
+            })?,
+            context.resources.clone(),
+        ),
+        StageConfig::Concat(concat) => Pipeline::new(
+            executor::execute_concat_stage(name, concat, &inputs).map_err(|error| {
                 context.diagnostics.sanitize_step_error(
                     QuiltError::automation(name, None, error),
                     context.diagnostics.frame_is_sensitive(name),
                 )
             })?,
+            context.resources.clone(),
+        ),
         StageConfig::Branch(_) => {
             return Err(QuiltError::usage(format!(
                 "run --show-plan cannot inspect dynamic branch stage '{name}'"
@@ -809,6 +803,6 @@ pub(super) fn build_plan_stage(
         }
     };
     visiting.remove(name);
-    cache.insert(name.to_string(), frame.clone());
-    Ok(frame)
+    cache.insert(name.to_string(), pipeline.clone());
+    Ok(pipeline)
 }

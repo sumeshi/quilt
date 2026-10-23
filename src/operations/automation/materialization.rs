@@ -22,6 +22,18 @@ pub(super) struct MaterializationPlan {
     decisions: HashMap<String, MaterializationDecision>,
 }
 
+pub(super) fn materialize_pipeline(
+    pipeline: crate::controllers::pipeline::Pipeline,
+    policy: MaterializePolicy,
+) -> Result<crate::controllers::pipeline::Pipeline, QuiltError> {
+    let (frame, resources) =
+        materialize_frame(pipeline.frame().clone(), &pipeline.resources(), policy)?;
+    Ok(
+        crate::controllers::pipeline::Pipeline::new(frame, resources)
+            .with_source_inventory(pipeline.source_inventory()),
+    )
+}
+
 pub(super) fn materialize_frame(
     mut frame: LazyFrame,
     resources: &ExecutionResources,

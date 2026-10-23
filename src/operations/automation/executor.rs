@@ -20,13 +20,12 @@ pub(super) struct ExecuteStepContext<'a> {
     pub(super) results: &'a mut Vec<crate::operations::finalizers::FinalizerResult>,
     pub(super) diagnostics: &'a DiagnosticPolicy,
     pub(super) resources: ExecutionResources,
-    pub(super) source_inventory: Option<crate::controllers::pipeline::SourceInventory>,
 }
 
 pub(super) struct ProcessRequest<'steps, 'a, 'context> {
     pub stage_name: &'steps str,
     pub steps: &'steps [PlannedStep],
-    pub input: Option<LazyFrame>,
+    pub input: Option<Pipeline>,
     pub context: &'context mut ExecuteStepContext<'a>,
     pub materialize: bool,
     pub materialize_policy: MaterializePolicy,
@@ -61,22 +60,23 @@ fn is_stdout_result(result: &crate::operations::finalizers::FinalizerResult) -> 
 
 pub(super) fn execute_process(
     request: ProcessRequest<'_, '_, '_>,
-) -> Result<Option<LazyFrame>, QuiltError> {
+) -> Result<Option<Pipeline>, QuiltError> {
     let ProcessRequest {
         stage_name,
         steps,
-        input: mut stage_output_df,
+        input,
         context: step_context,
         materialize,
         materialize_policy,
     } = request;
+    let mut stage_output_pipeline = input;
     let mut materialization_attempted = false;
 
     for step in steps {
         let step_index = step.index;
         let command_name = step.command.name();
         LogController::debug(&format!("Applying step {step_index}: {command_name}"));
-        if step.load_paths_omitted && stage_output_df.is_some() {
+        if step.load_paths_omitted && stage_output_pipeline.is_some() {
             LogController::debug("Skipping load because stage data already exists");
             continue;
         }
@@ -107,24 +107,19 @@ pub(super) fn execute_process(
             && !materialization_attempted
             && matches!(command.category(), CommandCategory::Finalizer)
         {
-            if let Some(frame) = stage_output_df.take() {
-                let (frame, resources) = materialization::materialize_frame(
-                    frame,
-                    &step_context.resources,
-                    materialize_policy,
-                )
-                .map_err(|error| {
-                    step_context
-                        .diagnostics
-                        .sanitize_step_error(error, sensitive_step)
-                })?;
-                stage_output_df = Some(frame);
-                step_context.resources = resources;
+            if let Some(pipeline) = stage_output_pipeline.take() {
+                let pipeline = materialization::materialize_pipeline(pipeline, materialize_policy)
+                    .map_err(|error| {
+                        step_context
+                            .diagnostics
+                            .sanitize_step_error(error, sensitive_step)
+                    })?;
+                stage_output_pipeline = Some(pipeline);
                 materialization_attempted = true;
             }
         }
 
-        if !matches!(command, TypedCommand::Load(_)) && stage_output_df.is_none() {
+        if !matches!(command, TypedCommand::Load(_)) && stage_output_pipeline.is_none() {
             return Err(step_context.diagnostics.sanitize_step_error(
                 step_error(
                     stage_name,
@@ -138,11 +133,8 @@ pub(super) fn execute_process(
             ));
         }
 
-        let mut executor = if let Some(frame) = stage_output_df.take() {
-            CommandExecutor::from_pipeline(
-                crate::controllers::pipeline::Pipeline::new(frame, step_context.resources.clone())
-                    .with_source_inventory(step_context.source_inventory.clone()),
-            )
+        let mut executor = if let Some(pipeline) = stage_output_pipeline.take() {
+            CommandExecutor::from_pipeline(pipeline)
         } else {
             CommandExecutor::new_with_resources(step_context.resources.clone())
         };
@@ -180,30 +172,22 @@ pub(super) fn execute_process(
             return Err(QuiltError::usage("run produces multiple stdout results; select one stage with --stage NAME or use file outputs"));
         }
         step_context.results.extend(results);
-        stage_output_df = executor.into_pipeline().map(|pipeline| {
-            step_context.source_inventory = pipeline.source_inventory();
-            pipeline.into_parts().0
-        });
+        stage_output_pipeline = executor.into_pipeline();
     }
 
     if materialize && !materialization_attempted {
-        if let Some(frame) = stage_output_df.take() {
-            let (frame, resources) = materialization::materialize_frame(
-                frame,
-                &step_context.resources,
-                materialize_policy,
-            )
-            .map_err(|error| {
-                step_context.diagnostics.sanitize_step_error(
-                    error,
-                    step_context.diagnostics.frame_is_sensitive(stage_name),
-                )
-            })?;
-            stage_output_df = Some(frame);
-            step_context.resources = resources;
+        if let Some(pipeline) = stage_output_pipeline.take() {
+            let pipeline = materialization::materialize_pipeline(pipeline, materialize_policy)
+                .map_err(|error| {
+                    step_context.diagnostics.sanitize_step_error(
+                        error,
+                        step_context.diagnostics.frame_is_sensitive(stage_name),
+                    )
+                })?;
+            stage_output_pipeline = Some(pipeline);
         }
     }
-    Ok(stage_output_df)
+    Ok(stage_output_pipeline)
 }
 
 pub(super) fn execute_concat_stage(
@@ -428,12 +412,14 @@ mod tests {
                 results: &mut results,
                 diagnostics: &diagnostics,
                 resources: resources.clone(),
-                source_inventory: None,
             };
             let output = execute_process(ProcessRequest {
                 stage_name: "input",
                 steps: &steps,
-                input: Some(df!("value" => &[1i64, 2]).unwrap().lazy()),
+                input: Some(crate::controllers::pipeline::Pipeline::new(
+                    df!("value" => &[1i64, 2]).unwrap().lazy(),
+                    resources.clone(),
+                )),
                 context: &mut context,
                 materialize: false,
                 materialize_policy: crate::operations::automation::model::MaterializePolicy::Never,
