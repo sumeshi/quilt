@@ -9,6 +9,10 @@ pub enum QuiltError {
     Usage {
         message: String,
     },
+    Config {
+        path: String,
+        message: String,
+    },
     Schema {
         operation: String,
         column: Option<String>,
@@ -142,6 +146,7 @@ impl fmt::Display for QuiltError {
                 Ok(())
             }
             Self::Usage { message } => write!(f, "{message}"),
+            Self::Config { path, message } => write!(f, "configuration {path}: {message}"),
             Self::Schema {
                 operation,
                 column,

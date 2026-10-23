@@ -2,6 +2,115 @@ use crate::support::*;
 use serde_json::json;
 
 #[test]
+fn version_two_diagnostics_identify_fields_before_opening_inputs() {
+    let root = tempfile::tempdir().unwrap();
+    let old = document(
+        root.path(),
+        "old.yaml",
+        json!({
+            "version": 1,
+            "parameters": {"input": {"type": "path", "required": true}},
+            "stages": [{"name": "input", "steps": [{"load": {"paths": ["missing.csv"]}}]}]
+        }),
+    );
+    for options in [vec![], vec!["--check"], vec!["--show-plan", "input"]] {
+        let mut args = vec!["run", old.to_str().unwrap()];
+        args.extend(options);
+        let error = failure(&args);
+        assert!(
+            error.contains("version 1 is no longer supported"),
+            "{error}"
+        );
+        assert!(error.contains("version: 2"), "{error}");
+        assert!(!error.contains("required parameter"), "{error}");
+        assert!(!error.contains("Error reading"), "{error}");
+    }
+    let config = write(root.path(), "bad.yaml", "version: 2\nstages:\n  - name: input\n    steps:\n      - load: {paths: [missing.csv]}\n      - bucket:\n          column: when\n          interval: 1d\n          strict: wrong\n");
+    let error = failure(&["run", config.to_str().unwrap(), "--check"]);
+    assert!(
+        error.contains("stages[0].steps[1].bucket.strict"),
+        "{error}"
+    );
+    assert!(
+        error.contains(&format!("{}:9:19:", config.display())),
+        "{error}"
+    );
+    assert!(!error.contains("bucket.interval"), "{error}");
+    for stage in [
+        json!({"name": "input", "stepz": []}),
+        json!({"name": "input", "steps": [], "join": null}),
+    ] {
+        let config = document(
+            root.path(),
+            "bad-stage.yaml",
+            json!({"version": 2, "stages": [stage]}),
+        );
+        let error = failure(&["run", config.to_str().unwrap(), "--check"]);
+        assert!(error.contains("stages[0]"), "{error}");
+        assert!(!error.contains("stepz.stepz"), "{error}");
+        assert!(!error.contains("untagged enum"), "{error}");
+    }
+}
+
+#[test]
+fn version_two_literal_columns_and_structured_metrics_keep_exact_values() {
+    let root = tempfile::tempdir().unwrap();
+    let input = write(root.path(), "events.jsonl", "{\"a,b\":2,\"host\":\"a\",\"amount:raw\":9007199254740993}\n{\"a,b\":1,\"host\":\"a\",\"amount:raw\":1}\n{\"a,b\":2,\"host\":\"b\",\"amount:raw\":18446744073709551615}\n");
+    let config = document(
+        root.path(),
+        "literal.yaml",
+        json!({"version": 2, "stages": [{
+            "name": "result", "steps": [
+                {"load": {}}, {"select": {"columns": "a,b"}},
+                {"sort": {"columns": "a,b"}}, {"count": {"columns": "a,b"}}, {"show": {}}
+            ]
+        }]}),
+    );
+    let output = rows(&text(&[
+        "run",
+        config.to_str().unwrap(),
+        input.to_str().unwrap(),
+    ]));
+    assert_eq!(output.len(), 2);
+    assert_eq!(output[0]["a,b"], "2");
+    assert_eq!(output[0]["count"], "2");
+    let config = document(
+        root.path(),
+        "metrics.yaml",
+        json!({"version": 2, "stages": [{
+            "name": "result", "steps": [
+                {"load": {}},
+                {"aggregate": {"by": "host", "metrics": [
+                    {"mode": "sum", "column": "amount:raw", "output": "total:raw"},
+                    {"mode": "count", "column": "a,b", "output": "present"}
+                ]}}, {"show": {"format": "jsonl"}}
+            ]
+        }]}),
+    );
+    let output = text(&["run", config.to_str().unwrap(), input.to_str().unwrap()]);
+    let values = output
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(values[0]["total:raw"], json!(9007199254740994u64));
+    assert_eq!(values[1]["total:raw"], json!(u64::MAX));
+    assert_eq!(values[0]["present"], json!(2));
+    let side_effect = root.path().join("must-not-exist.csv");
+    let invalid = document(
+        root.path(),
+        "bad-metrics.yaml",
+        json!({"version": 2, "stages": [
+            {"name": "earlier", "steps": [{"load": {}}, {"dump": {"output": side_effect}}]},
+            {"name": "invalid", "from": "earlier", "steps": [{"aggregate": {"by": "host", "metrics": [{"mode": "count", "output": "host"}]}}]}
+        ]}),
+    );
+    assert!(
+        failure(&["run", invalid.to_str().unwrap(), input.to_str().unwrap()]).contains("conflicts")
+    );
+    assert!(!side_effect.exists());
+}
+
+#[test]
 fn cross_join_preserves_columns_that_resemble_internal_working_names() {
     let root = tempfile::tempdir().unwrap();
     let key = "__qlt_run_cross_join_key";
@@ -14,7 +123,7 @@ fn cross_join_preserves_columns_that_resemble_internal_working_names() {
     let config = document(
         root.path(),
         "cross.yaml",
-        json!({"version":1,"stages":[
+        json!({"version":2,"stages":[
             {"name":"left","steps":[{"load":{"paths":[left]}}]},
             {"name":"right","steps":[{"load":{"paths":[right]}}]},
             {"name":"joined","join":{"inputs":["left","right"],"how":"cross"}},
@@ -47,7 +156,7 @@ fn typed_steps_preserve_repeated_filters_inherited_inputs_and_dump_options() {
         "input.csv",
         "value,kind\nalpha beta,one\nalpha,two\nbeta,three\n",
     );
-    let mut workflow = json!({"version":1,"stages":[
+    let mut workflow = json!({"version":2,"stages":[
         {"name":"input","steps":[{"load":{}},{"grep":{"pattern":"alpha"}},{"grep":{"pattern":"beta"}}]},
         {"name":"output","from":"input","steps":[{"load":{}},{"dump":{"output":"yaml.csv","separator":";"}}]}
     ]});
@@ -82,7 +191,7 @@ fn dag_forward_references_join_and_fanout_concat_keep_values_and_order() {
     let config = document(
         root.path(),
         "graph.yaml",
-        json!({"version":1,"stages":[
+        json!({"version":2,"stages":[
             {"name":"output","from":"combined","steps":[{"show":{}}]},
             {"name":"combined","concat":{"inputs":["first","second"],"how":"vertical"}},
             {"name":"first","from":"joined","steps":[{"select":{"columns":["*","label"]}}]},
@@ -110,7 +219,7 @@ fn concat_schema_mismatch_reaches_existing_inputs_and_fails_cleanly() {
     let config = document(
         root.path(),
         "mismatch.yaml",
-        json!({"version":1,"stages":[
+        json!({"version":2,"stages":[
             {"name":"a","steps":[{"load":{"paths":[a]}}]},
             {"name":"b","steps":[{"load":{"paths":[b]}}]},
             {"name":"combined","concat":{"inputs":["a","b"],"how":"vertical"}},
@@ -158,7 +267,7 @@ fn typed_parameters_and_relative_paths_execute_the_documented_recipe() {
     let config = document(
         root.path(),
         "relative.yaml",
-        json!({"version":1,"parameters":{"input":{"type":"path","default":"events.csv"},"limit":{"type":"int","default":1}},"stages":[{"name":"input","steps":[{"load":{"paths":[{"$param":"input"}]}},{"head":{"number":{"$param":"limit"}}},{"show":{}}]}]}),
+        json!({"version":2,"parameters":{"input":{"type":"path","default":"events.csv"},"limit":{"type":"int","default":1}},"stages":[{"name":"input","steps":[{"load":{"paths":[{"$param":"input"}]}},{"head":{"number":{"$param":"limit"}}},{"show":{}}]}]}),
     );
     assert_eq!(rows(&text(&["run", config.to_str().unwrap()])).len(), 1);
     assert_eq!(
@@ -183,7 +292,7 @@ fn output_conflicts_are_preflight_errors_and_later_failures_report_completed_fil
     let config = document(
         root.path(),
         "outputs.yaml",
-        json!({"version":1,"stages":[{"name":"events","steps":[
+        json!({"version":2,"stages":[{"name":"events","steps":[
             {"load":{"paths":["events.csv"]}}, {"head":{"number":1}}, {"headers":{"plain":true}}, {"show":{}}
         ]}]}),
     );
@@ -192,7 +301,7 @@ fn output_conflicts_are_preflight_errors_and_later_failures_report_completed_fil
     let config = document(
         root.path(),
         "failure.yaml",
-        json!({"version":1,"stages":[{"name":"events","steps":[
+        json!({"version":2,"stages":[{"name":"events","steps":[
             {"load":{"paths":["events.csv"]}},{"dump":{"output":"completed.csv"}},{"dump":{"output":"existing.csv"}}
         ]}]}),
     );
@@ -210,7 +319,7 @@ fn output_conflicts_are_preflight_errors_and_later_failures_report_completed_fil
     let config = document(
         root.path(),
         "static-error.yaml",
-        json!({"version":1,"stages":[
+        json!({"version":2,"stages":[
             {"name":"earlier","steps":[
                 {"load":{"paths":["events.csv"]}},
                 {"dump":{"output":"before-static-error.csv"}}
@@ -238,7 +347,7 @@ fn nested_yaml_and_cli_share_literal_column_and_filter_contracts() {
     let config = document(
         root.path(),
         "nested.yaml",
-        json!({"version":1,"stages":[{"name":"events","steps":[
+        json!({"version":2,"stages":[{"name":"events","steps":[
             {"load":{"paths":[source]}},{"flatten":{}},{"contains":{"column":"event.deep.user.name","pattern":"日本語"}},
             {"select":{"columns":["event.deep.user.name","a,b","xmlns:auto-ns3","items"]}},{"show":{}}
         ]}]}),

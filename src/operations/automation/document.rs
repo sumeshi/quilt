@@ -34,6 +34,61 @@ pub(super) fn diagnostic(
     )
 }
 
+pub(super) fn with_source_locations(error: QuiltError, raw: &str, file: &Path) -> QuiltError {
+    let QuiltError::Validation { diagnostics } = error else {
+        return error;
+    };
+    let prefix = format!("{}: ", file.display());
+    QuiltError::validation(
+        diagnostics
+            .into_iter()
+            .map(|diagnostic| {
+                let Some((path, message)) = diagnostic
+                    .strip_prefix(&prefix)
+                    .and_then(|s| s.split_once(": "))
+                else {
+                    return diagnostic;
+                };
+                let mut parent = path;
+                let position = loop {
+                    if let Some(position) = super::location::source_location(raw, parent) {
+                        break Some(position);
+                    }
+                    match parent.rfind(['.', '[']) {
+                        Some(end) => parent = &parent[..end],
+                        None => break None,
+                    }
+                };
+                match position {
+                    Some((line, column)) => {
+                        format!("{}:{line}:{column}: {path}: {message}", file.display())
+                    }
+                    None => diagnostic,
+                }
+            })
+            .collect(),
+    )
+}
+
+fn serde_field_path(path: &str, message: &str) -> String {
+    let path = path.trim_start_matches('.');
+    for prefix in ["unknown field `", "missing field `"] {
+        if let Some(rest) = message.strip_prefix(prefix) {
+            if let Some((field, _)) = rest.split_once('`') {
+                if path == field || path.ends_with(&format!(".{field}")) {
+                    return path.to_owned();
+                }
+                return if path.is_empty() {
+                    field.to_owned()
+                } else {
+                    format!("{path}.{field}")
+                };
+            }
+        }
+    }
+    path.to_owned()
+}
+
 fn parse_step(step: &Value, index: usize) -> Result<(&str, &Value), QuiltError> {
     let mapping = step.as_mapping().ok_or_else(|| {
         QuiltError::usage(format!(
@@ -92,32 +147,19 @@ pub(super) fn step_field_path(
     stage_path: &str,
     index: usize,
     command: &str,
-    args: &Value,
-    message: &str,
+    error: &QuiltError,
 ) -> String {
     let base = format!("{stage_path}.steps[{index}].{command}");
-    if let Some((marker, start)) = ["unknown field '", "Unknown key '"]
-        .iter()
-        .find_map(|marker| message.find(marker).map(|start| (*marker, start)))
-    {
-        let rest = &message[start + marker.len()..];
-        if let Some(end) = rest.find('\'') {
-            return format!("{base}.{}", &rest[..end]);
-        }
-    }
-    if message.contains("invalid type")
-        || message.contains("expected")
-        || message.contains("requires a valid")
-    {
-        if let Some(mapping) = args.as_mapping() {
-            for key in ["number", "interval", "separator", "type"] {
-                if mapping.contains_key(Value::String(key.to_string())) {
-                    return format!("{base}.{key}");
-                }
+    match error {
+        QuiltError::Config { path, .. } if !path.is_empty() && path != "." && path != command => {
+            if path.starts_with('[') {
+                format!("{base}{path}")
+            } else {
+                format!("{base}.{path}")
             }
         }
+        _ => base,
     }
-    base
 }
 
 pub(super) fn resolve_parameterized_value(
@@ -280,17 +322,17 @@ pub(super) fn preflight(
                                 load_paths_omitted,
                             });
                         }
-                        Err(error) => diagnostics.push(diagnostic(
-                            config_path,
-                            step_field_path(
-                                &stage_path,
-                                step_index,
-                                command,
-                                args,
-                                &error.to_string(),
-                            ),
-                            error.to_string(),
-                        )),
+                        Err(error) => {
+                            let message = match &error {
+                                QuiltError::Config { message, .. } => message.clone(),
+                                _ => error.to_string(),
+                            };
+                            diagnostics.push(diagnostic(
+                                config_path,
+                                step_field_path(&stage_path, step_index, command, &error),
+                                message,
+                            ));
+                        }
                     }
                 }
                 stages.push(StageConfig::Process(ProcessStage {
@@ -466,6 +508,18 @@ pub(super) fn prepare(input: DocumentInput<'_>) -> Result<PreparedRunDocument, Q
     let mut root: Value = yaml_serde::from_str(raw).map_err(|e| {
         QuiltError::automation("run", None, format!("Error parsing YAML config: {e}"))
     })?;
+    let version = root.get("version").and_then(Value::as_u64);
+    if version != Some(2) {
+        return Err(QuiltError::validation(vec![diagnostic(
+            config_path,
+            "version",
+            if version == Some(1) {
+                "run document version 1 is no longer supported; migrate to version: 2, use arrays for multiple columns, and replace aggregate metric strings with mappings containing mode, column, and output"
+            } else {
+                "run documents require version: 2"
+            },
+        )]));
+    }
     let declarations: std::collections::BTreeMap<String, ParameterDeclaration> = root
         .get("parameters")
         .and_then(|value| yaml_serde::from_value(value.clone()).ok())
@@ -492,7 +546,10 @@ pub(super) fn prepare(input: DocumentInput<'_>) -> Result<PreparedRunDocument, Q
                 continue;
             };
             for key in mapping.keys().filter_map(Value::as_str) {
-                if !matches!(key, "type" | "required" | "default" | "secret") {
+                if !matches!(
+                    key,
+                    "type" | "required" | "default" | "secret" | "description"
+                ) {
                     diagnostics.push(diagnostic(
                         config_path,
                         format!("parameters.{name}.{key}"),
@@ -711,12 +768,10 @@ pub(super) fn prepare(input: DocumentInput<'_>) -> Result<PreparedRunDocument, Q
             }
         }
     }
-    let document: RunDocument = yaml_serde::from_value(root).map_err(|e| {
-        let error = QuiltError::automation(
-            "run",
-            None,
-            format!("Error parsing run document {}: {e}", config_path.display()),
-        );
+    let document: RunDocument = serde_path_to_error::deserialize(root).map_err(|e| {
+        let message = e.inner().to_string();
+        let path = serde_field_path(&e.path().to_string(), &message);
+        let error = QuiltError::validation(vec![diagnostic(config_path, path, message)]);
         diagnostics.sanitize_step_error(error, !diagnostics.sensitive_locations.is_empty())
     })?;
     for stage_index in diagnostics.sensitive_stage_indices.iter().copied() {
@@ -733,34 +788,19 @@ pub(super) fn prepare(input: DocumentInput<'_>) -> Result<PreparedRunDocument, Q
     })
 }
 
-pub(super) fn schema_version(document: &RunDocument) -> Result<(), QuiltError> {
-    if document.version == 1 {
-        Ok(())
-    } else {
-        Err(QuiltError::automation(
-            "run",
-            None,
-            format!(
-                "Unsupported run document version {} (expected 1)",
-                document.version
-            ),
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{prepare, schema_version, DocumentInput};
+    use super::{prepare, DocumentInput};
     use std::path::Path;
 
     #[test]
     fn document_boundary_validates_version_without_execution() {
         let prepared = prepare(DocumentInput {
-            raw: "version: 1\nstages: []",
+            raw: "version: 2\nstages: []",
             path: Path::new("run.yaml"),
             overrides: &[],
         })
         .unwrap();
-        schema_version(&prepared.document).unwrap();
+        assert_eq!(prepared.document.version, 2);
     }
 }

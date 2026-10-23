@@ -6,9 +6,12 @@ use crate::operations::datetime::{
     DateTimeConfig, NonexistentPolicy,
 };
 use serde::Deserialize;
+#[cfg(test)]
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(untagged)]
 enum YamlStrings {
     One(String),
@@ -48,6 +51,7 @@ impl YamlValues {
     }
 }
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct YLoad {
     #[serde(rename = "all-strings", default)]
@@ -71,17 +75,35 @@ struct YLoad {
     infer_schema_length: Option<YInferSchemaLength>,
 }
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(untagged)]
 enum YInferSchemaLength {
     Number(usize),
     Text(String),
 }
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct YSelect {
     columns: YamlStrings,
 }
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+struct YamlAggregateMetric {
+    mode: String,
+    column: Option<String>,
+    output: String,
+}
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+struct YAggregate {
+    metrics: Vec<YamlAggregateMetric>,
+    by: Option<YamlStrings>,
+}
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct YSort {
     columns: YamlStrings,
@@ -89,9 +111,64 @@ struct YSort {
     desc: bool,
 }
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct EmptyYamlArgs {}
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+struct YFilter {
+    expression: String,
+}
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+struct YDerive {
+    output: String,
+    expression: String,
+}
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+struct YArrayContains {
+    column: String,
+    value: String,
+}
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+struct YArrayGet {
+    column: String,
+    index: i64,
+    output: Option<String>,
+}
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+struct YExplode {
+    columns: YamlStrings,
+}
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+struct YCount {
+    columns: Option<YamlStrings>,
+}
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+struct YTimeInfo {
+    column: String,
+    by: Option<YamlStrings>,
+}
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+struct YParseSize {
+    column: String,
+}
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct YCast {
     column: String,
@@ -107,6 +184,7 @@ struct YCast {
     nonexistent: Option<String>,
 }
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct YBucket {
     column: String,
@@ -122,6 +200,7 @@ struct YBucket {
     nonexistent: Option<String>,
 }
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct YDate {
     strict: Option<bool>,
@@ -134,6 +213,7 @@ struct YDate {
     nonexistent: Option<String>,
 }
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct YColumnOutput {
     by: Option<YamlStrings>,
@@ -141,18 +221,31 @@ struct YColumnOutput {
     output: Option<String>,
 }
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct YExtract {
     column: String,
     pattern: String,
 }
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct YIsin {
     column: String,
+    #[cfg_attr(test, schemars(schema_with = "yaml_values_schema"))]
     values: YamlValues,
 }
+#[cfg(test)]
+fn yaml_values_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "anyOf": [
+            {"type": ["string", "number"]},
+            {"type": "array", "items": {"type": ["string", "number"]}}
+        ]
+    })
+}
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct YContains {
     column: String,
@@ -161,6 +254,7 @@ struct YContains {
     ignore_case: bool,
 }
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct YSed {
     pattern: String,
@@ -170,6 +264,7 @@ struct YSed {
     ignore_case: bool,
 }
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct YGrep {
     pattern: String,
@@ -180,11 +275,13 @@ struct YGrep {
     columns: Option<YamlStrings>,
 }
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct YNumber {
     number: Option<usize>,
 }
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct YTz {
     column: String,
@@ -204,12 +301,14 @@ struct YTz {
     nonexistent: Option<String>,
 }
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct YRename {
     old: String,
     new: String,
 }
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct YTimeSlice {
     column: String,
@@ -225,17 +324,20 @@ struct YTimeSlice {
     nonexistent: Option<String>,
 }
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct YShow {
     format: Option<String>,
 }
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct YHeaders {
     #[serde(default)]
     plain: bool,
 }
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct YDump {
     format: Option<String>,
@@ -243,11 +345,13 @@ struct YDump {
     separator: Option<String>,
 }
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct YDumpCache {
     output: Option<String>,
 }
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct YPartition {
     column: String,
@@ -255,6 +359,7 @@ struct YPartition {
     output_dir: Option<String>,
 }
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct YCalc {
     column: String,
@@ -272,6 +377,66 @@ struct YCalc {
     std: bool,
 }
 
+/// Schema lookup follows the canonical command registry and uses the exact
+/// DTOs consumed by the YAML parser, so editor support stays aligned with
+/// runtime argument validation.
+#[cfg(test)]
+pub(crate) fn command_argument_schemas() -> BTreeMap<String, serde_json::Value> {
+    use crate::controllers::definitions::{registry, OperationId};
+
+    let mut schemas = BTreeMap::new();
+    for command in registry() {
+        let Some(operation) = OperationId::parse(command.name) else {
+            continue;
+        };
+        let schema = match operation {
+            OperationId::Load => schema_for_json::<YLoad>(),
+            OperationId::Select => schema_for_json::<YSelect>(),
+            OperationId::Filter => schema_for_json::<YFilter>(),
+            OperationId::Derive => schema_for_json::<YDerive>(),
+            OperationId::Aggregate => schema_for_json::<YAggregate>(),
+            OperationId::ArrayContains => schema_for_json::<YArrayContains>(),
+            OperationId::ArrayGet => schema_for_json::<YArrayGet>(),
+            OperationId::Explode => schema_for_json::<YExplode>(),
+            OperationId::Cast => schema_for_json::<YCast>(),
+            OperationId::Bucket => schema_for_json::<YBucket>(),
+            OperationId::Delta => schema_for_json::<YColumnOutput>(),
+            OperationId::Extract => schema_for_json::<YExtract>(),
+            OperationId::Flatten
+            | OperationId::Uniq
+            | OperationId::Stats
+            | OperationId::ShowTable
+            | OperationId::ShowQuery => schema_for_json::<EmptyYamlArgs>(),
+            OperationId::ParseSize => schema_for_json::<YParseSize>(),
+            OperationId::Isin => schema_for_json::<YIsin>(),
+            OperationId::Contains => schema_for_json::<YContains>(),
+            OperationId::Sed => schema_for_json::<YSed>(),
+            OperationId::Grep => schema_for_json::<YGrep>(),
+            OperationId::Head | OperationId::Tail => schema_for_json::<YNumber>(),
+            OperationId::Sort => schema_for_json::<YSort>(),
+            OperationId::Count => schema_for_json::<YCount>(),
+            OperationId::TimeInfo => schema_for_json::<YTimeInfo>(),
+            OperationId::ChangeTz => schema_for_json::<YTz>(),
+            OperationId::RenameCol => schema_for_json::<YRename>(),
+            OperationId::TimeSlice => schema_for_json::<YTimeSlice>(),
+            OperationId::Show => schema_for_json::<YShow>(),
+            OperationId::Headers => schema_for_json::<YHeaders>(),
+            OperationId::Dump => schema_for_json::<YDump>(),
+            OperationId::DumpCache => schema_for_json::<YDumpCache>(),
+            OperationId::Partition => schema_for_json::<YPartition>(),
+            OperationId::Calc => schema_for_json::<YCalc>(),
+            OperationId::Run => continue,
+        };
+        schemas.insert(command.name.to_string(), schema);
+    }
+    schemas
+}
+
+#[cfg(test)]
+fn schema_for_json<T: schemars::JsonSchema>() -> serde_json::Value {
+    serde_json::to_value(schemars::schema_for!(T)).expect("schema serializes to JSON")
+}
+
 fn yaml_args<T: for<'de> Deserialize<'de>>(
     value: &yaml_serde::Value,
     name: &str,
@@ -281,15 +446,28 @@ fn yaml_args<T: for<'de> Deserialize<'de>>(
     } else {
         value.clone()
     };
-    yaml_serde::from_value(value).map_err(|e| {
+    let deserializer = serde::de::IntoDeserializer::into_deserializer(value);
+    serde_path_to_error::deserialize(deserializer).map_err(|e| {
+        let path = e.path().to_string();
         // Keep numeric chainable diagnostics identical across CLI and YAML
         // adapters.  The typed YAML DTO otherwise exposes serde's Rust type
         // name (`expected usize`), which is an implementation detail and
         // differs from the public CLI contract.
-        if matches!(name, "head" | "tail") && e.to_string().contains("expected usize") {
-            return QuiltError::usage(format!("Error: {name} requires a valid number"));
+        let message = if matches!(name, "head" | "tail")
+            && e.inner().to_string().contains("expected usize")
+        {
+            format!("Error: {name} requires a valid number")
+        } else {
+            format!("Error: invalid arguments for '{name}': {}", e.inner())
+        };
+        QuiltError::Config {
+            path: if path.is_empty() {
+                name.to_owned()
+            } else {
+                path
+            },
+            message,
         }
-        QuiltError::usage(format!("Error: invalid arguments for '{name}': {e}"))
     })
 }
 
@@ -401,69 +579,53 @@ pub fn parse_automation_step(
             }))
         }
         OperationId::Filter => {
-            #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct X {
-                expression: String,
-            }
-            let a: X = yaml_args(value, name)?;
+            let a: YFilter = yaml_args(value, name)?;
             Ok(TypedCommand::Filter(FilterArgs {
                 expression: a.expression,
             }))
         }
         OperationId::Derive => {
-            #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct X {
-                output: String,
-                expression: String,
-            }
-            let a: X = yaml_args(value, name)?;
+            let a: YDerive = yaml_args(value, name)?;
             Ok(TypedCommand::Derive(DeriveArgs {
                 output: a.output,
                 expression: a.expression,
             }))
         }
         OperationId::Aggregate => {
-            #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct X {
-                metrics: YamlStrings,
-                by: Option<YamlStrings>,
-            }
-            let a: X = yaml_args(value, name)?;
+            let a: YAggregate = yaml_args(value, name)?;
+            let metrics = a
+                .metrics
+                .into_iter()
+                .enumerate()
+                .map(|(index, metric)| {
+                    let mode =
+                        parse_aggregate_mode(&metric.mode).map_err(|error| QuiltError::Config {
+                            path: format!("metrics[{index}].mode"),
+                            message: error.to_string(),
+                        })?;
+                    Ok(
+                        crate::operations::chainables::aggregate::AggregateSpec::new(
+                            mode,
+                            metric.column,
+                            metric.output,
+                        ),
+                    )
+                })
+                .collect::<Result<Vec<_>, QuiltError>>()?;
             Ok(TypedCommand::Aggregate(AggregateArgs {
-                metrics: a
-                    .metrics
-                    .into_vec()
-                    .iter()
-                    .map(|s| parse_metric(s))
-                    .collect::<Result<_, _>>()?,
+                metrics,
                 by: a.by.map(YamlStrings::into_vec).unwrap_or_default(),
             }))
         }
         OperationId::ArrayContains => {
-            #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct X {
-                column: String,
-                value: String,
-            }
-            let a: X = yaml_args(value, name)?;
+            let a: YArrayContains = yaml_args(value, name)?;
             Ok(TypedCommand::ArrayContains(ArrayContainsArgs {
                 column: a.column,
                 value: a.value,
             }))
         }
         OperationId::ArrayGet => {
-            #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct X {
-                column: String,
-                index: i64,
-                output: Option<String>,
-            }
-            let a: X = yaml_args(value, name)?;
+            let a: YArrayGet = yaml_args(value, name)?;
             Ok(TypedCommand::ArrayGet(ArrayGetArgs {
                 output: a.output.unwrap_or_else(|| format!("{}_item", a.column)),
                 column: a.column,
@@ -471,12 +633,7 @@ pub fn parse_automation_step(
             }))
         }
         OperationId::Explode => {
-            #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct X {
-                columns: YamlStrings,
-            }
-            let a: X = yaml_args(value, name)?;
+            let a: YExplode = yaml_args(value, name)?;
             Ok(TypedCommand::Explode(ExplodeArgs {
                 columns: a.columns.into_vec(),
             }))
@@ -484,12 +641,7 @@ pub fn parse_automation_step(
         OperationId::Select => {
             let a: YSelect = yaml_args(value, name)?;
             Ok(TypedCommand::Select(SelectArgs {
-                columns: match a.columns {
-                    YamlStrings::One(value) => {
-                        crate::controllers::cli_adapter::parse_column_list(&value)?
-                    }
-                    YamlStrings::Many(values) => values,
-                },
+                columns: a.columns.into_vec(),
             }))
         }
         OperationId::Sort => {
@@ -500,36 +652,16 @@ pub fn parse_automation_step(
             }))
         }
         OperationId::Count => {
-            #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct X {
-                columns: Option<YamlStrings>,
-            }
-            let a: X = yaml_args(value, name)?;
+            let a: YCount = yaml_args(value, name)?;
             Ok(TypedCommand::Count(CountArgs {
                 columns: a.columns.map(YamlStrings::into_vec).unwrap_or_default(),
             }))
         }
         OperationId::TimeInfo => {
-            #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct X {
-                column: String,
-                by: Option<YamlStrings>,
-            }
-            let a: X = yaml_args(value, name)?;
+            let a: YTimeInfo = yaml_args(value, name)?;
             Ok(TypedCommand::TimeInfo(TimeInfoArgs {
                 column: a.column,
-                by: a
-                    .by
-                    .map(|value| match value {
-                        YamlStrings::One(value) => {
-                            crate::controllers::cli_adapter::parse_column_list(&value)
-                        }
-                        YamlStrings::Many(values) => Ok(values),
-                    })
-                    .transpose()?
-                    .unwrap_or_default(),
+                by: a.by.map(YamlStrings::into_vec).unwrap_or_default(),
             }))
         }
         OperationId::Cast => {
@@ -599,12 +731,7 @@ pub fn parse_automation_step(
             Ok(TypedCommand::ShowQuery(UnitArgs))
         }
         OperationId::ParseSize => {
-            #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct X {
-                column: String,
-            }
-            let a: X = yaml_args(value, name)?;
+            let a: YParseSize = yaml_args(value, name)?;
             Ok(TypedCommand::ParseSize(ParseSizeArgs { column: a.column }))
         }
         OperationId::Isin => {
@@ -804,7 +931,55 @@ mod tests {
     }
 
     #[test]
+    fn yaml_v2_columns_and_aggregate_metrics_are_structured() {
+        assert_eq!(
+            parse_automation_step("select", &yaml("columns: 'a,b'")).unwrap(),
+            TypedCommand::Select(SelectArgs {
+                columns: vec!["a,b".into()]
+            })
+        );
+        assert_eq!(
+            parse_automation_step("select", &yaml("columns: [a, b]")).unwrap(),
+            TypedCommand::Select(SelectArgs {
+                columns: vec!["a".into(), "b".into()]
+            })
+        );
+        let aggregate = parse_automation_step(
+            "aggregate",
+            &yaml("metrics: [{mode: sum, column: amount, output: total}, {mode: count, output: rows}]"),
+        )
+        .unwrap();
+        assert_eq!(
+            aggregate,
+            TypedCommand::Aggregate(AggregateArgs {
+                metrics: vec![
+                    crate::operations::chainables::aggregate::AggregateSpec::new(
+                        crate::operations::chainables::aggregate::AggregateMode::Sum,
+                        Some("amount".into()),
+                        "total",
+                    ),
+                    crate::operations::chainables::aggregate::AggregateSpec::new(
+                        crate::operations::chainables::aggregate::AggregateMode::Count,
+                        None,
+                        "rows",
+                    ),
+                ],
+                by: vec![],
+            })
+        );
+        assert!(parse_automation_step("aggregate", &yaml("metrics: [sum:amount:total]")).is_err());
+    }
+
+    #[test]
     fn timeinfo_by_preserves_literal_yaml_names_and_matches_cli_selection() {
+        let scalar = parse_automation_step("timeinfo", &yaml("column: when\nby: 'a,b'")).unwrap();
+        assert_eq!(
+            scalar,
+            TypedCommand::TimeInfo(TimeInfoArgs {
+                column: "when".into(),
+                by: vec!["a,b".into()],
+            })
+        );
         let from_yaml = parse_automation_step(
             "timeinfo",
             &yaml("column: when\nby: [\"a,b\", xmlns:auto-ns3]"),

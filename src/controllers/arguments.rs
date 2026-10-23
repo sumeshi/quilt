@@ -78,24 +78,7 @@ pub(crate) fn parse_metric(
     let (mode, rest) = value.split_once(':').ok_or_else(|| {
         crate::QuiltError::usage("metric must be count:output or mode:column:output")
     })?;
-    let mode = match mode {
-        "count" => AggregateMode::Count,
-        "sum" => AggregateMode::Sum,
-        "avg" => AggregateMode::Avg,
-        "min" => AggregateMode::Min,
-        "max" => AggregateMode::Max,
-        "median" => AggregateMode::Median,
-        "std" => AggregateMode::Std,
-        "nunique" => AggregateMode::Nunique,
-        s if s.starts_with('p') => AggregateMode::Percentile(
-            s[1..]
-                .parse::<u8>()
-                .ok()
-                .filter(|p| *p <= 100)
-                .ok_or_else(|| crate::QuiltError::usage("percentile must be p0 through p100"))?,
-        ),
-        _ => return Err(crate::QuiltError::usage("unknown aggregate mode")),
-    };
+    let mode = parse_aggregate_mode(mode)?;
     let (column, output) = match rest.rsplit_once(':') {
         Some((column, output)) if !column.is_empty() => (Some(column.to_string()), output),
         None if mode == AggregateMode::Count => (None, rest),
@@ -111,6 +94,30 @@ pub(crate) fn parse_metric(
         ));
     }
     Ok(AggregateSpec::new(mode, column, output))
+}
+
+pub(crate) fn parse_aggregate_mode(
+    value: &str,
+) -> Result<crate::operations::chainables::aggregate::AggregateMode, crate::QuiltError> {
+    use crate::operations::chainables::aggregate::AggregateMode;
+    match value {
+        "count" => Ok(AggregateMode::Count),
+        "sum" => Ok(AggregateMode::Sum),
+        "avg" => Ok(AggregateMode::Avg),
+        "min" => Ok(AggregateMode::Min),
+        "max" => Ok(AggregateMode::Max),
+        "median" => Ok(AggregateMode::Median),
+        "std" => Ok(AggregateMode::Std),
+        "nunique" => Ok(AggregateMode::Nunique),
+        s if s.starts_with('p') => Ok(AggregateMode::Percentile(
+            s[1..]
+                .parse::<u8>()
+                .ok()
+                .filter(|p| *p <= 100)
+                .ok_or_else(|| crate::QuiltError::usage("percentile must be p0 through p100"))?,
+        )),
+        _ => Err(crate::QuiltError::usage("unknown aggregate mode")),
+    }
 }
 
 pub(crate) fn parse_column_type(value: &str) -> Result<(String, String), crate::QuiltError> {

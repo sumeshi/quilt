@@ -1,22 +1,15 @@
-//! Export typed CLI commands as version-1 automation steps.
+//! Export typed CLI commands as reusable version-2 automation steps.
 use super::arguments::*;
 use super::definitions::{CommandCategory, TypedCommand};
 use crate::{operations::chainables::aggregate::AggregateMode, QuiltError};
 use serde_json::{json, Map, Value as J};
-use std::path::Path;
 
-fn absolute(p: &Path) -> Result<String, QuiltError> {
-    let value = if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(|e| QuiltError::usage(format!("could not resolve workflow path: {e}")))?
-            .join(p)
-    };
-    value
-        .to_str()
-        .map(str::to_owned)
-        .ok_or_else(|| QuiltError::usage("workflow paths must be valid UTF-8"))
+fn path_parameter(parameters: &mut Map<String, J>, name: &str, description: &str) -> J {
+    parameters.insert(
+        name.into(),
+        json!({"type":"path", "required":true, "description":description}),
+    );
+    json!({"$param":name})
 }
 fn jstrings(xs: &[String]) -> J {
     json!(xs)
@@ -63,7 +56,12 @@ fn datetime(m: &mut Map<String, J>, d: &crate::operations::datetime::DateTimeCon
         );
     }
 }
-fn step(c: &TypedCommand) -> Result<(&'static str, J), QuiltError> {
+fn step(
+    c: &TypedCommand,
+    parameters: &mut Map<String, J>,
+    output_index: &mut usize,
+    partition_index: &mut usize,
+) -> Result<(&'static str, J), QuiltError> {
     use TypedCommand::*;
     let mut m = Map::new();
     macro_rules! s {
@@ -73,13 +71,8 @@ fn step(c: &TypedCommand) -> Result<(&'static str, J), QuiltError> {
     }
     match c {
         Load(a) => {
-            s!(
-                "paths",
-                a.paths
-                    .iter()
-                    .map(|p| absolute(p))
-                    .collect::<Result<Vec<_>, _>>()?
-            );
+            // Input paths are supplied by `qlt run recipe.yaml file...` so
+            // exported recipes can be replayed against different data.
             s!("separator", a.separator.to_string());
             if a.low_memory {
                 s!("low-memory", true)
@@ -110,8 +103,11 @@ fn step(c: &TypedCommand) -> Result<(&'static str, J), QuiltError> {
                 );
             }
             put_opt(&mut m, "stdin-format", &a.stdin_format);
-            if let Some(p) = &a.rejects {
-                s!("rejects", absolute(p)?);
+            if a.rejects.is_some() {
+                m.insert(
+                    "rejects".into(),
+                    path_parameter(parameters, "rejects", "Path for rejected input rows"),
+                );
             }
         }
         Select(a) => {
@@ -123,7 +119,7 @@ fn step(c: &TypedCommand) -> Result<(&'static str, J), QuiltError> {
             s!("expression", a.expression)
         }
         Aggregate(a) => {
-            let metrics: Vec<String> = a
+            let metrics: Vec<J> = a
                 .metrics
                 .iter()
                 .map(|x| {
@@ -138,22 +134,15 @@ fn step(c: &TypedCommand) -> Result<(&'static str, J), QuiltError> {
                         AggregateMode::Nunique => "nunique".into(),
                         AggregateMode::Percentile(p) => format!("p{p}"),
                     };
-                    format!(
-                        "{}:{}",
-                        mode,
-                        x.column
-                            .as_deref()
-                            .map(|c| format!("{c}:"))
-                            .unwrap_or_default()
-                            + &x.output
-                    )
+                    let mut item = Map::new();
+                    item.insert("mode".into(), json!(mode));
+                    if let Some(column) = &x.column {
+                        item.insert("column".into(), json!(column));
+                    }
+                    item.insert("output".into(), json!(x.output));
+                    J::Object(item)
                 })
                 .collect();
-            if a.metrics.iter().any(|metric| metric.output.contains(':')) {
-                return Err(QuiltError::usage(
-                    "aggregate output names containing ':' cannot be represented in version-1 YAML",
-                ));
-            }
             m.insert("metrics".into(), json!(metrics));
             if !a.by.is_empty() {
                 m.insert("by".into(), jstrings(&a.by));
@@ -306,15 +295,19 @@ fn step(c: &TypedCommand) -> Result<(&'static str, J), QuiltError> {
             }
         }
         Dump(a) => {
-            if let Some(v) = &a.output {
-                s!(
-                    "output",
-                    if v == "-" {
-                        v.clone()
-                    } else {
-                        absolute(Path::new(v))?
-                    }
-                )
+            if a.output.as_deref() == Some("-") {
+                s!("output", "-")
+            } else {
+                *output_index += 1;
+                let name = if *output_index == 1 {
+                    "output".into()
+                } else {
+                    format!("output_{}", *output_index)
+                };
+                m.insert(
+                    "output".into(),
+                    path_parameter(parameters, &name, "Destination file for exported data"),
+                );
             }
             if a.format == OutputFormat::Jsonl {
                 s!("format", "jsonl")
@@ -323,14 +316,30 @@ fn step(c: &TypedCommand) -> Result<(&'static str, J), QuiltError> {
                 s!("separator", a.separator.to_string())
             }
         }
-        DumpCache(a) => {
-            if let Some(v) = &a.output {
-                s!("output", absolute(Path::new(v))?)
-            }
+        DumpCache(_) => {
+            *output_index += 1;
+            let name = if *output_index == 1 {
+                "output".into()
+            } else {
+                format!("output_{}", *output_index)
+            };
+            m.insert(
+                "output".into(),
+                path_parameter(parameters, &name, "Destination file for cached data"),
+            );
         }
         Partition(a) => {
             s!("column", a.column);
-            s!("output-dir", absolute(Path::new(&a.output_dir))?)
+            *partition_index += 1;
+            let name = if *partition_index == 1 {
+                "output_dir".into()
+            } else {
+                format!("output_dir_{}", *partition_index)
+            };
+            m.insert(
+                "output-dir".into(),
+                path_parameter(parameters, &name, "Directory for partition files"),
+            );
         }
         Calc(a) => {
             s!("column", a.column);
@@ -390,8 +399,11 @@ pub(crate) fn workflow_yaml(commands: &[TypedCommand]) -> Result<String, QuiltEr
         ));
     }
     let mut steps = Vec::new();
+    let mut parameters = Map::new();
+    let mut output_index = 0;
+    let mut partition_index = 0;
     for c in commands {
-        let (n, v) = step(c)?;
+        let (n, v) = step(c, &mut parameters, &mut output_index, &mut partition_index)?;
         steps.push(json!({(n):v}));
     }
     if commands.last().is_some_and(|c| {
@@ -402,12 +414,14 @@ pub(crate) fn workflow_yaml(commands: &[TypedCommand]) -> Result<String, QuiltEr
     }) {
         steps.push(json!({"show":{}}));
     }
-    let doc = json!({"version":1,"stages":[{"name":"analysis","steps":steps}]});
+    let doc =
+        json!({"version":2,"parameters":parameters,"stages":[{"name":"analysis","steps":steps}]});
     let json_doc = serde_json::to_string(&doc)
         .map_err(|e| QuiltError::usage(format!("could not serialize workflow: {e}")))?;
     let yaml_doc: yaml_serde::Value = yaml_serde::from_str(&json_doc)
         .map_err(|e| QuiltError::usage(format!("could not convert workflow values: {e}")))?;
     yaml_serde::to_string(&yaml_doc)
+        .map(|yaml| format!("# yaml-language-server: $schema=https://raw.githubusercontent.com/sumeshi/quilt/develop/schemas/run-v2.schema.json\n{yaml}"))
         .map_err(|e| QuiltError::usage(format!("could not serialize workflow: {e}")))
 }
 
@@ -417,7 +431,7 @@ mod tests {
     use crate::controllers::command_model::parse_automation_step;
 
     #[test]
-    fn typed_steps_roundtrip_through_version_one_yaml() {
+    fn typed_steps_roundtrip_through_version_two_yaml() {
         let commands = vec![
             TypedCommand::Load(LoadArgs {
                 paths: vec!["input.csv".into()],
@@ -440,13 +454,13 @@ mod tests {
                     crate::operations::chainables::aggregate::AggregateSpec::new(
                         AggregateMode::Sum,
                         Some("a,b".into()),
-                        "total_raw",
+                        "total:raw",
                     ),
                 ],
                 by: vec!["xmlns:auto-ns3".into()],
             }),
             TypedCommand::Sort(SortArgs {
-                columns: vec!["total_raw".into()],
+                columns: vec!["total:raw".into()],
                 descending: true,
             }),
             TypedCommand::Cast(CastArgs {
@@ -518,6 +532,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let input = root.join("input.csv");
+        let replay_input = root.join("replay.csv");
         let runs = root.join("nested");
         std::fs::create_dir_all(&runs).unwrap();
         let expected = root.join("expected.csv");
@@ -525,6 +540,11 @@ mod tests {
         std::fs::write(
             &input,
             "id,\"odd,name\",xmlns:auto-ns3\n2,beta,x\n1,alpha,y\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &replay_input,
+            "id,\"odd,name\",xmlns:auto-ns3\n4,delta,z\n3,gamma,w\n",
         )
         .unwrap();
         let commands = vec![
@@ -551,7 +571,7 @@ mod tests {
         ];
         let baseline_cmds = vec![
             TypedCommand::Load(LoadArgs {
-                paths: vec![input.clone()],
+                paths: vec![replay_input.clone()],
                 separator: ',',
                 low_memory: false,
                 no_headers: false,
@@ -589,15 +609,18 @@ mod tests {
         ]
         .concat();
         let raw = workflow_yaml(&yaml_commands).unwrap();
+        assert!(!raw.contains(input.to_str().unwrap()));
+        assert!(!raw.contains(output.to_str().unwrap()));
+        assert!(raw.contains("$schema="));
         let config = runs.join("workflow.yaml");
         std::fs::write(&config, raw).unwrap();
         let mut controller = PipelineState::empty(ExecutionResources::new_in(runs.clone()));
         run(
             &mut controller,
             config.to_str().unwrap(),
+            Some(vec![replay_input]),
             None,
-            None,
-            &[],
+            &[format!("output={}", output.display())],
             false,
             None,
         )
@@ -611,32 +634,6 @@ mod tests {
     #[test]
     fn empty_and_automation_commands_fail() {
         assert!(workflow_yaml(&[]).is_err());
-        assert!(workflow_yaml(&[
-            TypedCommand::Load(LoadArgs {
-                paths: vec![],
-                separator: ',',
-                low_memory: false,
-                no_headers: false,
-                chunk_size: None,
-                infer_schema_length: Some(1000),
-                source_column: None,
-                all_strings: false,
-                schema: vec![],
-                stdin_format: None,
-                rejects: None,
-            }),
-            TypedCommand::Aggregate(AggregateArgs {
-                metrics: vec![
-                    crate::operations::chainables::aggregate::AggregateSpec::new(
-                        AggregateMode::Sum,
-                        Some("amount".into()),
-                        "total:raw",
-                    )
-                ],
-                by: vec![],
-            }),
-        ])
-        .is_err());
         assert!(workflow_yaml(&[
             TypedCommand::Load(LoadArgs {
                 paths: vec![],

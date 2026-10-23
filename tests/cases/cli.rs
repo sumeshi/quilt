@@ -212,7 +212,7 @@ fn process_boundary_separates_machine_output_diagnostics_and_exit_status() {
     let doc = document(
         root.path(),
         "partial.yaml",
-        json!({"version":1,"stages":[{"name":"input","steps":[{"load":{"paths":["input.csv"]}},{"dump":{"output":"completed.csv"}},{"dump":{"output":"existing.csv"}}]}]}),
+        json!({"version":2,"stages":[{"name":"input","steps":[{"load":{"paths":["input.csv"]}},{"dump":{"output":"completed.csv"}},{"dump":{"output":"existing.csv"}}]}]}),
     );
     let result = qlt(root.path(), &["run", doc.to_str().unwrap()]);
     assert!(!result.status.success() && result.stdout.is_empty());
@@ -232,7 +232,7 @@ fn invocation_paths_and_output_override_are_relative_to_the_caller() {
     document(
         &root.path().join("rules"),
         "recipe.yaml",
-        json!({"version":1,"parameters":{"limit":{"type":"int","required":true}},"stages":[{"name":"input","steps":[{"load":{}},{"head":{"number":{"$param":"limit"}}},{"dump":{"output":"unused.csv"}}]}]}),
+        json!({"version":2,"parameters":{"limit":{"type":"int","required":true}},"stages":[{"name":"input","steps":[{"load":{}},{"head":{"number":{"$param":"limit"}}},{"dump":{"output":"unused.csv"}}]}]}),
     );
     let args = [
         "run",
@@ -270,7 +270,7 @@ fn secret_provenance_redacts_debug_plans_and_runtime_diagnostics() {
     let doc = document(
         root.path(),
         "plan.yaml",
-        json!({"version":1,"parameters":{"replacement":{"type":"string","required":true,"secret":true}},"stages":[{"name":"input","steps":[{"load":{"paths":["input.csv"]}},{"sed":{"column":"value","pattern":"x","replacement":{"$param":"replacement"}}},{"showquery":{}}]}]}),
+        json!({"version":2,"parameters":{"replacement":{"type":"string","required":true,"secret":true}},"stages":[{"name":"input","steps":[{"load":{"paths":["input.csv"]}},{"sed":{"column":"value","pattern":"x","replacement":{"$param":"replacement"}}},{"showquery":{}}]}]}),
     );
     // A one-character secret cannot safely be redacted by a substring filter:
     // plan suppression must follow parameter provenance.
@@ -287,7 +287,7 @@ fn secret_provenance_redacts_debug_plans_and_runtime_diagnostics() {
     let doc = document(
         root.path(),
         "failure.yaml",
-        json!({"version":1,"parameters":{"stage":{"type":"string","secret":true,"default":"private-stage-marker"},"flag":{"type":"bool","secret":true,"default":true}},"stages":[{"name":{"$param":"stage"},"steps":[{"load":{"paths":["input.csv"]}},{"contains":{"column":"missing","pattern":"x","ignore-case":{"$param":"flag"}}}]}]}),
+        json!({"version":2,"parameters":{"stage":{"type":"string","secret":true,"default":"private-stage-marker"},"flag":{"type":"bool","secret":true,"default":true}},"stages":[{"name":{"$param":"stage"},"steps":[{"load":{"paths":["input.csv"]}},{"contains":{"column":"missing","pattern":"x","ignore-case":{"$param":"flag"}}}]}]}),
     );
     let result = qlt(root.path(), &["run", doc.to_str().unwrap()]);
     assert!(!result.status.success() && result.stdout.is_empty());
@@ -299,7 +299,7 @@ fn secret_provenance_redacts_debug_plans_and_runtime_diagnostics() {
     let doc = document(
         root.path(),
         "preflight.yaml",
-        json!({"version":1,"parameters":{"length":{"type":"int","secret":true,"default":0}},"stages":[{"name":"input","steps":[{"load":{"paths":["input.csv"],"infer-schema-length":{"$param":"length"}}}]},{"name":"invalid","steps":[{"head":{"number":"nope"}}]}]}),
+        json!({"version":2,"parameters":{"length":{"type":"int","secret":true,"default":0}},"stages":[{"name":"input","steps":[{"load":{"paths":["input.csv"],"infer-schema-length":{"$param":"length"}}}]},{"name":"invalid","steps":[{"head":{"number":"nope"}}]}]}),
     );
     let result = qlt(root.path(), &["run", doc.to_str().unwrap(), "--check"]);
     assert!(!result.status.success());

@@ -47,7 +47,7 @@ id,when
 1,2024-01-02T03:04:05Z
 CSV
 cat >"$work/datetime.yaml" <<'YAML'
-version: 1
+version: 2
 stages:
   - name: output
     steps:

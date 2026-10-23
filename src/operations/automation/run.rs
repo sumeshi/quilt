@@ -10,6 +10,8 @@ mod diagnostics;
 mod document;
 #[path = "executor.rs"]
 mod executor;
+#[path = "location.rs"]
+mod location;
 #[path = "materialization.rs"]
 mod materialization;
 #[path = "orchestrator.rs"]

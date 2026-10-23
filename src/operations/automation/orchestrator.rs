@@ -60,12 +60,14 @@ pub(super) fn run_impl(
         diagnostics = prepared.diagnostics;
         let parameters = prepared.parameters;
         let run_document = prepared.document;
-        document::schema_version(&run_document).map_err(|error| {
-            diagnostics
-                .sanitize_step_error(error, diagnostics.sensitive_locations.contains("version"))
-        })?;
-        let mut plan = document::preflight(&run_document, &parameters, config_path)
-            .map_err(|error| diagnostics.sanitize_preflight_error(error))?;
+        let mut plan =
+            document::preflight(&run_document, &parameters, config_path).map_err(|error| {
+                diagnostics.sanitize_preflight_error(document::with_source_locations(
+                    error,
+                    &raw_config_content,
+                    config_path,
+                ))
+            })?;
         if let Some(stage) = selected_stage {
             planner::select(&mut plan, stage)?;
         }
@@ -502,7 +504,7 @@ fn prepare_document(
     path: &Path,
     vars: &[String],
 ) -> Result<document::PreparedRunDocument, QuiltError> {
-    match document::prepare(document::DocumentInput {
+    (|| match document::prepare(document::DocumentInput {
         raw,
         path,
         overrides: vars,
@@ -510,6 +512,9 @@ fn prepare_document(
         Ok(prepared) => Ok(prepared),
         Err(parameter_error) => {
             if let Ok(raw_document) = yaml_serde::from_str::<RunDocument>(raw) {
+                if raw_document.version != 2 {
+                    return Err(parameter_error);
+                }
                 if let Err(stage_error) = document::preflight(&raw_document, &HashMap::new(), path)
                 {
                     let mut diagnostics = match parameter_error {
@@ -527,7 +532,8 @@ fn prepare_document(
             }
             Err(parameter_error)
         }
-    }
+    })()
+    .map_err(|error| document::with_source_locations(error, raw, path))
 }
 
 fn report_completed_files(
@@ -637,12 +643,14 @@ pub(super) fn run_show_plan_impl(
         diagnostics = diagnostics::discover_secrets(&raw, variables);
         let prepared = prepare_document(&raw, &config_path, variables)?;
         diagnostics = prepared.diagnostics;
-        document::schema_version(&prepared.document).map_err(|error| {
-            diagnostics
-                .sanitize_step_error(error, diagnostics.sensitive_locations.contains("version"))
-        })?;
         let mut plan = document::preflight(&prepared.document, &prepared.parameters, &config_path)
-            .map_err(|error| diagnostics.sanitize_preflight_error(error))?;
+            .map_err(|error| {
+                diagnostics.sanitize_preflight_error(document::with_source_locations(
+                    error,
+                    &raw,
+                    &config_path,
+                ))
+            })?;
         planner::select(&mut plan, stage_name)?;
         diagnostics.propagate(&plan.order, &plan.stages);
         let cli_input_files = cli_input_files

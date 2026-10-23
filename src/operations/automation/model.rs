@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use yaml_serde::Value;
 
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunDocument {
@@ -9,11 +10,13 @@ pub struct RunDocument {
     pub title: Option<String>,
     pub description: Option<String>,
     pub author: Option<String>,
+    #[cfg_attr(test, schemars(with = "Vec<StageConfig<serde_json::Value>>"))]
     pub stages: Vec<StageConfig>,
     #[serde(default)]
     pub parameters: std::collections::BTreeMap<String, ParameterDeclaration>,
 }
 
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ParameterType {
@@ -60,17 +63,20 @@ pub(super) struct ResolvedParameter {
     pub(super) origin: ParameterOrigin,
     pub(super) secret: bool,
 }
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ParameterDeclaration {
     #[serde(rename = "type")]
     pub parameter_type: ParameterType,
+    pub description: Option<String>,
     #[serde(default)]
     pub required: bool,
     pub default: Option<ParameterLiteral>,
     #[serde(default)]
     pub secret: bool,
 }
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ParameterLiteral {
@@ -104,6 +110,7 @@ impl ParameterLiteral {
     }
 }
 
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum MaterializePolicy {
@@ -113,13 +120,87 @@ pub enum MaterializePolicy {
     Never,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[derive(Debug, Serialize, Clone)]
 #[serde(untagged)]
 pub enum StageConfig<S = Value> {
     Process(ProcessStage<S>),
     Join(JoinStage),
     Concat(ConcatStage),
     Branch(BranchStage),
+}
+
+impl<'de, S: Deserialize<'de>> Deserialize<'de> for StageConfig<S> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields, bound(deserialize = "S: Deserialize<'de>"))]
+        struct Shape<S> {
+            name: String,
+            #[serde(rename = "from", default, deserialize_with = "present")]
+            source: Option<Option<String>>,
+            #[serde(default, deserialize_with = "present")]
+            steps: Option<Vec<S>>,
+            #[serde(default, deserialize_with = "present")]
+            join: Option<JoinNode>,
+            #[serde(default, deserialize_with = "present")]
+            concat: Option<ConcatNode>,
+            #[serde(default, deserialize_with = "present")]
+            branch: Option<BranchNode>,
+            #[serde(default)]
+            materialize: MaterializePolicy,
+        }
+        let stage = Shape::deserialize(deserializer)?;
+        let kinds = [
+            stage.steps.is_some(),
+            stage.join.is_some(),
+            stage.concat.is_some(),
+            stage.branch.is_some(),
+        ];
+        if kinds.into_iter().filter(|present| *present).count() != 1 {
+            return Err(serde::de::Error::custom(
+                "a stage requires exactly one of 'steps', 'join', 'concat', or 'branch'",
+            ));
+        }
+        if stage.source.is_some() && stage.steps.is_none() {
+            return Err(serde::de::Error::custom(
+                "'from' is only valid on a stage with 'steps'",
+            ));
+        }
+        Ok(if let Some(steps) = stage.steps {
+            Self::Process(ProcessStage {
+                name: stage.name,
+                source: stage.source.flatten(),
+                steps,
+                materialize: stage.materialize,
+            })
+        } else if let Some(join) = stage.join {
+            Self::Join(JoinStage {
+                name: stage.name,
+                join,
+                materialize: stage.materialize,
+            })
+        } else if let Some(concat) = stage.concat {
+            Self::Concat(ConcatStage {
+                name: stage.name,
+                concat,
+                materialize: stage.materialize,
+            })
+        } else {
+            Self::Branch(BranchStage {
+                name: stage.name,
+                branch: stage.branch.unwrap(),
+                materialize: stage.materialize,
+            })
+        })
+    }
+}
+
+fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 impl<S> StageConfig<S> {
@@ -141,12 +222,14 @@ impl<S> StageConfig<S> {
     }
 }
 
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessStage<S = Value> {
     pub name: String,
     #[serde(rename = "from")]
     pub source: Option<String>,
+    #[cfg_attr(test, schemars(with = "Vec<serde_json::Value>"))]
     pub steps: Vec<S>,
     #[serde(default)]
     pub materialize: MaterializePolicy,
@@ -168,6 +251,7 @@ impl PlannedStep {
     }
 }
 
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct JoinStage {
@@ -177,26 +261,41 @@ pub struct JoinStage {
     pub materialize: MaterializePolicy,
 }
 
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct JoinNode {
     pub inputs: Vec<String>,
     pub how: Option<String>,
+    #[cfg_attr(test, schemars(schema_with = "optional_string_list_schema"))]
     #[serde(
         rename = "left-on",
         default,
         deserialize_with = "deserialize_optional_string_list"
     )]
     pub left_on: Option<Vec<String>>,
+    #[cfg_attr(test, schemars(schema_with = "optional_string_list_schema"))]
     #[serde(
         rename = "right-on",
         default,
         deserialize_with = "deserialize_optional_string_list"
     )]
     pub right_on: Option<Vec<String>>,
+    #[cfg_attr(test, schemars(schema_with = "optional_string_list_schema"))]
     #[serde(default, deserialize_with = "deserialize_optional_string_list")]
     pub on: Option<Vec<String>>,
     pub coalesce: Option<bool>,
+}
+
+#[cfg(test)]
+fn optional_string_list_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "anyOf": [
+            {"type": "string"},
+            {"type": "array", "items": {"type": "string"}},
+            {"type": "null"}
+        ]
+    })
 }
 
 fn deserialize_optional_string_list<'de, D>(
@@ -223,6 +322,7 @@ where
         .transpose()
 }
 
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ConcatStage {
@@ -232,6 +332,7 @@ pub struct ConcatStage {
     pub materialize: MaterializePolicy,
 }
 
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ConcatNode {
@@ -239,6 +340,7 @@ pub struct ConcatNode {
     pub how: Option<String>,
 }
 
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct BranchStage {
@@ -247,6 +349,7 @@ pub struct BranchStage {
     #[serde(default)]
     pub materialize: MaterializePolicy,
 }
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct BranchNode {
@@ -255,6 +358,7 @@ pub struct BranchNode {
     pub then: Vec<String>,
     pub r#else: Option<Vec<String>>,
 }
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum BranchPredicate {
@@ -266,6 +370,7 @@ pub enum BranchPredicate {
         parameter: ParameterPredicate,
     },
 }
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct RowCountPredicate {
@@ -282,6 +387,7 @@ pub struct RowCountPredicate {
     #[serde(rename = "less-or-equal")]
     pub less_or_equal: Option<i64>,
 }
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ParameterPredicate {

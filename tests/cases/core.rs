@@ -376,7 +376,7 @@ fn source_inventory_includes_filtered_files_but_does_not_override_reused_names()
         root.path(),
         "quoted-timeinfo.yaml",
         serde_json::json!({
-            "version": 1,
+            "version": 2,
             "stages": [{"name": "summary", "steps": [
                 {"load": {"paths": [pattern]}},
                 {"cast": {"column": "when", "type": "datetime"}},

@@ -54,7 +54,7 @@ fn filtered_array_log_workflow_and_grouped_delta_match_yaml_and_cli() {
     let config = document(
         root.path(),
         "filtered.yaml",
-        json!({"version":1,"stages":[{"name":"logs","steps":[
+        json!({"version":2,"stages":[{"name":"logs","steps":[
             {"load":{"paths":[source]}},
             {"filter":{"expression":expression}},
             {"array-contains":{"column":"tags","value":"alpha"}},
@@ -128,7 +128,13 @@ fn filtered_array_log_workflow_and_grouped_delta_match_yaml_and_cli() {
 fn grouped_aggregate_and_derive_match_yaml_and_cli_with_exact_ids() {
     let root = tempfile::tempdir().unwrap();
     let source = log_fixture(root.path());
-    let metrics = [
+    let metrics = json!([
+        {"mode":"count","output":"rows"},
+        {"mode":"sum","column":"bytes","output":"total"},
+        {"mode":"avg","column":"latency","output":"mean"},
+        {"mode":"p95","column":"latency","output":"p95"}
+    ]);
+    let cli_metrics = [
         "count:rows",
         "sum:bytes:total",
         "avg:latency:mean",
@@ -137,7 +143,7 @@ fn grouped_aggregate_and_derive_match_yaml_and_cli_with_exact_ids() {
     let config = document(
         root.path(),
         "aggregate.yaml",
-        json!({"version":1,"stages":[{"name":"logs","steps":[
+        json!({"version":2,"stages":[{"name":"logs","steps":[
             {"load":{"paths":[source]}},
             {"aggregate":{"metrics":metrics,"by":["host"]}},
             {"derive":{"output":"total_plus_one","expression":"total + 1"}},
@@ -146,7 +152,7 @@ fn grouped_aggregate_and_derive_match_yaml_and_cli_with_exact_ids() {
     );
     let yaml = text(&["run", config.to_str().unwrap()]);
     let mut args = vec!["load", source.to_str().unwrap(), "-", "aggregate"];
-    args.extend(metrics);
+    args.extend(cli_metrics);
     args.extend([
         "--by",
         "host",
@@ -218,7 +224,7 @@ fn stdin_quarantine_cli_and_yaml_keep_the_same_records_and_report() {
     let config = document(
         root.path(),
         "stdin.yaml",
-        json!({"version":1,"stages":[{"name":"logs","steps":[
+        json!({"version":2,"stages":[{"name":"logs","steps":[
             {"load":{"stdin-format":"jsonl","source-column":"source","rejects":"yaml-rejects.jsonl"}},
             {"show":{"format":"jsonl"}}
         ]}]}),

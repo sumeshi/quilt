@@ -106,6 +106,10 @@ impl DiagnosticPolicy {
             QuiltError::Usage { .. } => QuiltError::Usage {
                 message: "<redacted diagnostic>".into(),
             },
+            QuiltError::Config { path, .. } => QuiltError::Config {
+                path: self.sanitize(path),
+                message: "<redacted diagnostic>".into(),
+            },
             QuiltError::Schema {
                 operation, column, ..
             } => QuiltError::Schema {
@@ -159,6 +163,10 @@ impl DiagnosticPolicy {
                 diagnostics: diagnostics.into_iter().map(|v| self.sanitize(v)).collect(),
             },
             QuiltError::Usage { message } => QuiltError::Usage {
+                message: self.sanitize(message),
+            },
+            QuiltError::Config { path, message } => QuiltError::Config {
+                path: self.sanitize(path),
                 message: self.sanitize(message),
             },
             QuiltError::Schema {

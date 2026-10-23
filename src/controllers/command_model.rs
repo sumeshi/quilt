@@ -12,6 +12,9 @@ pub use crate::controllers::yaml_adapter::parse_automation_step;
 /// execution and automation preflight enforce the same static contract.
 pub fn validate_command(command: &TypedCommand) -> Result<(), crate::error::QuiltError> {
     match command {
+        TypedCommand::Aggregate(args) => {
+            crate::operations::chainables::aggregate::validate_specs(&args.metrics, &args.by)
+        }
         TypedCommand::Cast(args) => {
             crate::operations::chainables::cast::validate_config(&args.target, &args.datetime)
         }
@@ -53,7 +56,7 @@ pub fn render_command_help(name: &str) -> Option<String> {
     if name == "run" {
         return Some(
             format!(
-                "run\n\nUsage: qlt {}\n{}\n\nExecute a version-1 YAML workflow. If a load step omits paths, positional files ",
+                "run\n\nUsage: qlt {}\n{}\n\nExecute a version-2 YAML workflow. Version 1 documents are rejected; update the version, use arrays for multiple columns, and map aggregate metrics as {{mode, column?, output}}. If a load step omits paths, positional files ",
                 s.help, s.summary
             )
                 + "after the config path are supplied to that step.\n"

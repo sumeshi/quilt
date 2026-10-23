@@ -46,7 +46,7 @@ fn sensitive_location_parser_accepts_nested_parameter_paths() {
 
 #[test]
 fn typed_parameter_declarations_and_literals_are_strict() {
-    let yaml = "version: 1\nparameters: {count: {type: int, default: 3}, enabled: {type: bool, default: true}}\nstages: [{name: input, steps: []}]";
+    let yaml = "version: 2\nparameters: {count: {type: int, default: 3}, enabled: {type: bool, default: true}}\nstages: [{name: input, steps: []}]";
     let prepared = document::prepare(document::DocumentInput {
         raw: yaml,
         path: Path::new("rules/run.yaml"),
@@ -59,7 +59,7 @@ fn typed_parameter_declarations_and_literals_are_strict() {
         ParameterValue::Bool(true)
     );
     assert!(document::prepare(document::DocumentInput {
-        raw: "version: 1\nparameters: {count: {type: int, default: nope}}\nstages: []",
+        raw: "version: 2\nparameters: {count: {type: int, default: nope}}\nstages: []",
         path: Path::new("run.yaml"),
         overrides: &[],
     })
@@ -69,7 +69,7 @@ fn typed_parameter_declarations_and_literals_are_strict() {
 #[test]
 fn preflight_collects_yaml_path_diagnostics() {
     let document = document(
-        "version: 1\nstages: [{name: one, from: missing, steps: [{head: {number: nope}}]}]",
+        "version: 2\nstages: [{name: one, from: missing, steps: [{head: {number: nope}}]}]",
     );
     let parameters = HashMap::new();
     let error = document::preflight(&document, &parameters, Path::new("run.yaml")).unwrap_err();
@@ -84,7 +84,7 @@ fn document(yaml: &str) -> RunDocument {
 
 #[test]
 fn preflight_retains_typed_repeated_steps_and_resolves_paths() {
-    let doc = document("version: 1\nstages: [{name: input, steps: [{load: {paths: [input.csv]}}, {grep: {pattern: ERROR}}, {grep: {pattern: WARN}}, {dump: {output: result.csv}}]}, {name: inherited, from: input, steps: [{load: {}}]}]");
+    let doc = document("version: 2\nstages: [{name: input, steps: [{load: {paths: [input.csv]}}, {grep: {pattern: ERROR}}, {grep: {pattern: WARN}}, {dump: {output: result.csv}}]}, {name: inherited, from: input, steps: [{load: {}}]}]");
     let plan = document::preflight(&doc, &HashMap::new(), Path::new("rules/run.yaml")).unwrap();
     let StageConfig::Process(process) = &plan.stages["input"] else {
         panic!("expected process")
@@ -126,7 +126,7 @@ fn preflight_retains_typed_repeated_steps_and_resolves_paths() {
 fn dependency_resolution_is_deterministic_and_handles_shared_intermediates() {
     let doc = document(
         r#"
-version: 1
+version: 2
 stages:
   - name: output
     from: shared
@@ -147,13 +147,13 @@ stages:
 
 #[test]
 fn schema_requires_known_fields_and_sequence_steps() {
-    assert!(yaml_serde::from_str::<RunDocument>("version: 1\nunknown: true\nstages: []").is_err());
+    assert!(yaml_serde::from_str::<RunDocument>("version: 2\nunknown: true\nstages: []").is_err());
     assert!(yaml_serde::from_str::<RunDocument>(
-        "version: 1\nstages: [{name: input, steps: [], extra: true}]"
+        "version: 2\nstages: [{name: input, steps: [], extra: true}]"
     )
     .is_err());
     assert!(yaml_serde::from_str::<RunDocument>(
-        "version: 1\nstages: [{name: input, steps: {load: {paths: [x]}}}]"
+        "version: 2\nstages: [{name: input, steps: {load: {paths: [x]}}}]"
     )
     .is_err());
 }
@@ -161,16 +161,16 @@ fn schema_requires_known_fields_and_sequence_steps() {
 #[test]
 fn duplicate_names_cycles_and_invalid_steps_are_rejected_before_execution() {
     let duplicate =
-        document("version: 1\nstages: [{name: same, steps: []}, {name: same, steps: []}]");
+        document("version: 2\nstages: [{name: same, steps: []}, {name: same, steps: []}]");
     assert!(document::preflight(&duplicate, &HashMap::new(), Path::new("run.yaml")).is_err());
 
     let cycle = document(
-        "version: 1\nstages: [{name: a, from: b, steps: []}, {name: b, from: a, steps: []}]",
+        "version: 2\nstages: [{name: a, from: b, steps: []}, {name: b, from: a, steps: []}]",
     );
     assert!(document::preflight(&cycle, &HashMap::new(), Path::new("run.yaml")).is_err());
 
     let invalid =
-        document("version: 1\nstages: [{name: input, steps: [{load: {paths: [x], typo: true}}]}]");
+        document("version: 2\nstages: [{name: input, steps: [{load: {paths: [x], typo: true}}]}]");
     let error = document::preflight(&invalid, &HashMap::new(), Path::new("run.yaml")).unwrap_err();
     let rendered = error.to_string();
     assert!(
@@ -179,7 +179,7 @@ fn duplicate_names_cycles_and_invalid_steps_are_rejected_before_execution() {
     );
 
     let misplaced = document(
-            "version: 1\nstages: [{name: input, steps: [{load: {paths: [x]}}, {show: {}}, {head: {number: 1}}]}]",
+            "version: 2\nstages: [{name: input, steps: [{load: {paths: [x]}}, {show: {}}, {head: {number: 1}}]}]",
         );
     let error =
         document::preflight(&misplaced, &HashMap::new(), Path::new("run.yaml")).unwrap_err();
@@ -240,11 +240,11 @@ fn public_run_rejects_static_shapes_before_nonexistent_input_io() {
         let load = format!("- load:\n          paths: ['{}']", input.display());
         let yaml = if shape.starts_with("steps:") {
             format!(
-                "version: 1\nstages:\n  - name: input\n    steps:\n      {load}\n      - {}\n",
+                "version: 2\nstages:\n  - name: input\n    steps:\n      {load}\n      - {}\n",
                 shape.strip_prefix("steps: ").unwrap()
             )
         } else {
-            format!("version: 1\nstages:\n  - name: input\n    steps:\n      {load}\n  - name: a\n    from: input\n    steps: []\n  - name: b\n    from: input\n    steps: []\n  - name: bad\n    {shape}\n")
+            format!("version: 2\nstages:\n  - name: input\n    steps:\n      {load}\n  - name: a\n    from: input\n    steps: []\n  - name: b\n    from: input\n    steps: []\n  - name: bad\n    {shape}\n")
         };
         let path = root.join(format!("{name}.yaml"));
         std::fs::write(&path, yaml).unwrap();
@@ -300,7 +300,7 @@ fn planned(yaml: &str) -> planner::ExecutionPlan {
 #[test]
 fn auto_materialization_keeps_serial_barriers_lazy() {
     let doc = planned(
-            "version: 1\nstages: [{name: input, steps: [{load: {paths: [input.csv]}}, {sort: {columns: [id]}}]}]",
+            "version: 2\nstages: [{name: input, steps: [{load: {paths: [input.csv]}}, {sort: {columns: [id]}}]}]",
         );
     let decisions = materialization::materialization_decisions(&doc.order, &doc.stages);
     let decision = decisions.get("input").unwrap();
@@ -311,7 +311,7 @@ fn auto_materialization_keeps_serial_barriers_lazy() {
 #[test]
 fn parameter_only_branch_does_not_force_input_materialization() {
     let doc = planned(
-            "version: 1\nparameters: {enabled: {type: bool, default: true}}\nstages: [{name: input, steps: []}, {name: chosen, branch: {input: input, when: {parameter: {name: enabled, equal: true}}, then: [output]}}, {name: output, from: input, steps: []}]",
+            "version: 2\nparameters: {enabled: {type: bool, default: true}}\nstages: [{name: input, steps: []}, {name: chosen, branch: {input: input, when: {parameter: {name: enabled, equal: true}}, then: [output]}}, {name: output, from: input, steps: []}]",
         );
     let decisions = materialization::materialization_decisions(&doc.order, &doc.stages);
     assert!(!decisions.get("input").unwrap().materialize);
@@ -320,7 +320,7 @@ fn parameter_only_branch_does_not_force_input_materialization() {
 #[test]
 fn only_row_evaluating_finalizers_trigger_reuse_materialization() {
     let one = planned(
-            "version: 1\nstages: [{name: one, steps: [{load: {paths: [input.csv]}}, {show: {}}, {headers: {}}]}]",
+            "version: 2\nstages: [{name: one, steps: [{load: {paths: [input.csv]}}, {show: {}}, {headers: {}}]}]",
         );
     let decision = materialization::materialization_decisions(&one.order, &one.stages)
         .remove("one")
@@ -328,7 +328,7 @@ fn only_row_evaluating_finalizers_trigger_reuse_materialization() {
     assert!(!decision.materialize);
 
     let two = planned(
-            "version: 1\nstages: [{name: two, steps: [{load: {paths: [input.csv]}}, {show: {}}, {show: {}}]}]",
+            "version: 2\nstages: [{name: two, steps: [{load: {paths: [input.csv]}}, {show: {}}, {show: {}}]}]",
         );
     let decision = materialization::materialization_decisions(&two.order, &two.stages)
         .remove("two")
@@ -349,7 +349,7 @@ fn run_fanout_materializes_one_probed_source_evaluation() {
     std::fs::write(
             &config,
             format!(
-                "version: 1\nstages:\n  - name: input\n    steps: [{{load: {{paths: [{}]}}}}]\n  - name: left\n    from: input\n    steps: [{{select: {{columns: [id]}}}}, {{dump: {{output: {}}}}}]\n  - name: right\n    from: input\n    steps: [{{select: {{columns: [value]}}}}, {{dumpcache: {{output: {}}}}}]\n",
+                "version: 2\nstages:\n  - name: input\n    steps: [{{load: {{paths: [{}]}}}}]\n  - name: left\n    from: input\n    steps: [{{select: {{columns: [id]}}}}, {{dump: {{output: {}}}}}]\n  - name: right\n    from: input\n    steps: [{{select: {{columns: [value]}}}}, {{dumpcache: {{output: {}}}}}]\n",
                 input.display(), left_output.display(), right_output.display()
             ),
         )
@@ -375,7 +375,7 @@ fn run_fanout_materializes_one_probed_source_evaluation() {
     std::fs::write(
             &config,
             format!(
-                "version: 1\nstages:\n  - name: input\n    materialize: never\n    steps: [{{load: {{paths: [{}]}}}}]\n  - name: left\n    from: input\n    steps: [{{select: {{columns: [id]}}}}, {{dump: {{output: {}}}}}]\n  - name: right\n    from: input\n    steps: [{{select: {{columns: [value]}}}}, {{dump: {{output: {}}}}}]\n",
+                "version: 2\nstages:\n  - name: input\n    materialize: never\n    steps: [{{load: {{paths: [{}]}}}}]\n  - name: left\n    from: input\n    steps: [{{select: {{columns: [id]}}}}, {{dump: {{output: {}}}}}]\n  - name: right\n    from: input\n    steps: [{{select: {{columns: [value]}}}}, {{dump: {{output: {}}}}}]\n",
                 input.display(), dir.join("left-never.csv").display(), dir.join("right-never.csv").display()
             ),
         )
@@ -411,7 +411,7 @@ fn auto_materialization_preserves_empty_nested_struct_fanout_results() {
         std::fs::write(
             &config,
             format!(
-                "version: 1\nstages:\n  - name: input\n    materialize: {policy}\n    steps: [{{load: {{paths: [{}]}}}}]\n  - name: left\n    from: input\n    steps: [{{select: {{columns: [id]}}}}, {{dump: {{output: {}}}}}]\n  - name: right\n    from: input\n    steps: [{{select: {{columns: [id]}}}}, {{dump: {{output: {}}}}}]\n",
+                "version: 2\nstages:\n  - name: input\n    materialize: {policy}\n    steps: [{{load: {{paths: [{}]}}}}]\n  - name: left\n    from: input\n    steps: [{{select: {{columns: [id]}}}}, {{dump: {{output: {}}}}}]\n  - name: right\n    from: input\n    steps: [{{select: {{columns: [id]}}}}, {{dump: {{output: {}}}}}]\n",
                 input.display(),
                 left_output.display(),
                 right_output.display()
@@ -437,7 +437,7 @@ fn auto_materialization_preserves_empty_nested_struct_fanout_results() {
     std::fs::write(
         &config,
         format!(
-            "version: 1\nstages:\n  - name: input\n    materialize: always\n    steps: [{{load: {{paths: [{}]}}}}]\n  - name: left\n    from: input\n    steps: [{{select: {{columns: [id]}}}}, {{dump: {{output: {}}}}}]\n  - name: right\n    from: input\n    steps: [{{select: {{columns: [id]}}}}, {{dump: {{output: {}}}}}]\n",
+            "version: 2\nstages:\n  - name: input\n    materialize: always\n    steps: [{{load: {{paths: [{}]}}}}]\n  - name: left\n    from: input\n    steps: [{{select: {{columns: [id]}}}}, {{dump: {{output: {}}}}}]\n  - name: right\n    from: input\n    steps: [{{select: {{columns: [id]}}}}, {{dump: {{output: {}}}}}]\n",
             input.display(),
             dir.join("left-always.csv").display(),
             dir.join("right-always.csv").display()
@@ -469,7 +469,7 @@ fn always_has_one_stage_artifact_and_serial_auto_has_none() {
         std::fs::write(
                 &config,
                 format!(
-                    "version: 1\nstages:\n  - name: input\n    materialize: {policy}\n    steps: [{{load: {{paths: [{}]}}}}]\n",
+                    "version: 2\nstages:\n  - name: input\n    materialize: {policy}\n    steps: [{{load: {{paths: [{}]}}}}]\n",
                     input.display()
                 ),
             )
@@ -519,7 +519,7 @@ fn row_count_branch_reuses_one_materialized_source_evaluation() {
     std::fs::write(
             &config,
             format!(
-                "version: 1\nstages:\n  - name: input\n    steps: [{{load: {{paths: [{}]}}}}]\n  - name: route\n    branch:\n      input: input\n      when: {{row-count: {{greater-than: 1}}}}\n      then: [selected]\n      else: [fallback]\n  - name: selected\n    from: input\n    steps: [{{show: {{}}}}]\n  - name: fallback\n    from: input\n    steps: [{{show: {{}}}}]\n",
+                "version: 2\nstages:\n  - name: input\n    steps: [{{load: {{paths: [{}]}}}}]\n  - name: route\n    branch:\n      input: input\n      when: {{row-count: {{greater-than: 1}}}}\n      then: [selected]\n      else: [fallback]\n  - name: selected\n    from: input\n    steps: [{{show: {{}}}}]\n  - name: fallback\n    from: input\n    steps: [{{show: {{}}}}]\n",
                 input.display()
             ),
         )
@@ -606,7 +606,7 @@ fn cli_output_overrides_yaml_dump_path() {
     std::fs::write(
             &config,
             format!(
-                "version: 1\nstages: [{{name: input, steps: [{{load: {{paths: [{}]}}}}, {{dump: {{output: {}}}}}]}}]\n",
+                "version: 2\nstages: [{{name: input, steps: [{{load: {{paths: [{}]}}}}, {{dump: {{output: {}}}}}]}}]\n",
                 input.display(),
                 yaml_output.display()
             ),
@@ -639,7 +639,7 @@ fn yaml_show_plus_cli_output_reuses_one_source_evaluation() {
     std::fs::write(
             &config,
             format!(
-                "version: 1\nstages: [{{name: input, steps: [{{load: {{paths: [{}]}}}}, {{show: {{}}}}]}}]\n",
+                "version: 2\nstages: [{{name: input, steps: [{{load: {{paths: [{}]}}}}, {{show: {{}}}}]}}]\n",
                 input.display()
             ),
         )
@@ -665,7 +665,7 @@ fn yaml_show_plus_cli_output_reuses_one_source_evaluation() {
 #[test]
 fn parameter_branch_excludes_unselected_output_route() {
     let doc = document(
-            "version: 1\nparameters: {use_left: {type: bool, default: true}}\nstages: [{name: input, steps: []}, {name: route, branch: {input: input, when: {parameter: {name: use_left, equal: true}}, then: [left], else: [right]}}, {name: left, from: input, steps: [{show: {}}]}, {name: right, from: input, steps: [{show: {}}]}]",
+            "version: 2\nparameters: {use_left: {type: bool, default: true}}\nstages: [{name: input, steps: []}, {name: route, branch: {input: input, when: {parameter: {name: use_left, equal: true}}, then: [left], else: [right]}}, {name: left, from: input, steps: [{show: {}}]}, {name: right, from: input, steps: [{show: {}}]}]",
         );
     let values = HashMap::from([(
         "use_left".to_string(),
@@ -699,7 +699,7 @@ fn check_and_show_plan_leave_config_directory_artifact_free() {
     std::fs::write(
         &config,
         format!(
-            "version: 1\nstages: [{{name: input, steps: [{{load: {{paths: [{}]}}}}]}}]\n",
+            "version: 2\nstages: [{{name: input, steps: [{{load: {{paths: [{}]}}}}]}}]\n",
             input.display()
         ),
     )

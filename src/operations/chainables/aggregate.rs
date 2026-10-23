@@ -151,32 +151,13 @@ fn expression(spec: &AggregateSpec, schema: &Schema) -> Result<Expr, QuiltError>
     Ok(expr.alias(&spec.output))
 }
 
-/// Add one or more aggregate columns, optionally grouping by `by`.
-///
-/// Grouping is stable: groups appear in their first-seen input order. The
-/// resulting frame remains lazy and contains only grouping keys and outputs.
-pub fn aggregate(
-    df: &LazyFrame,
-    specs: &[AggregateSpec],
-    by: &[String],
-) -> Result<LazyFrame, QuiltError> {
+/// Validate aggregate arguments without inspecting input data or schema.
+pub(crate) fn validate_specs(specs: &[AggregateSpec], by: &[String]) -> Result<(), QuiltError> {
     if specs.is_empty() {
         return Err(QuiltError::usage("aggregate requires at least one metric"));
     }
-    let schema = df
-        .clone()
-        .collect_schema()
-        .map_err(|error| QuiltError::schema("aggregate", None::<String>, error.to_string()))?;
-
     let mut names = HashSet::new();
     for key in by {
-        if schema.get(key).is_none() {
-            return Err(QuiltError::schema(
-                "aggregate",
-                Some(key),
-                "group column not found",
-            ));
-        }
         if !names.insert(key.as_str()) {
             return Err(QuiltError::usage(format!(
                 "Duplicate grouping column '{key}'"
@@ -185,6 +166,15 @@ pub fn aggregate(
     }
     let mut output_names = HashSet::new();
     for spec in specs {
+        if spec.mode != AggregateMode::Count && spec.column.is_none() {
+            return Err(QuiltError::usage(format!(
+                "Aggregate '{}' requires an input column",
+                spec.output
+            )));
+        }
+        if matches!(spec.mode, AggregateMode::Percentile(p) if p > 100) {
+            return Err(QuiltError::usage("percentile must be p0 through p100"));
+        }
         if spec.output.is_empty() {
             return Err(QuiltError::usage("aggregate output name cannot be empty"));
         }
@@ -193,6 +183,30 @@ pub fn aggregate(
                 "aggregate",
                 Some(&spec.output),
                 "aggregate output conflicts with a group key or another output",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Add aggregate columns, optionally grouping in first-seen input order.
+/// The result remains lazy and contains only grouping keys and outputs.
+pub fn aggregate(
+    df: &LazyFrame,
+    specs: &[AggregateSpec],
+    by: &[String],
+) -> Result<LazyFrame, QuiltError> {
+    validate_specs(specs, by)?;
+    let schema = df
+        .clone()
+        .collect_schema()
+        .map_err(|error| QuiltError::schema("aggregate", None::<String>, error.to_string()))?;
+    for key in by {
+        if schema.get(key).is_none() {
+            return Err(QuiltError::schema(
+                "aggregate",
+                Some(key),
+                "group column not found",
             ));
         }
     }

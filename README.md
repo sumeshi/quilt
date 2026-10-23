@@ -19,7 +19,8 @@ Built for ad-hoc analysis of logs, event exports, and forensic datasets.
 Stage schema example:
 
 ```yaml
-version: 1
+# yaml-language-server: $schema=https://raw.githubusercontent.com/sumeshi/quilt/develop/schemas/run-v2.schema.json
+version: 2
 stages:
   - name: errors
     steps:
@@ -109,10 +110,10 @@ to the draft. Esc cancels. Sample preview uses up to 10,000 source rows within a
 32 MiB estimate; the table shows up to 100 rows and 128 columns. Initial loading
 validates all input, and full preview evaluates all data. Temporary checkpoints
 share a 512 MiB budget, are cleaned up on normal exit, and exports do not
-overwrite existing files. YAML saves confirmed commands against the original
-inputs, without sample limits or checkpoint paths, for `qlt run`. On exit,
-queued work is cancelled and any active operation finishes before the terminal
-closes.
+overwrite existing files. YAML saves confirmed commands as a reusable `qlt run`
+recipe, with input files supplied at execution time and no sample limits or
+checkpoint paths. On exit, queued work is cancelled and any active operation
+finishes before the terminal closes.
 
 ### Command Structure
 
@@ -1057,7 +1058,7 @@ gzip sources that require a decompression spool cannot be inspected this way.
 parameters are withheld, including plans produced by a YAML `showquery` step.
 
 ```yaml
-version: 1
+version: 2
 stages:
   - name: output
     steps:
@@ -1082,7 +1083,7 @@ numeric options keep the CLI defaults, and unknown fields are errors.
 | `select` | `columns` |
 | `filter` | `expression` |
 | `derive` | `output`, `expression` |
-| `aggregate` | `metrics` (metric string or sequence), optional `by` |
+| `aggregate` | `metrics` (sequence of `{mode, column?, output}` mappings), optional `by` |
 | `array-contains` | `column`, `value` (string; parsed against the element type) |
 | `array-get` | `column`, `index`, optional `output` |
 | `explode` | `columns` |
@@ -1110,8 +1111,10 @@ numeric options keep the CLI defaults, and unknown fields are errors.
 | `partition` | `column`; optional `output-dir` (default `./partitions`) |
 | `calc` | `column` and exactly one true flag: `sum`, `avg`, `min`, `max`, `median`, `std` |
 
-`grep` uses `--column` on the CLI but `columns` in YAML. YAML list fields accept a
-single string or a sequence, for example `columns: [host, user]`.
+`grep` uses `--column` on the CLI but `columns` in YAML. A scalar column field is
+one entry, including any commas; use an array for multiple columns, for example
+`columns: [host, user]`. `select` retains its range/index syntax, with existing
+column names taking precedence.
 
 For example, these steps produce the same per-file summary as the CLI `timeinfo` example:
 
@@ -1132,11 +1135,15 @@ Within a `run` document, stages can be different types to orchestrate the flow.
 | `join`         | Joins datasets from multiple stages based on keys.         | `name` and `join: {inputs: [...], on: [column], how: inner}`. Use `left-on` and `right-on` for asymmetric keys; `cross` needs no key. Modes: `inner` (default), `left`, `full` (`outer`), `cross`. Optional boolean `coalesce`. |
 | `branch`       | Selects downstream target stages from a `row-count` or `parameter` predicate. | `name` and `branch: {input: stage, when: {row-count: {greater-than: 10}}, then: [target]}` with optional `else: [target]`. |
 
-Every run document must use `version: 1` and a sequence of named stages. The schema is
+Every run document must use `version: 2` and a sequence of named stages. The schema is
 strict: unknown document, stage, and step keys are rejected before any input is read.
+Version 1 documents are rejected with migration guidance. Update `version` to `2`,
+write multi-column fields as arrays, and rewrite aggregate metrics as mappings, for
+example `{mode: sum, column: bytes, output: total}`.
 
 Parameters are declared at the document root with one of `path`, `string`, `int`, or
-`bool` types. Values are referenced as whole YAML values using `{"$param": name}`;
+`bool` types, with an optional `description` explaining each parameter. Values are
+referenced as whole YAML values using `{"$param": name}`;
 partial string interpolation is not supported. CLI `--var` values take precedence
 over defaults. A parameter `path` default is relative to the run file; a `--var`
 path is relative to the caller's working directory. A parameter cannot be both `required` and
@@ -1156,8 +1163,17 @@ parameters:
     default: 1000
 ```
 
+YAML saved from the lazy interface takes input files as CLI arguments. File-output
+paths become required `path` parameters named `output`, `output_2`, and so on;
+partition directories use `output_dir`, and a rejects report uses `rejects`.
+For a recipe with a file output:
+
+```bash
+$ qlt run workflow.yaml events.csv --var output=summary.csv
+```
+
 ```yaml
-version: 1
+version: 2
 title: Event projection
 stages:
   - name: input
@@ -1177,7 +1193,7 @@ stages:
 Join two stages and write the result:
 
 ```yaml
-version: 1
+version: 2
 stages:
   - name: events
     steps: [{load: {paths: [events.csv]}}]
@@ -1193,7 +1209,7 @@ stages:
 Concatenate compatible stages and route a branch:
 
 ```yaml
-version: 1
+version: 2
 stages:
   - name: first
     steps: [{load: {paths: [part-a.csv]}}]
@@ -1218,7 +1234,7 @@ stages:
 Multiple outputs can be reached from one branch (or declared as independent stages):
 
 ```yaml
-version: 1
+version: 2
 stages:
   - name: input
     steps: [{load: {paths: [events.csv]}}]
@@ -1238,7 +1254,7 @@ stages:
 Typed parameters and static validation:
 
 ```yaml
-version: 1
+version: 2
 parameters:
   source:
     type: path
