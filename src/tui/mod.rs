@@ -4,6 +4,7 @@ mod app;
 mod cache;
 mod columns;
 mod detail;
+mod editor;
 mod input;
 mod output;
 mod task;
@@ -42,6 +43,7 @@ pub(super) struct Preview {
     sample_rows: Option<usize>,
     draft_issue: Option<String>,
     cache: Option<CacheInfo>,
+    temp_usage: Option<(u64, Option<u64>)>,
     commands: Vec<TypedCommand>,
     source_version: String,
 }
@@ -121,6 +123,46 @@ pub(super) struct Event {
 
 /// Start a terminal session. Arguments are the usual `load` arguments.
 pub fn run(args: &[String]) -> Result<(), QuiltError> {
+    if args.iter().any(|argument| argument == "--recipe") {
+        let mut recipe = None;
+        let mut files = Vec::new();
+        let mut vars = Vec::new();
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].as_str() {
+                "--recipe" => {
+                    index += 1;
+                    let path = args
+                        .get(index)
+                        .ok_or_else(|| QuiltError::usage("--recipe requires a YAML file"))?;
+                    if recipe.replace(PathBuf::from(path)).is_some() {
+                        return Err(QuiltError::usage("--recipe may be specified once"));
+                    }
+                }
+                "--var" => {
+                    index += 1;
+                    let value = args
+                        .get(index)
+                        .ok_or_else(|| QuiltError::usage("--var requires name=value"))?;
+                    if !value.contains('=') {
+                        return Err(QuiltError::usage("--var requires name=value"));
+                    }
+                    vars.push(value.clone());
+                }
+                value if value.starts_with('-') => {
+                    return Err(QuiltError::usage(format!(
+                        "unexpected lazy recipe option '{value}'"
+                    )))
+                }
+                value => files.push(PathBuf::from(value)),
+            }
+            index += 1;
+        }
+        let recipe = recipe.ok_or_else(|| QuiltError::usage("--recipe requires a YAML file"))?;
+        let commands =
+            crate::operations::automation::run::load_lazy_recipe(&recipe, &files, &vars)?;
+        return app::run_recipe(commands);
+    }
     let (initial, initial_source) = if args.is_empty() {
         (Vec::new(), None)
     } else {

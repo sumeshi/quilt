@@ -8,7 +8,7 @@ use super::task::TaskControl;
 use crate::controllers::arguments::OutputFormat;
 use crate::controllers::pipeline::Pipeline;
 use crate::error::QuiltError;
-use crate::operations::finalizers::{atomic_path, dump, jsonl};
+use crate::operations::finalizers::{dump, jsonl};
 use std::path::Path;
 
 pub(super) fn export(
@@ -26,21 +26,25 @@ pub(super) fn export(
     path.to_str()
         .ok_or_else(|| QuiltError::usage("Error: TUI export path must be valid UTF-8"))?;
 
-    atomic_path(path, "write TUI export", |staged_path| {
-        let staged_output = staged_path
-            .to_str()
-            .ok_or_else(|| QuiltError::usage("Error: TUI export path must be valid UTF-8"))?;
-        match format {
-            OutputFormat::Csv => {
-                dump::dump(pipeline.frame(), Some(staged_output), ',')?;
+    crate::operations::finalizers::atomic_path_checked(
+        path,
+        "write TUI export",
+        |staged_path| {
+            let staged_output = staged_path
+                .to_str()
+                .ok_or_else(|| QuiltError::usage("Error: TUI export path must be valid UTF-8"))?;
+            match format {
+                OutputFormat::Csv => {
+                    dump::dump(pipeline.frame(), Some(staged_output), ',')?;
+                }
+                OutputFormat::Jsonl => {
+                    jsonl::dump_jsonl(pipeline.frame(), staged_output)?;
+                }
             }
-            OutputFormat::Jsonl => {
-                jsonl::dump_jsonl(pipeline.frame(), staged_output)?;
-            }
-        }
-        task.check()?;
-        Ok(())
-    })?;
+            Ok(())
+        },
+        || task.check(),
+    )?;
 
     Ok(())
 }

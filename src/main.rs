@@ -19,6 +19,7 @@ fn run() -> ExitCode {
         if args.len() == 3 && matches!(args[2].as_str(), "-h" | "--help") {
             println!(
                 r#"Usage: qlt --lazy [load options] [files...]
+       qlt --lazy --recipe workflow.yaml [files...] [--var name=value...]
 
 Interactive pipeline editor with live previews and completion.
 

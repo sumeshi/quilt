@@ -56,8 +56,7 @@ impl Drop for TtyGuard {
 
 #[derive(Clone)]
 struct History {
-    commands: Vec<TypedCommand>,
-    sources: Vec<(usize, usize, String)>,
+    document: super::editor::EditorDocument,
     label: String,
 }
 struct PendingCommit {
@@ -65,6 +64,14 @@ struct PendingCommit {
     commands: Vec<TypedCommand>,
     label: String,
     edit: Option<(usize, usize)>,
+}
+#[derive(Default)]
+struct TaskLifecycle {
+    latest_preview: u64,
+    pending_commit: Option<PendingCommit>,
+    explicit: HashSet<u64>,
+    working: Option<(u64, TaskPhase, Instant)>,
+    cancelled: HashSet<u64>,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Focus {
@@ -75,19 +82,16 @@ enum Focus {
 }
 struct App {
     worker: Worker,
-    committed: Vec<TypedCommand>,
+    lifecycle: TaskLifecycle,
+    document: super::editor::EditorDocument,
     draft: String,
     cursor: usize,
     preview: Option<Preview>,
     mode: PreviewMode,
     generation: u64,
-    latest_preview: u64,
-    pending_commit: Option<PendingCommit>,
     history: Vec<History>,
     redo: Vec<History>,
-    sources: Vec<(usize, usize, String)>,
     edit_step: Option<(usize, usize)>,
-    explicit: HashSet<u64>,
     status: String,
     error: String,
     action_error: Option<u64>,
@@ -99,8 +103,6 @@ struct App {
     fullscreen: bool,
     pipeline_offset: usize,
     detail: Option<DetailView>,
-    working: Option<(u64, TaskPhase, Instant)>,
-    cancelled: HashSet<u64>,
     latest_detail: u64,
     completion: usize,
     candidates: Vec<input::Completion>,
@@ -117,31 +119,32 @@ pub(super) fn run(
     initial: Vec<TypedCommand>,
     initial_source: Option<String>,
 ) -> Result<(), QuiltError> {
+    let document = super::editor::EditorDocument::new(initial, initial_source);
+    run_inner(document)
+}
+
+pub(super) fn run_recipe(initial: Vec<TypedCommand>) -> Result<(), QuiltError> {
+    let document = super::editor::EditorDocument::from_recipe(initial)?;
+    run_inner(document)
+}
+
+fn run_inner(document: super::editor::EditorDocument) -> Result<(), QuiltError> {
     let _guard = TtyGuard::enter()?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal =
         Terminal::new(backend).map_err(|e| QuiltError::operation("TUI terminal", e.to_string()))?;
-    let mut sources = Vec::new();
-    if let Some(source) = initial_source {
-        if !initial.is_empty() {
-            sources.push((0, initial.len(), source));
-        }
-    }
     let mut app = App {
         worker: Worker::new(),
-        committed: initial,
+        lifecycle: TaskLifecycle::default(),
+        document,
         draft: String::new(),
         cursor: 0,
         preview: None,
         mode: PreviewMode::Sample,
         generation: 0,
-        latest_preview: 0,
-        pending_commit: None,
         history: Vec::new(),
         redo: Vec::new(),
-        sources,
         edit_step: None,
-        explicit: HashSet::new(),
         status: "Ready".into(),
         error: String::new(),
         action_error: None,
@@ -153,8 +156,6 @@ pub(super) fn run(
         fullscreen: false,
         pipeline_offset: 0,
         detail: None,
-        working: None,
-        cancelled: HashSet::new(),
         latest_detail: 0,
         completion: 0,
         candidates: Vec::new(),
@@ -167,7 +168,7 @@ pub(super) fn run(
         quitting: false,
     };
     app.refresh_candidates();
-    if !app.committed.is_empty() {
+    if !app.document.is_empty() {
         app.schedule_preview();
     }
     while !app.quitting {
@@ -187,7 +188,7 @@ pub(super) fn run(
             match event::read().map_err(|e| QuiltError::operation("TUI input", e.to_string()))? {
                 CEvent::Key(key) => app.key(key)?,
                 CEvent::Paste(text) => {
-                    if app.pending_commit.is_none()
+                    if app.lifecycle.pending_commit.is_none()
                         && app.picker.is_none()
                         && app.detail.is_none()
                         && !app.help_overlay
@@ -243,7 +244,7 @@ impl App {
         if self.picker.is_some() {
             return matches!(key, KeyCode::Char('?') | KeyCode::Esc);
         }
-        if self.pending_commit.is_some() || self.working.is_some() {
+        if self.lifecycle.pending_commit.is_some() || self.lifecycle.working.is_some() {
             return matches!(
                 key,
                 KeyCode::Esc
@@ -268,7 +269,7 @@ impl App {
     }
     fn changed(&mut self) {
         self.dirty_at = Some(Instant::now());
-        self.latest_preview = 0;
+        self.lifecycle.latest_preview = 0;
         self.preview_pending = false;
         self.clear_error();
         self.completion = 0;
@@ -279,7 +280,7 @@ impl App {
         self.cursor = self.draft.len();
         self.edit_step = None;
         self.dirty_at = None;
-        self.latest_preview = 0;
+        self.lifecycle.latest_preview = 0;
         self.preview_pending = false;
         self.pending_picker = false;
         self.completion = 0;
@@ -299,7 +300,7 @@ impl App {
                 .map_or(&[], |p| p.input_columns.as_slice()),
         );
         let editing_first_step = self.edit_step.is_some_and(|(start, _)| start == 0);
-        if !self.committed.is_empty() && !editing_first_step {
+        if !self.document.is_empty() && !editing_first_step {
             self.candidates.retain(|candidate| {
                 candidate.kind != input::CompletionKind::Command
                     || registry()
@@ -310,8 +311,8 @@ impl App {
         }
         if self.draft.trim().is_empty()
             && self
-                .committed
-                .last()
+                .document
+                .get(self.document.len().saturating_sub(1))
                 .is_some_and(|command| command.name() == "select")
         {
             if let Some(index) = self.candidates.iter().position(|candidate| {
@@ -337,20 +338,20 @@ impl App {
             action,
         })?;
         if !is_preview {
-            self.explicit.insert(id);
+            self.lifecycle.explicit.insert(id);
         }
         Ok(id)
     }
     fn candidate(&self) -> Result<Vec<TypedCommand>, QuiltError> {
         let all = if let Some((start, len)) = self.edit_step {
-            self.committed[..start]
+            self.document.commands()[..start]
                 .iter()
                 .cloned()
                 .chain(input::parse_commands(&self.draft)?)
-                .chain(self.committed[start + len..].iter().cloned())
+                .chain(self.document.commands()[start + len..].iter().cloned())
                 .collect()
         } else {
-            let mut all = self.committed.clone();
+            let mut all = self.document.commands();
             if !self.draft.trim().is_empty() {
                 all.extend(input::parse_commands(&self.draft)?);
             }
@@ -360,22 +361,22 @@ impl App {
     }
     fn draft_context(&self) -> Vec<TypedCommand> {
         let mut context = if let Some((start, _)) = self.edit_step {
-            self.committed[..start].to_vec()
+            self.document.commands()[..start].to_vec()
         } else {
-            self.committed.clone()
+            self.document.commands()
         };
         context.extend(input::preview_prefix(&self.draft[..self.cursor]));
         context
     }
     fn schedule_preview(&mut self) {
         self.dirty_at = None;
-        if self.pending_commit.is_some() {
+        if self.lifecycle.pending_commit.is_some() {
             return;
         }
         if self.draft.trim_start().starts_with(':') {
-            match self.queue(self.committed.clone(), Action::Preview(self.mode)) {
+            match self.queue(self.document.commands(), Action::Preview(self.mode)) {
                 Ok(id) => {
-                    self.latest_preview = id;
+                    self.lifecycle.latest_preview = id;
                     self.preview_pending = true;
                 }
                 Err(e) => {
@@ -388,9 +389,9 @@ impl App {
             return;
         }
         if self.draft.trim().is_empty() && self.edit_step.is_none() {
-            match self.queue(self.committed.clone(), Action::Preview(self.mode)) {
+            match self.queue(self.document.commands(), Action::Preview(self.mode)) {
                 Ok(id) => {
-                    self.latest_preview = id;
+                    self.lifecycle.latest_preview = id;
                     self.preview_pending = true;
                 }
                 Err(e) => {
@@ -431,7 +432,7 @@ impl App {
             },
         ) {
             Ok(id) => {
-                self.latest_preview = id;
+                self.lifecycle.latest_preview = id;
                 self.preview_pending = true;
                 self.status = "Updating draft preview…".into();
             }
@@ -449,23 +450,29 @@ impl App {
     fn handle_event(&mut self, event: Event) {
         let Event { id, result } = event;
         if !matches!(&result, Ok(Outcome::Working(_))) {
-            self.working = self.working.take().filter(|(task, _, _)| *task != id);
+            self.lifecycle.working = self
+                .lifecycle
+                .working
+                .take()
+                .filter(|(task, _, _)| *task != id);
         }
         match result {
             Ok(Outcome::Preview(p)) => {
-                if self.cancelled.remove(&id) {
-                    self.explicit.remove(&id);
+                if self.lifecycle.cancelled.remove(&id) {
+                    self.lifecycle.explicit.remove(&id);
                     if self
+                        .lifecycle
                         .working
                         .as_ref()
                         .is_some_and(|(task, _, _)| *task == id)
                     {
-                        self.working = None;
+                        self.lifecycle.working = None;
                     }
                     return;
                 }
-                if id != self.latest_preview
+                if id != self.lifecycle.latest_preview
                     && self
+                        .lifecycle
                         .pending_commit
                         .as_ref()
                         .is_none_or(|pending| pending.id != id)
@@ -494,65 +501,62 @@ impl App {
                     self.pending_picker = false;
                     self.open_picker_now();
                 }
-                if let Some(pending) = self.pending_commit.take() {
+                if let Some(pending) = self.lifecycle.pending_commit.take() {
                     if pending.id == id {
                         self.push_history(pending.label);
                         if let Some((start, len)) = pending.edit {
-                            self.replace_source(
+                            self.document.replace_group(
+                                pending.commands.clone(),
                                 start,
                                 len,
-                                pending
-                                    .commands
-                                    .len()
-                                    .saturating_sub(self.committed.len().saturating_sub(len)),
                                 self.draft.clone(),
                             );
                         } else {
-                            let start = self.committed.len();
-                            let added = pending.commands.len().saturating_sub(start);
-                            if added > 0 {
-                                self.sources.push((start, added, self.draft.clone()));
-                            }
+                            let start = self.document.len();
+                            self.document
+                                .append(pending.commands[start..].to_vec(), self.draft.clone());
                         }
-                        self.committed = pending.commands;
                         self.clear_draft(false);
                         self.status = "Command committed".into();
                     }
                 }
             }
             Ok(Outcome::Working(phase)) => {
-                if self.cancelled.contains(&id) {
+                if self.lifecycle.cancelled.contains(&id) {
                     return;
                 }
                 let started = self
+                    .lifecycle
                     .working
                     .as_ref()
                     .filter(|(task, _, _)| *task == id)
                     .map_or_else(Instant::now, |(_, _, started)| *started);
-                self.working = Some((id, phase, started));
+                self.lifecycle.working = Some((id, phase, started));
                 self.status = format!("{}…", phase.label());
             }
             Ok(Outcome::Cancelled) => {
-                self.cancelled.remove(&id);
-                self.explicit.remove(&id);
+                self.lifecycle.cancelled.remove(&id);
+                self.lifecycle.explicit.remove(&id);
                 if self
+                    .lifecycle
                     .working
                     .as_ref()
                     .is_some_and(|(task, _, _)| *task == id)
                 {
-                    self.working = None;
+                    self.lifecycle.working = None;
                 }
-                if id == self.latest_preview {
+                if id == self.lifecycle.latest_preview {
                     self.preview_pending = false;
                     self.pending_picker = false;
                     self.dirty_at = None;
                 }
                 if self
+                    .lifecycle
                     .pending_commit
                     .as_ref()
                     .is_some_and(|pending| pending.id == id)
                 {
-                    self.pending_commit = None;
+                    self.lifecycle.pending_commit = None;
                     self.preview_pending = false;
                 }
                 self.status = "Action cancelled".into();
@@ -562,10 +566,14 @@ impl App {
                 text,
                 truncated,
             }) => {
-                let was_cancelled = self.cancelled.remove(&id);
+                let was_cancelled = self.lifecycle.cancelled.remove(&id);
                 let is_current = id == self.latest_detail;
-                self.explicit.remove(&id);
-                self.working = self.working.take().filter(|(task, _, _)| *task != id);
+                self.lifecycle.explicit.remove(&id);
+                self.lifecycle.working = self
+                    .lifecycle
+                    .working
+                    .take()
+                    .filter(|(task, _, _)| *task != id);
                 if was_cancelled || !is_current {
                     return;
                 }
@@ -580,9 +588,13 @@ impl App {
                 ));
             }
             Ok(Outcome::Cached(c)) => {
-                self.cancelled.remove(&id);
-                self.explicit.remove(&id);
-                self.working = self.working.take().filter(|(task, _, _)| *task != id);
+                self.lifecycle.cancelled.remove(&id);
+                self.lifecycle.explicit.remove(&id);
+                self.lifecycle.working = self
+                    .lifecycle
+                    .working
+                    .take()
+                    .filter(|(task, _, _)| *task != id);
                 if let Some(preview) = &mut self.preview {
                     preview.cache = Some(c.clone());
                 }
@@ -590,9 +602,13 @@ impl App {
                 self.clear_error();
             }
             Ok(Outcome::CacheCleared) => {
-                self.cancelled.remove(&id);
-                self.explicit.remove(&id);
-                self.working = self.working.take().filter(|(task, _, _)| *task != id);
+                self.lifecycle.cancelled.remove(&id);
+                self.lifecycle.explicit.remove(&id);
+                self.lifecycle.working = self
+                    .lifecycle
+                    .working
+                    .take()
+                    .filter(|(task, _, _)| *task != id);
                 if let Some(preview) = &mut self.preview {
                     preview.cache = None;
                 }
@@ -600,38 +616,44 @@ impl App {
                 self.clear_error();
             }
             Ok(Outcome::Saved(path)) => {
-                self.cancelled.remove(&id);
-                self.explicit.remove(&id);
-                self.working = self.working.take().filter(|(task, _, _)| *task != id);
+                self.lifecycle.cancelled.remove(&id);
+                self.lifecycle.explicit.remove(&id);
+                self.lifecycle.working = self
+                    .lifecycle
+                    .working
+                    .take()
+                    .filter(|(task, _, _)| *task != id);
                 self.status = format!("Saved {}", safe(&path.to_string_lossy()));
                 self.clear_error();
             }
             Err(e) => {
-                if self.cancelled.remove(&id) {
-                    self.explicit.remove(&id);
+                if self.lifecycle.cancelled.remove(&id) {
+                    self.lifecycle.explicit.remove(&id);
                     return;
                 }
                 if self
+                    .lifecycle
                     .working
                     .as_ref()
                     .is_some_and(|(task, _, _)| *task == id)
                 {
-                    self.working = None;
+                    self.lifecycle.working = None;
                 }
                 let is_commit = self
+                    .lifecycle
                     .pending_commit
                     .as_ref()
                     .is_some_and(|pending| pending.id == id);
-                let explicit = self.explicit.remove(&id);
-                if explicit || id == self.latest_preview || is_commit {
+                let explicit = self.lifecycle.explicit.remove(&id);
+                if explicit || id == self.lifecycle.latest_preview || is_commit {
                     self.error = safe(&e.to_string());
                     self.action_error = explicit.then_some(id);
-                    if id == self.latest_preview {
+                    if id == self.lifecycle.latest_preview {
                         self.preview_pending = false;
                         self.pending_picker = false;
                     }
                     if is_commit {
-                        self.pending_commit = None;
+                        self.lifecycle.pending_commit = None;
                     }
                 }
             }
@@ -658,7 +680,7 @@ impl App {
         ) {
             Ok(id) => {
                 self.latest_detail = id;
-                self.working = Some((id, TaskPhase::Inspecting, Instant::now()));
+                self.lifecycle.working = Some((id, TaskPhase::Inspecting, Instant::now()));
                 self.status = format!("Reading row {}…", row + 1);
             }
             Err(e) => self.error = safe(&e.to_string()),
@@ -667,7 +689,8 @@ impl App {
     fn edit_pipeline_step(&mut self) {
         let step = self.pipeline_offset;
         if let Some((start, len, text)) = self
-            .sources
+            .document
+            .ranges()
             .iter()
             .find(|(start, len, _)| step >= *start && step < start.saturating_add(*len))
             .cloned()
@@ -702,25 +725,25 @@ impl App {
         }
     }
     fn cancel_work(&mut self) {
-        let mut ids = self.explicit.clone();
-        if let Some((id, _, _)) = self.working.take() {
+        let mut ids = self.lifecycle.explicit.clone();
+        if let Some((id, _, _)) = self.lifecycle.working.take() {
             ids.insert(id);
         }
-        if let Some(pending) = self.pending_commit.take() {
+        if let Some(pending) = self.lifecycle.pending_commit.take() {
             ids.insert(pending.id);
             self.preview_pending = false;
         }
-        if self.preview_pending && self.latest_preview != 0 {
-            ids.insert(self.latest_preview);
+        if self.preview_pending && self.lifecycle.latest_preview != 0 {
+            ids.insert(self.lifecycle.latest_preview);
         }
         self.dirty_at = None;
         self.preview_pending = false;
         self.pending_picker = false;
-        self.latest_preview = 0;
+        self.lifecycle.latest_preview = 0;
         let had_ids = !ids.is_empty();
-        self.cancelled.extend(ids.iter().copied());
+        self.lifecycle.cancelled.extend(ids.iter().copied());
         for id in ids {
-            self.explicit.remove(&id);
+            self.lifecycle.explicit.remove(&id);
         }
         self.latest_detail = 0;
         let queued_or_active = self.worker.cancel();
@@ -732,28 +755,13 @@ impl App {
     }
     fn push_history(&mut self, label: String) {
         self.history.push(History {
-            commands: self.committed.clone(),
-            sources: self.sources.clone(),
+            document: self.document.clone(),
             label,
         });
         self.redo.clear();
     }
-    fn replace_source(&mut self, start: usize, old_len: usize, new_len: usize, text: String) {
-        let end = start + old_len;
-        self.sources.retain(|(s, _, _)| *s < start || *s >= end);
-        let delta = new_len as isize - old_len as isize;
-        for (s, _, _) in &mut self.sources {
-            if *s >= end {
-                *s = (*s as isize + delta).max(0) as usize;
-            }
-        }
-        if new_len > 0 {
-            self.sources.push((start, new_len, text));
-            self.sources.sort_by_key(|(s, _, _)| *s);
-        }
-    }
     fn commit(&mut self) {
-        if self.pending_commit.is_some() {
+        if self.lifecycle.pending_commit.is_some() {
             if self.draft.trim() == ":quit" {
                 self.quitting = true;
             }
@@ -771,13 +779,14 @@ impl App {
             Err(e) => self.error = safe(&e.to_string()),
             Ok(parsed) => {
                 let edit = self.edit_step;
+                let committed = self.document.commands();
                 let next = if let Some((start, len)) = edit {
-                    let mut v = self.committed[..start].to_vec();
+                    let mut v = committed[..start].to_vec();
                     v.extend(parsed);
-                    v.extend_from_slice(&self.committed[start + len..]);
+                    v.extend_from_slice(&committed[start + len..]);
                     v
                 } else {
-                    let mut v = self.committed.clone();
+                    let mut v = self.document.commands();
                     v.extend(parsed);
                     v
                 };
@@ -794,10 +803,10 @@ impl App {
                 }
                 match self.queue(next.clone(), Action::Preview(self.mode)) {
                     Ok(id) => {
-                        self.latest_preview = id;
+                        self.lifecycle.latest_preview = id;
                         self.preview_pending = true;
                         self.dirty_at = None;
-                        self.pending_commit = Some(PendingCommit {
+                        self.lifecycle.pending_commit = Some(PendingCommit {
                             id,
                             commands: next,
                             label: self.draft.clone(),
@@ -824,7 +833,7 @@ impl App {
         let result=match cmd {
             ":quit" if args.is_empty()=>{self.quitting=true;Ok(())},
             ":undo" if args.is_empty()=>{self.undo();Ok(())},":redo" if args.is_empty()=>{self.redo();Ok(())},
-            ":write" if args.len()==1=>self.queue(self.committed.clone(),Action::ExportYaml(PathBuf::from(&args[0]))).map(|_|()),
+            ":write" if args.len()==1=>self.queue(self.document.commands(),Action::ExportYaml(PathBuf::from(&args[0]))).map(|_|()),
             ":export" if args.len() == 1 || args.len() == 3 => {
                 let path = PathBuf::from(&args[0]);
                 let format = if args.len() == 3 {
@@ -843,16 +852,16 @@ impl App {
                 };
                 format.and_then(|format| {
                     self.queue(
-                        self.committed.clone(),
+                        self.document.commands(),
                         Action::ExportData { path, format },
                     )
                     .map(|_| ())
                 })
             }
-            ":cache" if args.is_empty()=>self.queue(self.committed.clone(),Action::Cache).map(|_|()),
-            ":cache" if args.len()==1=>self.queue(self.committed.clone(),Action::SaveCache(PathBuf::from(&args[0]))).map(|_|()),
-            ":clear-cache" if args.is_empty()=>self.queue(self.committed.clone(),Action::ClearCache).map(|_|()),
-            ":edit" if args.len()==1=>{let n=args[0].parse::<usize>().ok().filter(|n|*n>0).ok_or_else(||QuiltError::usage(":edit requires a 1-based step number"));match n{Err(e)=>Err(e),Ok(n)=>if let Some((start,len,text))=self.sources.iter().find(|(s,l,_)|n>*s&&n<=*s+*l).cloned(){self.edit_step=Some((start,len));self.draft=text;self.cursor=self.draft.len();self.status=format!("Editing source group for steps {}–{}; Enter validates the replacement",start+1,start+len);self.changed();Ok(())}else{Err(QuiltError::usage("Original text is available only for commands entered in this TUI session"))}}},
+            ":cache" if args.is_empty()=>self.queue(self.document.commands(),Action::Cache).map(|_|()),
+            ":cache" if args.len()==1=>self.queue(self.document.commands(),Action::SaveCache(PathBuf::from(&args[0]))).map(|_|()),
+            ":clear-cache" if args.is_empty()=>self.queue(self.document.commands(),Action::ClearCache).map(|_|()),
+            ":edit" if args.len()==1=>{let n=args[0].parse::<usize>().ok().filter(|n|*n>0).ok_or_else(||QuiltError::usage(":edit requires a 1-based step number"));match n{Err(e)=>Err(e),Ok(n)=>if let Some((start,len,text))=self.document.ranges().iter().find(|(s,l,_)|n>*s&&n<=*s+*l).cloned(){self.edit_step=Some((start,len));self.draft=text;self.cursor=self.draft.len();self.status=format!("Editing source group for steps {}–{}; Enter validates the replacement",start+1,start+len);self.changed();Ok(())}else{Err(QuiltError::usage("Original text is available only for commands entered in this TUI session"))}}},
             _=>Err(QuiltError::usage("Use :write PATH, :export PATH [--format csv|jsonl], :cache [PATH], :clear-cache, :undo, :redo, :edit STEP, or :quit (quote paths with spaces)")),
         };
         match result {
@@ -983,14 +992,14 @@ impl App {
                 KeyCode::Char('c') => self.open_picker(),
                 KeyCode::Char('w') => self.prompt_action("write"),
                 KeyCode::Char('C') => {
-                    let commands = self.committed.clone();
+                    let commands = self.document.commands();
                     match self.queue(commands, Action::Cache) {
                         Ok(_) => self.status = "Creating session checkpoint…".into(),
                         Err(e) => self.error = safe(&e.to_string()),
                     }
                 }
                 KeyCode::Char('x') => {
-                    let commands = self.committed.clone();
+                    let commands = self.document.commands();
                     if let Err(e) = self.queue(commands, Action::ClearCache) {
                         self.error = safe(&e.to_string());
                     }
@@ -1041,15 +1050,15 @@ impl App {
                     self.pipeline_offset = self.pipeline_offset.saturating_sub(1)
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    let last = self.committed.len().saturating_sub(1);
+                    let last = self.document.len().saturating_sub(1);
                     self.pipeline_offset = self.pipeline_offset.saturating_add(1).min(last);
                 }
                 KeyCode::PageUp => self.pipeline_offset = self.pipeline_offset.saturating_sub(8),
                 KeyCode::PageDown => {
-                    let last = self.committed.len().saturating_sub(1);
+                    let last = self.document.len().saturating_sub(1);
                     self.pipeline_offset = self.pipeline_offset.saturating_add(8).min(last);
                 }
-                KeyCode::Enter if self.pending_commit.is_some() => {
+                KeyCode::Enter if self.lifecycle.pending_commit.is_some() => {
                     self.status = "Waiting for validation before editing a pipeline step".into();
                 }
                 KeyCode::Enter => self.edit_pipeline_step(),
@@ -1060,7 +1069,7 @@ impl App {
         if focus_at_key_start != Focus::Input {
             return Ok(());
         }
-        if self.pending_commit.is_some() {
+        if self.lifecycle.pending_commit.is_some() {
             if k.code == KeyCode::Enter && self.draft.trim() == ":quit" {
                 self.quitting = true;
             } else {
@@ -1092,9 +1101,9 @@ impl App {
             KeyCode::Esc => {
                 self.pending_picker = false;
                 self.clear_draft(false);
-                if self.committed.is_empty() {
+                if self.document.is_empty() {
                     self.preview = None;
-                    self.latest_preview = 0;
+                    self.lifecycle.latest_preview = 0;
                     self.preview_pending = false;
                 } else {
                     self.schedule_preview();
@@ -1177,7 +1186,10 @@ impl App {
         if self.dirty_at.is_some() {
             self.pending_picker = true;
             self.schedule_preview();
-        } else if self.preview_pending || self.latest_preview == 0 || self.preview.is_none() {
+        } else if self.preview_pending
+            || self.lifecycle.latest_preview == 0
+            || self.preview.is_none()
+        {
             self.pending_picker = true;
             if !self.preview_pending {
                 self.schedule_preview();
@@ -1248,9 +1260,9 @@ impl App {
         self.clear_draft(false);
     }
     fn preview_committed(&mut self) {
-        if self.committed.is_empty() {
+        if self.document.is_empty() {
             self.preview = None;
-            self.latest_preview = 0;
+            self.lifecycle.latest_preview = 0;
             self.preview_pending = false;
         } else {
             self.schedule_preview();
@@ -1259,12 +1271,10 @@ impl App {
     fn undo(&mut self) {
         if let Some(prev) = self.history.pop() {
             self.redo.push(History {
-                commands: self.committed.clone(),
-                sources: self.sources.clone(),
+                document: self.document.clone(),
                 label: prev.label,
             });
-            self.committed = prev.commands;
-            self.sources = prev.sources;
+            self.document = prev.document;
             self.reset_draft_for_history_change();
             self.preview_committed();
         }
@@ -1272,12 +1282,10 @@ impl App {
     fn redo(&mut self) {
         if let Some(next) = self.redo.pop() {
             self.history.push(History {
-                commands: self.committed.clone(),
-                sources: self.sources.clone(),
+                document: self.document.clone(),
                 label: next.label,
             });
-            self.committed = next.commands;
-            self.sources = next.sources;
+            self.document = next.document;
             self.reset_draft_for_history_change();
             self.preview_committed();
         }
@@ -1552,7 +1560,7 @@ fn draw_input(f: &mut Frame, input_area: Rect, app: &App) {
         &app.draft,
         app.cursor,
         selected_completion,
-        !app.committed.is_empty(),
+        !app.document.is_empty(),
     );
     let input_line = Line::from(vec![
         Span::raw(safe_draft),
@@ -1685,7 +1693,7 @@ fn draw_footer(f: &mut Frame, footer_area: Rect, app: &App) {
         );
         return;
     }
-    let compact = footer_area.width <= 100 || app.working.is_some();
+    let compact = footer_area.width <= 100 || app.lifecycle.working.is_some();
     let focus_hint = match (app.focus, compact) {
         (Focus::Input, true) => "Input | Tab/↑↓ | ^A h/t/b/o",
         (Focus::Pipeline, true) => "Pipeline | ↑↓ select, Enter edit | Esc input",
@@ -1701,7 +1709,7 @@ fn draw_footer(f: &mut Frame, footer_area: Rect, app: &App) {
     };
     let status = if !app.error.is_empty() {
         format!("! {} | ^A e", truncate_display(&safe(&app.error), 15))
-    } else if let Some((_, phase, started)) = app.working.as_ref() {
+    } else if let Some((_, phase, started)) = app.lifecycle.working.as_ref() {
         let phase = match phase {
             TaskPhase::Loading => "Loading",
             TaskPhase::Computing => "Computing",
@@ -1727,7 +1735,8 @@ fn draw_footer(f: &mut Frame, footer_area: Rect, app: &App) {
 }
 
 fn draw_pipeline(f: &mut Frame, area: Rect, app: &mut App) {
-    let commands = app.committed.as_slice();
+    let commands = app.document.commands();
+    let commands = commands.as_slice();
     let total = commands.len();
     app.pipeline_offset = app.pipeline_offset.min(total.saturating_sub(1));
     let inner_rows = area.height.saturating_sub(2) as usize;
@@ -1747,7 +1756,8 @@ fn draw_pipeline(f: &mut Frame, area: Rect, app: &mut App) {
             } else {
                 "  "
             };
-            let source = app.sources.iter().find(|(source_start, len, _)| {
+            let source_ranges = app.document.ranges();
+            let source = source_ranges.iter().find(|(source_start, len, _)| {
                 index >= *source_start && index < source_start.saturating_add(*len)
             });
             let line = if let Some((source_start, len, original)) = source {
@@ -2026,8 +2036,15 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
             p.total_columns
         )
     };
+    let temporary = p.temp_usage.map_or_else(
+        || "temp n/a".to_owned(),
+        |(used, limit)| {
+            let limit = limit.map_or_else(|| "unlimited".to_owned(), format_bytes);
+            format!("temp {}/{}", format_bytes(used), limit)
+        },
+    );
     let title = format!(
-        "{} | {} | {}{} | cache {} B",
+        "{} | {} | {}{} | cache {} B | {}",
         if p.draft_issue.is_some() {
             "Input before draft"
         } else {
@@ -2040,7 +2057,8 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
         } else {
             ""
         },
-        p.cache.as_ref().map_or(0, |c| c.bytes)
+        p.cache.as_ref().map_or(0, |c| c.bytes),
+        temporary
     );
     if start == end {
         let mut block = Block::default().borders(Borders::ALL).title(title);
@@ -2110,6 +2128,15 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_widget(table, area);
 }
 
+fn format_bytes(bytes: u64) -> String {
+    const MIB: u64 = 1024 * 1024;
+    if bytes >= MIB {
+        format!("{} MiB", bytes / MIB)
+    } else {
+        format!("{} KiB", bytes / 1024)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2135,19 +2162,16 @@ mod tests {
     fn test_app() -> App {
         App {
             worker: Worker::new(),
-            committed: Vec::new(),
+            lifecycle: TaskLifecycle::default(),
+            document: crate::tui::editor::EditorDocument::default(),
             draft: String::new(),
             cursor: 0,
             preview: None,
             mode: PreviewMode::Sample,
             generation: 0,
-            latest_preview: 0,
-            pending_commit: None,
             history: Vec::new(),
             redo: Vec::new(),
-            sources: Vec::new(),
             edit_step: None,
-            explicit: HashSet::new(),
             status: "Ready".into(),
             error: String::new(),
             action_error: None,
@@ -2159,8 +2183,6 @@ mod tests {
             fullscreen: false,
             pipeline_offset: 0,
             detail: None,
-            working: None,
-            cancelled: HashSet::new(),
             latest_detail: 0,
             completion: 0,
             candidates: Vec::new(),
@@ -2265,14 +2287,14 @@ mod tests {
         }
 
         let mut app = test_app();
-        app.working = Some((1, TaskPhase::Saving, Instant::now()));
+        app.lifecycle.working = Some((1, TaskPhase::Saving, Instant::now()));
         app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
             .unwrap();
         let rows = screen(&mut app, 80, 24);
         assert!(rows.iter().any(|row| row.contains("z Cancel")));
         assert!(!rows.iter().any(|row| row.contains("o Export")));
         assert!(!rows.iter().any(|row| row.contains("C Cache")));
-        app.working = None;
+        app.lifecycle.working = None;
         app.picker = Some(ColumnPicker::new(
             vec![("name".into(), "String".into())],
             vec![],
@@ -2292,7 +2314,8 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(24, 8)).unwrap();
         let mut app = App {
             worker: Worker::new(),
-            committed: Vec::new(),
+            lifecycle: TaskLifecycle::default(),
+            document: crate::tui::editor::EditorDocument::default(),
             draft: "select 名".into(),
             cursor: "select 名".len(),
             preview: Some(Preview {
@@ -2305,18 +2328,15 @@ mod tests {
                 sample_rows: Some(10_000),
                 draft_issue: None,
                 cache: None,
+                temp_usage: None,
                 commands: Vec::new(),
                 source_version: String::new(),
             }),
             mode: PreviewMode::Sample,
             generation: 0,
-            latest_preview: 0,
-            pending_commit: None,
             history: Vec::new(),
             redo: Vec::new(),
-            sources: Vec::new(),
             edit_step: None,
-            explicit: HashSet::new(),
             status: "Ready".into(),
             error: String::new(),
             action_error: None,
@@ -2328,8 +2348,6 @@ mod tests {
             fullscreen: false,
             pipeline_offset: 0,
             detail: None,
-            working: None,
-            cancelled: HashSet::new(),
             latest_detail: 0,
             completion: 0,
             candidates: Vec::new(),
@@ -2348,7 +2366,7 @@ mod tests {
     fn preview_update_bounds_scroll_after_result_shrinks() {
         let mut app = test_app();
         app.rows_offset = 80;
-        app.latest_preview = 1;
+        app.lifecycle.latest_preview = 1;
         app.handle_event(Event {
             id: 1,
             result: Ok(Outcome::Preview(Preview {
@@ -2364,6 +2382,7 @@ mod tests {
                 sample_rows: Some(100),
                 draft_issue: None,
                 cache: None,
+                temp_usage: None,
                 commands: Vec::new(),
                 source_version: String::new(),
             })),
@@ -2386,8 +2405,8 @@ mod tests {
         let mut app = test_app();
         let source = "load source.csv - filter true - filter true - filter true - filter true - filter true - filter true - filter true - filter true - filter true";
         let commands = input::parse_commands(source).unwrap();
-        app.committed = commands.clone();
-        app.sources.push((0, commands.len(), source.into()));
+        app.document =
+            crate::tui::editor::EditorDocument::new(commands.clone(), Some(source.into()));
         app.preview = Some(Preview {
             columns: vec![("value".into(), "Boolean".into())],
             total_columns: 1,
@@ -2398,6 +2417,7 @@ mod tests {
             sample_rows: Some(100),
             draft_issue: None,
             cache: None,
+            temp_usage: None,
             commands: commands.clone(),
             source_version: "test".into(),
         });
@@ -2425,7 +2445,7 @@ mod tests {
         assert_eq!(app.edit_step, Some((0, commands.len())));
         assert_eq!(app.draft, source);
         assert!(app.status.contains("steps 1–10"));
-        assert!(app.pending_commit.is_none());
+        assert!(app.lifecycle.pending_commit.is_none());
         terminal.draw(|frame| render(frame, &mut app)).unwrap();
         let rendered: String = terminal
             .backend()
@@ -2451,17 +2471,20 @@ mod tests {
     #[test]
     fn cancelling_pending_preview_quarantines_late_commit_and_preserves_draft() {
         let mut app = test_app();
-        app.committed = input::parse_commands("load existing.csv").unwrap();
+        app.document = crate::tui::editor::EditorDocument::new(
+            input::parse_commands("load existing.csv").unwrap(),
+            None,
+        );
         app.draft = "filter true".into();
         app.cursor = app.draft.len();
         let next = input::parse_commands("load existing.csv - filter true").unwrap();
-        app.pending_commit = Some(PendingCommit {
+        app.lifecycle.pending_commit = Some(PendingCommit {
             id: 42,
             commands: next.clone(),
             label: app.draft.clone(),
             edit: None,
         });
-        app.latest_preview = 42;
+        app.lifecycle.latest_preview = 42;
         app.preview_pending = true;
         app.cancel_work();
         app.handle_event(Event {
@@ -2476,26 +2499,27 @@ mod tests {
                 sample_rows: Some(100),
                 draft_issue: None,
                 cache: None,
+                temp_usage: None,
                 commands: next,
                 source_version: "test".into(),
             })),
         });
-        assert_eq!(app.committed.len(), 1);
+        assert_eq!(app.document.len(), 1);
         assert_eq!(app.draft, "filter true");
-        assert!(app.pending_commit.is_none());
+        assert!(app.lifecycle.pending_commit.is_none());
 
         let mut initial_preview = test_app();
-        initial_preview.latest_preview = 77;
+        initial_preview.lifecycle.latest_preview = 77;
         initial_preview.preview_pending = true;
         initial_preview.pending_picker = true;
         initial_preview.dirty_at = Some(Instant::now());
-        initial_preview.working = Some((77, TaskPhase::Loading, Instant::now()));
+        initial_preview.lifecycle.working = Some((77, TaskPhase::Loading, Instant::now()));
         initial_preview.cancel_work();
-        assert_eq!(initial_preview.latest_preview, 0);
+        assert_eq!(initial_preview.lifecycle.latest_preview, 0);
         assert!(!initial_preview.preview_pending);
         assert!(!initial_preview.pending_picker);
         assert!(initial_preview.dirty_at.is_none());
-        assert!(initial_preview.working.is_none());
+        assert!(initial_preview.lifecycle.working.is_none());
         initial_preview.handle_event(Event {
             id: 77,
             result: Ok(Outcome::Cancelled),
@@ -2507,15 +2531,15 @@ mod tests {
     #[test]
     fn save_success_is_reported_even_when_cancel_was_requested() {
         let mut app = test_app();
-        app.explicit.insert(7);
-        app.working = Some((7, TaskPhase::Saving, Instant::now()));
+        app.lifecycle.explicit.insert(7);
+        app.lifecycle.working = Some((7, TaskPhase::Saving, Instant::now()));
         app.cancel_work();
         app.handle_event(Event {
             id: 7,
             result: Ok(Outcome::Saved(PathBuf::from("full.csv"))),
         });
         assert_eq!(app.status, "Saved full.csv");
-        assert!(!app.cancelled.contains(&7));
+        assert!(!app.lifecycle.cancelled.contains(&7));
 
         app.preview = Some(Preview {
             columns: Vec::new(),
@@ -2527,11 +2551,12 @@ mod tests {
             sample_rows: None,
             draft_issue: None,
             cache: None,
+            temp_usage: None,
             commands: Vec::new(),
             source_version: String::new(),
         });
-        app.explicit.insert(8);
-        app.working = Some((8, TaskPhase::Caching, Instant::now()));
+        app.lifecycle.explicit.insert(8);
+        app.lifecycle.working = Some((8, TaskPhase::Caching, Instant::now()));
         app.cancel_work();
         app.handle_event(Event {
             id: 8,
@@ -2545,10 +2570,10 @@ mod tests {
             app.preview.as_ref().unwrap().cache.as_ref().unwrap().bytes,
             123
         );
-        assert!(!app.cancelled.contains(&8));
+        assert!(!app.lifecycle.cancelled.contains(&8));
 
-        app.explicit.insert(9);
-        app.working = Some((9, TaskPhase::Caching, Instant::now()));
+        app.lifecycle.explicit.insert(9);
+        app.lifecycle.working = Some((9, TaskPhase::Caching, Instant::now()));
         app.cancel_work();
         app.handle_event(Event {
             id: 9,
@@ -2556,7 +2581,7 @@ mod tests {
         });
         assert_eq!(app.status, "Cache cleared");
         assert!(app.preview.as_ref().unwrap().cache.is_none());
-        assert!(!app.cancelled.contains(&9));
+        assert!(!app.lifecycle.cancelled.contains(&9));
     }
 
     #[test]
@@ -2619,6 +2644,7 @@ mod tests {
             sample_rows: Some(10_000),
             draft_issue: None,
             cache: None,
+            temp_usage: None,
             commands: Vec::new(),
             source_version: String::new(),
         });
@@ -2644,7 +2670,7 @@ mod tests {
             .unwrap();
         assert_eq!(app.columns_offset, 14);
 
-        app.latest_preview = 1;
+        app.lifecycle.latest_preview = 1;
         app.handle_event(Event {
             id: 1,
             result: Ok(Outcome::Preview(Preview {
@@ -2657,6 +2683,7 @@ mod tests {
                 sample_rows: Some(10_000),
                 draft_issue: None,
                 cache: None,
+                temp_usage: None,
                 commands: Vec::new(),
                 source_version: String::new(),
             })),
@@ -2667,10 +2694,13 @@ mod tests {
     #[test]
     fn draft_preview_fallback_keeps_pipeline_uncommitted_and_completes_input_schema() {
         let mut app = test_app();
-        app.committed = input::parse_commands("load source.csv").unwrap();
+        app.document = crate::tui::editor::EditorDocument::new(
+            input::parse_commands("load source.csv").unwrap(),
+            None,
+        );
         app.draft = "select ".into();
         app.cursor = app.draft.len();
-        app.latest_preview = 4;
+        app.lifecycle.latest_preview = 4;
         app.handle_event(Event {
             id: 4,
             result: Ok(Outcome::Preview(Preview {
@@ -2687,6 +2717,7 @@ mod tests {
                 sample_rows: Some(10_000),
                 draft_issue: Some("invalid column; showing input before draft".into()),
                 cache: None,
+                temp_usage: None,
                 commands: Vec::new(),
                 source_version: String::new(),
             })),
@@ -2702,8 +2733,8 @@ mod tests {
         app.draft = "select ".into();
         app.cursor = app.draft.len();
         app.refresh_candidates();
-        assert_eq!(app.committed.len(), 1);
-        assert!(app.pending_commit.is_none());
+        assert_eq!(app.document.len(), 1);
+        assert!(app.lifecycle.pending_commit.is_none());
         assert!(app.status.contains("Input before draft"));
         assert!(app
             .candidates
@@ -2724,7 +2755,7 @@ mod tests {
         let mut app = test_app();
         app.draft = "select alpha,beta".into();
         app.cursor = app.draft.len();
-        app.latest_preview = 1;
+        app.lifecycle.latest_preview = 1;
         app.preview = Some(Preview {
             columns: vec![("alpha".into(), "String".into())],
             total_columns: 1,
@@ -2738,6 +2769,7 @@ mod tests {
             sample_rows: Some(10_000),
             draft_issue: None,
             cache: None,
+            temp_usage: None,
             commands: Vec::new(),
             source_version: String::new(),
         });
@@ -2747,7 +2779,7 @@ mod tests {
         app.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
             .unwrap();
         assert!(app.picker.is_some());
-        assert!(app.explicit.is_empty());
+        assert!(app.lifecycle.explicit.is_empty());
         app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
             .unwrap();
         app.key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
@@ -2773,7 +2805,7 @@ mod tests {
             .unwrap();
         app.key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::NONE))
             .unwrap();
-        assert_eq!(app.explicit.len(), 1);
+        assert_eq!(app.lifecycle.explicit.len(), 1);
         assert!(app.status.contains("checkpoint"));
 
         // The picker can repair an unfinished literal name without applying it.
@@ -2789,7 +2821,10 @@ mod tests {
     #[test]
     fn completion_pane_scrolls_through_commands_and_ghost_is_display_only() {
         let mut app = test_app();
-        app.committed = input::parse_commands("load source.csv").unwrap();
+        app.document = crate::tui::editor::EditorDocument::new(
+            input::parse_commands("load source.csv").unwrap(),
+            None,
+        );
         app.preview = Some(Preview {
             columns: vec![("alpha".into(), "String".into())],
             total_columns: 1,
@@ -2800,6 +2835,7 @@ mod tests {
             sample_rows: Some(10_000),
             draft_issue: None,
             cache: None,
+            temp_usage: None,
             commands: Vec::new(),
             source_version: String::new(),
         });
@@ -2810,7 +2846,7 @@ mod tests {
             .position(|c| c.display == "count")
             .unwrap();
         app.completion = count_index;
-        let original_committed = app.committed.clone();
+        let original_committed = app.document.commands();
         let mut terminal = Terminal::new(TestBackend::new(180, 36)).unwrap();
         terminal.draw(|f| render(f, &mut app)).unwrap();
         let input_row = 33;
@@ -2822,8 +2858,8 @@ mod tests {
             .collect::<String>();
         assert!(ghost_row.starts_with("count [columns]"));
         assert!(app.draft.is_empty());
-        assert!(app.pending_commit.is_none());
-        assert_eq!(app.committed, original_committed);
+        assert!(app.lifecycle.pending_commit.is_none());
+        assert_eq!(app.document.commands(), original_committed);
         let count_description: String = terminal
             .backend()
             .buffer()
@@ -2869,6 +2905,7 @@ mod tests {
             sample_rows: Some(10_000),
             draft_issue: None,
             cache: None,
+            temp_usage: None,
             commands: Vec::new(),
             source_version: String::new(),
         });
@@ -2928,9 +2965,9 @@ mod tests {
     fn stale_preview_errors_do_not_replace_newer_commit_feedback() {
         let mut app = test_app();
         app.generation = 8;
-        app.latest_preview = 8;
+        app.lifecycle.latest_preview = 8;
         app.draft = "select x".into();
-        app.pending_commit = Some(PendingCommit {
+        app.lifecycle.pending_commit = Some(PendingCommit {
             id: 8,
             commands: Vec::new(),
             label: "select x".into(),
@@ -2941,13 +2978,13 @@ mod tests {
             result: Err(QuiltError::usage("stale")),
         });
         assert!(app.error.is_empty());
-        assert!(app.pending_commit.is_some());
+        assert!(app.lifecycle.pending_commit.is_some());
         app.handle_event(Event {
             id: 8,
             result: Err(QuiltError::usage("invalid column")),
         });
         assert!(app.error.contains("invalid column"));
-        assert!(app.pending_commit.is_none());
+        assert!(app.lifecycle.pending_commit.is_none());
         assert_eq!(app.draft, "select x");
 
         let stale_preview = || Preview {
@@ -2960,28 +2997,32 @@ mod tests {
             sample_rows: Some(10_000),
             draft_issue: None,
             cache: None,
+            temp_usage: None,
             commands: Vec::new(),
             source_version: String::new(),
         };
-        app.pending_commit = None;
-        app.latest_preview = 0;
+        app.lifecycle.pending_commit = None;
+        app.lifecycle.latest_preview = 0;
         app.draft = ":cache".into();
         app.status = "Built-in draft; Enter executes it".into();
-        app.working = Some((1, TaskPhase::Computing, Instant::now()));
+        app.lifecycle.working = Some((1, TaskPhase::Computing, Instant::now()));
         app.handle_event(Event {
             id: 1,
             result: Ok(Outcome::Preview(stale_preview())),
         });
-        assert!(app.working.is_none());
+        assert!(app.lifecycle.working.is_none());
         assert_eq!(app.draft, ":cache");
         assert_eq!(app.status, "Built-in draft; Enter executes it");
 
-        app.working = Some((2, TaskPhase::Saving, Instant::now()));
+        app.lifecycle.working = Some((2, TaskPhase::Saving, Instant::now()));
         app.handle_event(Event {
             id: 1,
             result: Ok(Outcome::Preview(stale_preview())),
         });
-        assert_eq!(app.working.as_ref().map(|(id, _, _)| *id), Some(2));
+        assert_eq!(
+            app.lifecycle.working.as_ref().map(|(id, _, _)| *id),
+            Some(2)
+        );
     }
 
     #[test]
@@ -2989,7 +3030,7 @@ mod tests {
         let mut app = test_app();
         app.draft = ":cache \"folder with spaces/data.parquet\"".into();
         app.directive();
-        assert_eq!(app.explicit.len(), 1);
+        assert_eq!(app.lifecycle.explicit.len(), 1);
         assert!(app.error.is_empty());
     }
 
@@ -3006,11 +3047,12 @@ mod tests {
             sample_rows: Some(10_000),
             draft_issue: None,
             cache: None,
+            temp_usage: None,
             commands: Vec::new(),
             source_version: String::new(),
         });
         app.error = "invalid draft".into();
-        app.explicit.insert(1);
+        app.lifecycle.explicit.insert(1);
         app.handle_event(Event {
             id: 1,
             result: Ok(Outcome::Cached(super::super::CacheInfo {
@@ -3026,7 +3068,7 @@ mod tests {
         );
 
         app.error = "old save error".into();
-        app.explicit.insert(2);
+        app.lifecycle.explicit.insert(2);
         app.handle_event(Event {
             id: 2,
             result: Ok(Outcome::Saved(PathBuf::from("checkpoint.parquet"))),
@@ -3047,19 +3089,22 @@ mod tests {
         assert!(app.draft.is_empty());
         assert!(app.edit_step.is_none());
         assert!(app.error.is_empty());
-        assert_eq!(app.latest_preview, 0);
+        assert_eq!(app.lifecycle.latest_preview, 0);
     }
 
     #[test]
     fn undo_clears_edit_state_before_previewing_shorter_pipeline() {
         let prior = input::parse_commands("load dummy.csv").unwrap();
-        let current = input::parse_commands("load dummy.csv - head 5").unwrap();
         let mut app = test_app();
-        app.committed = current;
-        app.sources = vec![(0, 1, "load dummy.csv".into()), (1, 1, "head 5".into())];
+        app.document =
+            crate::tui::editor::EditorDocument::new(prior.clone(), Some("load dummy.csv".into()));
+        app.document
+            .append(input::parse_commands("head 5").unwrap(), "head 5".into());
         app.history.push(History {
-            commands: prior.clone(),
-            sources: vec![(0, 1, "load dummy.csv".into())],
+            document: crate::tui::editor::EditorDocument::new(
+                prior.clone(),
+                Some("load dummy.csv".into()),
+            ),
             label: "head 5".into(),
         });
         app.edit_step = Some((1, 1));
@@ -3128,11 +3173,14 @@ mod tests {
 
         let mut app = test_app();
         let source_command = format!("load {}", input::quote_argument(&source.to_string_lossy()));
-        app.committed = input::parse_commands(&source_command).unwrap();
+        app.document = crate::tui::editor::EditorDocument::new(
+            input::parse_commands(&source_command).unwrap(),
+            None,
+        );
         app.draft = "select a".into();
         app.cursor = app.draft.len();
         app.schedule_preview();
-        let draft_preview = app.latest_preview;
+        let draft_preview = app.lifecycle.latest_preview;
         wait_for_final_event(&mut app, draft_preview);
         assert_eq!(
             app.preview.as_ref().unwrap().columns[0].0,
@@ -3142,10 +3190,10 @@ mod tests {
 
         app.prompt_action("export");
         app.schedule_preview();
-        let confirmed_preview = app.latest_preview;
+        let confirmed_preview = app.lifecycle.latest_preview;
         wait_for_final_event(&mut app, confirmed_preview);
         let preview = app.preview.as_ref().unwrap();
-        assert_eq!(preview.commands, app.committed);
+        assert_eq!(preview.commands, app.document.commands());
         assert_eq!(
             preview
                 .columns
@@ -3163,17 +3211,20 @@ mod tests {
         app.commit();
         let export_id = app.generation;
         app.schedule_preview();
-        let refreshed_after_export = app.latest_preview;
+        let refreshed_after_export = app.lifecycle.latest_preview;
         wait_for_final_event(&mut app, export_id);
         wait_for_final_event(&mut app, refreshed_after_export);
         let exported = fs::read_to_string(&output).unwrap();
         assert!(exported.lines().next().unwrap().contains("a,b,c"));
-        assert_eq!(app.preview.as_ref().unwrap().commands, app.committed);
+        assert_eq!(
+            app.preview.as_ref().unwrap().commands,
+            app.document.commands()
+        );
 
         app.draft = "select missing".into();
         app.cursor = app.draft.len();
         app.schedule_preview();
-        let invalid_draft = app.latest_preview;
+        let invalid_draft = app.lifecycle.latest_preview;
         wait_for_final_event(&mut app, invalid_draft);
         assert!(app.preview.as_ref().unwrap().draft_issue.is_some());
         app.prompt_action("export");
@@ -3185,11 +3236,14 @@ mod tests {
         app.commit();
         let failed_export_id = app.generation;
         app.schedule_preview();
-        let refreshed_preview = app.latest_preview;
+        let refreshed_preview = app.lifecycle.latest_preview;
         wait_for_final_event(&mut app, failed_export_id);
         wait_for_final_event(&mut app, refreshed_preview);
         assert!(app.error.contains("already exists"), "{}", app.error);
-        assert_eq!(app.preview.as_ref().unwrap().commands, app.committed);
+        assert_eq!(
+            app.preview.as_ref().unwrap().commands,
+            app.document.commands()
+        );
 
         app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
             .unwrap();

@@ -165,6 +165,7 @@ struct Engine {
     source: Option<LoadedSource>,
     cache: super::cache::SessionCache,
     sample_budget: usize,
+    resources: ExecutionResources,
 }
 
 impl Engine {
@@ -177,6 +178,7 @@ impl Engine {
             source: None,
             cache: super::cache::SessionCache::new(DEFAULT_CACHE_LIMIT),
             sample_budget,
+            resources: ExecutionResources::new(),
         }
     }
 
@@ -219,17 +221,8 @@ impl Engine {
                 let pipeline = self.full_pipeline(&request.commands, task)?;
                 task.check()?;
                 progress(TaskPhase::Saving);
-                let requested = path.to_string_lossy();
-                let result = pipeline.dumpcache_result(Some(&requested))?;
-                match result {
-                    crate::operations::finalizers::FinalizerResult::File(saved_path) => {
-                        Ok(Outcome::Saved(saved_path))
-                    }
-                    _ => Err(QuiltError::operation(
-                        "write TUI cache",
-                        "dumpcache did not return a file path",
-                    )),
-                }
+                let saved_path = save_cache(&pipeline, &path, task)?;
+                Ok(Outcome::Saved(saved_path))
             }
             Action::ExportData { path, format } => {
                 progress(TaskPhase::Loading);
@@ -241,6 +234,7 @@ impl Engine {
             Action::Preview(mode) => {
                 progress(TaskPhase::Loading);
                 let pipeline = self.pipeline_for(&request.commands, mode, task)?;
+                let temp_usage = pipeline.resources().temp_usage();
                 progress(TaskPhase::Computing);
                 let preview = preview_frame(pipeline.frame(), task)?;
                 let source_version = self.loaded_source_version(&request.commands)?;
@@ -253,6 +247,7 @@ impl Engine {
                     has_more_rows: preview.has_more_rows,
                     mode,
                     cache: self.cache.info(),
+                    temp_usage: Some(temp_usage),
                     sample_rows: self.sample_rows(mode),
                     draft_issue: None,
                     commands: request.commands,
@@ -480,7 +475,7 @@ impl Engine {
         if !current {
             task.check()?;
             self.cache.clear();
-            let pipeline = Pipeline::load_args(args, ExecutionResources::new())?;
+            let pipeline = Pipeline::load_args(args, self.resources.fork(Vec::new()))?;
             task.check()?;
             self.source = Some(LoadedSource {
                 args: args.clone(),
@@ -657,6 +652,7 @@ impl Engine {
         let (preview, input_columns) = rendered;
         let source_version = self.loaded_source_version(&rendered_commands)?;
         self.verify_source_version(&rendered_commands, &source_version)?;
+        let temp_usage = pipeline.resources().temp_usage();
         Ok(Preview {
             columns: preview.columns,
             total_columns: preview.total_columns,
@@ -667,6 +663,7 @@ impl Engine {
             sample_rows: self.sample_rows(mode),
             draft_issue,
             cache: self.cache.info(),
+            temp_usage: Some(temp_usage),
             source_version,
             commands: rendered_commands,
         })
@@ -761,6 +758,59 @@ fn finalize_task_result(
 fn bound_error(error: QuiltError) -> QuiltError {
     let (message, _) = bound_detail_ref(&error.to_string());
     QuiltError::operation("TUI operation", message)
+}
+
+/// Stream a persistent cache into a private stage and check cancellation at
+/// the final publication boundary. `dumpcache_result` publishes internally,
+/// which can make a late cancellation report success after the target exists.
+fn save_cache(
+    pipeline: &Pipeline,
+    requested: &std::path::Path,
+    task: &TaskControl,
+) -> Result<std::path::PathBuf, QuiltError> {
+    use polars::prelude::*;
+    use std::path::Path;
+
+    if requested == Path::new("-") {
+        return Err(QuiltError::usage(
+            "Error: The 'dumpcache' command requires a file path",
+        ));
+    }
+    let target = if requested.extension().and_then(|ext| ext.to_str()) == Some("parquet") {
+        requested.to_path_buf()
+    } else {
+        requested.with_extension("parquet")
+    };
+    crate::operations::finalizers::atomic_path_checked(
+        &target,
+        "write TUI cache",
+        |staged| {
+            let sink_target =
+                crate::operations::finalizers::file_sink_target(staged, "write TUI cache")?;
+            pipeline
+                .frame()
+                .clone()
+                .sink(
+                    SinkDestination::File {
+                        target: sink_target,
+                    },
+                    FileWriteFormat::Parquet(
+                        ParquetWriteOptions {
+                            compression: ParquetCompression::Snappy,
+                            ..Default::default()
+                        }
+                        .into(),
+                    ),
+                    UnifiedSinkArgs::default(),
+                )
+                .and_then(|frame| frame.collect())
+                .map(|_| ())
+                .map_err(|error| QuiltError::finalizer("write TUI cache", error.to_string()))?;
+            Ok(())
+        },
+        || task.check(),
+    )?;
+    Ok(target)
 }
 
 fn source_fingerprint(args: &LoadArgs) -> Result<String, QuiltError> {
