@@ -534,25 +534,36 @@ pub(super) fn complete(
         return vec![];
     }
     let left = &input[..cursor];
+    let spans = token_spans(input);
+    let active_token = spans.iter().find(|t| t.start <= cursor && cursor <= t.end);
+    let start = left
+        .rfind(char::is_whitespace)
+        .map_or(0, |i| i + left[i..].chars().next().unwrap().len_utf8());
+    let token_range = active_token.map_or(start..cursor, |t| t.start..t.end);
     let trimmed_left = left.trim_start();
-    let leading = left.len() - trimmed_left.len();
     if trimmed_left.starts_with(':') && !trimmed_left.chars().any(char::is_whitespace) {
         return BUILTIN_ACTIONS
             .iter()
             .filter(|action| action.name.starts_with(trimmed_left))
-            .map(|action| builtin_completion(action, leading..cursor))
+            .map(|action| builtin_completion(action, token_range.clone()))
             .collect();
     }
-    let spans = token_spans(input);
     if let Some((first, last)) = active_select(&spans, cursor) {
         if let Some(completion) = complete_select_field(cursor, columns, &spans[first + 1..last]) {
             return completion;
         }
     }
-    let start = left
-        .rfind(char::is_whitespace)
-        .map_or(0, |i| i + left[i..].chars().next().unwrap().len_utf8());
     let prefix = &left[start..];
+    let decoded_prefix = active_token
+        .map(|t| {
+            let n = t
+                .source
+                .iter()
+                .take_while(|source| source.start < cursor)
+                .count();
+            t.value.get(..n).unwrap_or("")
+        })
+        .unwrap_or(prefix);
     let tokens = tokenize(left)
         .or_else(|_| tokenize(&format!("{left}\"")))
         .or_else(|_| tokenize(&format!("{left}'")))
@@ -585,7 +596,7 @@ pub(super) fn complete(
                 .map(|s| Completion {
                     display: s.name.to_owned(),
                     replacement: s.name.to_owned(),
-                    range: start..cursor,
+                    range: token_range.clone(),
                     description: s.summary.to_owned(),
                     kind: CompletionKind::Command,
                 }),
@@ -594,7 +605,7 @@ pub(super) fn complete(
             candidates.extend(
                 BUILTIN_ACTIONS
                     .iter()
-                    .map(|action| builtin_completion(action, start..cursor)),
+                    .map(|action| builtin_completion(action, token_range.clone())),
             );
         }
     } else {
@@ -623,7 +634,7 @@ pub(super) fn complete(
                         Completion {
                             display: display.clone(),
                             replacement: display,
-                            range: start..cursor,
+                            range: token_range.clone(),
                             description,
                             kind: CompletionKind::Option,
                         }
@@ -641,24 +652,38 @@ pub(super) fn complete(
                     && prior_args.last().is_some_and(|arg| arg == "--column"))
                 || (matches!(spec.name, "aggregate" | "delta" | "timeinfo")
                     && prior_args.last().is_some_and(|arg| arg == "--by"));
+            if list_slot
+                && active_token
+                    .is_some_and(|token| token.has_shell_quotes || !token.value.starts_with('-'))
+            {
+                if let Some(token) = active_token {
+                    if let Some(found) =
+                        complete_select_field(cursor, columns, std::slice::from_ref(token))
+                    {
+                        return found;
+                    }
+                }
+            }
             let want_columns = trailing_space || (!prior.starts_with('-') && !prior.is_empty());
             if want_columns && !looks_like_path_slot(spec.name, arg_index) {
                 candidates.extend(columns.iter().map(|(name, dtype)| Completion {
                     display: name.clone(),
-                    replacement: quote_column(name, list_slot),
-                    range: start..cursor,
+                    replacement: if active_token.is_some_and(|token| token.has_shell_quotes) {
+                        quote_argument(name)
+                    } else {
+                        quote_column(name, list_slot)
+                    },
+                    range: token_range.clone(),
                     description: format!("Column · {dtype}"),
                     kind: CompletionKind::Column,
                 }));
             }
         }
     }
-    let match_prefix = prefix.trim_start_matches(['"', '\'']);
+    let match_prefix = decoded_prefix.trim_start_matches(['"', '\'']);
     candidates
         .into_iter()
-        .filter(|candidate| {
-            candidate.replacement.starts_with(prefix) || candidate.display.starts_with(match_prefix)
-        })
+        .filter(|candidate| candidate.display.starts_with(match_prefix))
         .collect()
 }
 
@@ -935,6 +960,61 @@ mod tests {
             tokenize(&format!("x {}", quote_argument(r#"a\b"c"#))).unwrap()[1],
             r#"a\b"c"#
         );
+    }
+
+    #[test]
+    fn generic_completion_uses_decoded_prefix_and_replaces_whole_token() {
+        let cols = vec![
+            ("status".to_owned(), "String".to_owned()),
+            ("field name".to_owned(), "String".to_owned()),
+            ("group".to_owned(), "String".to_owned()),
+        ];
+        let input = "cast statusus";
+        let cursor = "cast status".len();
+        let result = complete(input, cursor, &cols)
+            .into_iter()
+            .find(|c| c.display == "status")
+            .unwrap();
+        assert_eq!(&input[result.range.clone()], "statusus");
+        let mut replaced = input.to_owned();
+        replaced.replace_range(result.range, &result.replacement);
+        assert_eq!(replaced, "cast status");
+
+        let quoted = r#"cast "field n""#;
+        let result = complete(quoted, quoted.len() - 1, &cols)
+            .into_iter()
+            .find(|c| c.display == "field name")
+            .unwrap();
+        let mut replaced = quoted.to_owned();
+        replaced.replace_range(result.range, &result.replacement);
+        assert_eq!(tokenize(&replaced).unwrap(), ["cast", "field name"]);
+
+        let unicode_cols = [("名名字".to_owned(), "String".to_owned())];
+        let unicode = r#"cast "名x""#;
+        let result = complete(unicode, "cast \"名".len(), &unicode_cols)
+            .into_iter()
+            .find(|c| c.display == "名名字")
+            .unwrap();
+        assert_eq!(&unicode[result.range], r#""名x""#);
+
+        let builtin = ":undoSuffix";
+        let result = complete(builtin, ":un".len(), &[])
+            .into_iter()
+            .find(|c| c.display == ":undo")
+            .unwrap();
+        assert_eq!(&builtin[result.range], builtin);
+
+        for list in ["count id,gr", "sort id,gr", "explode id,gr"] {
+            assert!(
+                complete(list, list.len(), &cols)
+                    .iter()
+                    .any(|c| c.display == "group"),
+                "{list}"
+            );
+        }
+        assert!(complete("sort --d", "sort --d".len(), &cols)
+            .iter()
+            .any(|c| c.kind == CompletionKind::Option && c.display == "--desc"));
     }
 
     #[test]
