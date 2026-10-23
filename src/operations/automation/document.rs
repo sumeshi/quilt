@@ -171,7 +171,14 @@ pub(super) fn resolve_parameterized_value(
 ) -> Result<(), String> {
     match value {
         Value::Mapping(mapping) => {
-            if mapping.len() == 1 && mapping.contains_key(Value::String("$param".into())) {
+            // A load schema is itself a mapping of literal column names. Do
+            // not interpret its top-level `$param` column as a placeholder;
+            // values within the mapping still use the normal resolver.
+            let is_load_schema = path.ends_with(".load.schema");
+            if !is_load_schema
+                && mapping.len() == 1
+                && mapping.contains_key(Value::String("$param".into()))
+            {
                 let name = mapping
                     .get(Value::String("$param".into()))
                     .and_then(Value::as_str)
@@ -201,10 +208,10 @@ pub(super) fn resolve_parameterized_value(
                     .ok_or_else(|| format!("{path}: unresolved parameter '{name}'"))?;
                 return Ok(());
             }
-            if mapping
-                .keys()
-                .any(|key| key.as_str().is_some_and(|key| key.contains("$param")))
-            {
+            // Schema mappings describe literal column names, including keys
+            // containing `$param`; elsewhere an extra `$param` key is a
+            // malformed attempt at a whole-value placeholder.
+            if !is_load_schema && mapping.keys().any(|key| key.as_str() == Some("$param")) {
                 return Err(format!("{path}: $param must be a whole mapping value"));
             }
             for (key, child) in mapping.iter_mut() {

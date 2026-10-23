@@ -4213,6 +4213,7 @@
                             "additionalProperties": false
                           }
                         },
+                        "additionalProperties": false,
                         "required": [
                           "row-count"
                         ]
@@ -4663,6 +4664,7 @@
                             ]
                           }
                         },
+                        "additionalProperties": false,
                         "required": [
                           "parameter"
                         ]
@@ -5024,6 +5026,7 @@
               "$ref": "#/$defs/RowCountPredicate"
             }
           },
+          "additionalProperties": false,
           "required": [
             "row-count"
           ]
@@ -5035,6 +5038,7 @@
               "$ref": "#/$defs/ParameterPredicate"
             }
           },
+          "additionalProperties": false,
           "required": [
             "parameter"
           ]

@@ -2,6 +2,61 @@ use crate::support::*;
 use serde_json::json;
 
 #[test]
+fn workflow_preflight_rejects_ambiguous_conditions_and_keeps_literal_schema_keys() {
+    let root = tempfile::tempdir().unwrap();
+    for when in [
+        json!({"row-count":{"greater-than":0},"parameter":{"name":"enabled","equal":true}}),
+        json!({"row-count":{"greater-than":0},"unexpected":true}),
+    ] {
+        let config = document(
+            root.path(),
+            "branch.yaml",
+            json!({
+                "version":2,"parameters":{"enabled":{"type":"bool","default":false}},
+                "stages":[
+                    {"name":"input","steps":[{"load":{"paths":["missing.csv"]}}]},
+                    {"name":"route","branch":{"input":"input","when":when,"then":["output"]}},
+                    {"name":"output","from":"input","steps":[{"show":{}}]}
+                ]
+            }),
+        );
+        for mode in [vec![], vec!["--check"]] {
+            let mut args = vec!["run", config.to_str().unwrap()];
+            args.extend(mode);
+            let error = failure(&args);
+            assert!(error.contains("branch.when"), "{error}");
+            assert!(!error.contains("File not found"), "{error}");
+        }
+    }
+
+    let source = write(
+        root.path(),
+        "literal.csv",
+        "$param,event$param,normal\n001,002,003\n",
+    );
+    for schema in [
+        json!({"$param":"string"}),
+        json!({"$param":"string","event$param":"string","normal":{"$param":"dtype"}}),
+    ] {
+        let config = document(
+            root.path(),
+            "literal.yaml",
+            json!({
+                "version":2,"parameters":{"dtype":{"type":"string","default":"string"}},
+                "stages":[{"name":"input","steps":[
+                    {"load":{"paths":[source],"schema":schema}},{"show":{}}
+                ]}]
+            }),
+        );
+        execute(&["run", config.to_str().unwrap(), "--check"]).unwrap();
+        let output = rows(&text(&["run", config.to_str().unwrap()]));
+        assert_eq!(output[0]["$param"], "001");
+        assert_eq!(output[0]["event$param"], "002");
+        assert_eq!(output[0]["normal"], "003");
+    }
+}
+
+#[test]
 fn version_two_diagnostics_identify_fields_before_opening_inputs() {
     let root = tempfile::tempdir().unwrap();
     let old = document(

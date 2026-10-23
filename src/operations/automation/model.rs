@@ -360,7 +360,7 @@ pub struct BranchNode {
 }
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(untagged)]
+#[serde(untagged, deny_unknown_fields)]
 pub enum BranchPredicate {
     RowCount {
         #[serde(rename = "row-count")]
