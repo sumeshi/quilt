@@ -25,6 +25,25 @@ fn sensitive_preflight_location_matching_respects_step_boundaries() {
 }
 
 #[test]
+fn sensitive_preflight_diagnostics_redact_messages_without_losing_locations() {
+    let mut policy =
+        diagnostics::DiagnosticPolicy::from_values(["x".to_string(), "TOPSECRET".to_string()]);
+    policy
+        .sensitive_locations
+        .insert("stages[0].steps[0]".into());
+    let error = crate::QuiltError::validation(vec![
+        "run.yaml:12:4: stages[0].steps[0].head: Invalid bucket interval 'TOPSECRET': x".into(),
+        "run.yaml:13:4: stages[0].steps[0].head: Invalid bucket interval 'x': parser detail".into(),
+    ]);
+    let rendered = policy.sanitize_preflight_error(error).to_string();
+    assert!(rendered.contains("run.yaml:12:4: stages[0].steps[0]: <redacted diagnostic>"));
+    assert!(rendered.contains("run.yaml:13:4: stages[0].steps[0]: <redacted diagnostic>"));
+    assert!(!rendered.contains("TOPSECRET"));
+    assert!(!rendered.contains("parser detail"));
+    assert!(!rendered.contains("Invalid bucket interval"));
+}
+
+#[test]
 fn sensitive_location_parser_accepts_nested_parameter_paths() {
     assert_eq!(
         diagnostics::parse_step_location("run.stages[0].steps[1].grep.pattern"),

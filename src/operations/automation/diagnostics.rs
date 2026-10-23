@@ -238,8 +238,23 @@ impl DiagnosticPolicy {
                             .iter()
                             .any(|l| location_matches(&d, l))
                         {
-                            d.rsplit_once(": ")
-                                .map(|(l, _)| format!("{l}: <redacted diagnostic>"))
+                            self.sensitive_locations
+                                .iter()
+                                .filter(|location| location_matches(&d, location))
+                                .find_map(|location| {
+                                    // Match only in the diagnostic path/message region,
+                                    // after the source file prefix. A path can itself
+                                    // contain text that resembles a YAML location.
+                                    let prefix_end = d.find(": ")? + 2;
+                                    d[prefix_end..].find(location).map(|relative_start| {
+                                        let start = prefix_end + relative_start;
+                                        self.sanitize(format!(
+                                            "{}{}: <redacted diagnostic>",
+                                            &d[..start],
+                                            location
+                                        ))
+                                    })
+                                })
                                 .unwrap_or_else(|| "<redacted diagnostic>".into())
                         } else {
                             self.sanitize(d)

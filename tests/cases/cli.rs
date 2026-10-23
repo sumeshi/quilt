@@ -266,6 +266,43 @@ fn invocation_paths_and_output_override_are_relative_to_the_caller() {
 #[test]
 fn secret_provenance_redacts_debug_plans_and_runtime_diagnostics() {
     let root = tempfile::tempdir().unwrap();
+    for (secret, command) in [
+        (
+            "TOPSECRET",
+            json!({"bucket":{"column":"time","interval":{"$param":"secret"}}}),
+        ),
+        (
+            "x",
+            json!({"bucket":{"column":"time","interval":{"$param":"secret"}}}),
+        ),
+        (
+            "TOPSECRET: bad",
+            json!({"cast":{"column":"time","type":{"$param":"secret"}}}),
+        ),
+    ] {
+        let config = document(
+            root.path(),
+            "secret.yaml",
+            json!({
+                "version":2,
+                "parameters":{"secret":{"type":"string","required":true,"secret":true}},
+                "stages":[{"name":"input","steps":[{"load":{}},command]}]
+            }),
+        );
+        let supplied = format!("secret={secret}");
+        for mode in [vec![], vec!["--check"], vec!["--show-plan", "input"]] {
+            let mut args = vec!["run", config.to_str().unwrap(), "--var", &supplied];
+            args.extend(mode);
+            let result = qlt(root.path(), &args);
+            assert!(!result.status.success() && result.stdout.is_empty());
+            let error = String::from_utf8(result.stderr).unwrap();
+            assert!(error.contains("stages[0].steps[1]"), "{error}");
+            assert!(error.contains("<redacted diagnostic>"), "{error}");
+            assert!(!error.to_ascii_lowercase().contains("topsecret"), "{error}");
+            assert!(!error.contains("Invalid bucket interval"), "{error}");
+        }
+    }
+
     write(root.path(), "input.csv", "value\nx\n");
     let doc = document(
         root.path(),
