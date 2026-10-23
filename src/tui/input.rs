@@ -570,25 +570,24 @@ pub(super) fn complete(
             t.value.get(..n).unwrap_or("")
         })
         .unwrap_or(prefix);
-    let tokens = tokenize(left)
-        .or_else(|_| tokenize(&format!("{left}\"")))
-        .or_else(|_| tokenize(&format!("{left}'")))
-        .unwrap_or_default();
-    let trailing_space = left.chars().last().is_some_and(char::is_whitespace);
-    let current_word_complete = trailing_space;
+    let left_spans = token_spans(left);
+    let has_partial = left_spans.last().is_some_and(|token| token.end == cursor);
+    let tokens = left_spans
+        .into_iter()
+        .map(|token| token.value)
+        .collect::<Vec<_>>();
+    let trailing_space = !has_partial;
     let separators = pipeline_separators(&spans);
-    let mut segment_start = separators
+    let segment_start = separators
         .iter()
         .rev()
         .find(|&&i| spans[i].start < cursor)
-        .map_or(0, |&i| i + 1);
-    if !current_word_complete {
-        segment_start = segment_start.min(tokens.len());
-    }
+        .map_or(0, |&i| i + 1)
+        .min(tokens.len());
     let segment = &tokens[segment_start..];
-    let has_partial = !trailing_space && !tokens.is_empty();
     let at_command = segment.is_empty() || (has_partial && segment.len() == 1);
     let mut candidates: Vec<Completion> = Vec::new();
+    let mut match_prefix = decoded_prefix;
     if at_command {
         candidates.extend(
             registry()
@@ -624,142 +623,177 @@ pub(super) fn complete(
             .first()
             .and_then(|t| registry().iter().find(|s| s.name == t.as_str()));
         if let Some(spec) = command {
-            candidates.extend(
-                spec.options
-                    .iter()
-                    .filter(|option| {
-                        !(spec.name == "load" && matches!(option.name, "stdin-format" | "rejects"))
+            let prior_args = &command_tokens[1..];
+            let context = preceding_argument_context(spec, prior_args);
+            let inline_option =
+                if has_partial && !context.positional_only && context.pending_option.is_none() {
+                    decoded_prefix.split_once('=').and_then(|(name, _)| {
+                        name.strip_prefix("--").and_then(|name| {
+                            spec.options
+                                .iter()
+                                .find(|option| option.name == name && option.takes_value)
+                        })
                     })
-                    .map(|o| {
-                        let display = format!("--{}", o.name);
-                        let metadata = option_metadata(spec, o);
-                        let description = if o.takes_value {
-                            format!(
-                                "{display} <{}> · {}",
-                                metadata.value_hint.unwrap_or("value"),
-                                metadata.description
-                            )
-                        } else {
-                            format!("{display} · {}", metadata.description)
-                        };
-                        Completion {
-                            display: display.clone(),
-                            replacement: display,
-                            range: token_range.clone(),
-                            description,
-                            kind: CompletionKind::Option,
-                        }
-                    }),
-            );
-            let prior = segment.last().map(String::as_str).unwrap_or("");
-            let prior_args = if trailing_space {
-                &segment[1..]
+                } else {
+                    None
+                };
+            let (inline_prefix, value_prefix) = if inline_option.is_some() {
+                let (name, value) = decoded_prefix.split_once('=').unwrap();
+                (format!("{name}="), value)
             } else {
-                &segment[1..segment.len().saturating_sub(1)]
+                (String::new(), decoded_prefix)
             };
-            let (arg_index, pending_option) = preceding_argument_context(spec, prior_args);
-            let inline_option = if !trailing_space {
-                prior.split_once('=').and_then(|(name, _)| {
-                    name.strip_prefix("--").and_then(|name| {
-                        spec.options
-                            .iter()
-                            .find(|option| option.name == name && option.takes_value)
-                    })
-                })
-            } else {
-                None
-            };
-            let inline_value_prefix = if inline_option.is_some() {
-                prior.split_once('=').map(|(_, value)| value)
-            } else {
-                None
-            };
-            let arg_kind = if let Some(option) = inline_option.or(pending_option) {
+            match_prefix = value_prefix;
+            let value_option = inline_option.or(context.pending_option);
+            let arg_kind = if let Some(option) = value_option {
                 option_metadata(spec, option).kind
             } else {
                 argument_specs(spec)
-                    .get(arg_index)
+                    .get(context.positional_index)
                     .map(|arg| arg.kind)
                     .unwrap_or(ArgumentKind::Value)
             };
+            if !context.positional_only && value_option.is_none() {
+                candidates.extend(
+                    spec.options
+                        .iter()
+                        .filter(|option| {
+                            !(spec.name == "load"
+                                && matches!(option.name, "stdin-format" | "rejects"))
+                        })
+                        .map(|o| {
+                            let display = format!("--{}", o.name);
+                            let metadata = option_metadata(spec, o);
+                            let description = if o.takes_value {
+                                format!(
+                                    "{display} <{}> · {}",
+                                    metadata.value_hint.unwrap_or("value"),
+                                    metadata.description
+                                )
+                            } else {
+                                format!("{display} · {}", metadata.description)
+                            };
+                            Completion {
+                                display: display.clone(),
+                                replacement: display,
+                                range: token_range.clone(),
+                                description,
+                                kind: CompletionKind::Option,
+                            }
+                        }),
+                );
+            }
             let list_slot = arg_kind == ArgumentKind::ColumnList;
             if list_slot
-                && active_token
-                    .is_some_and(|token| token.has_shell_quotes || !token.value.starts_with('-'))
+                && active_token.is_some_and(|token| {
+                    context.positional_only
+                        || value_option.is_some()
+                        || token.has_shell_quotes
+                        || !token.value.starts_with('-')
+                })
             {
                 if let Some(token) = active_token {
-                    if let Some(found) =
-                        complete_select_field(cursor, columns, std::slice::from_ref(token))
+                    let mut value_token = token.clone();
+                    if inline_option.is_some() {
+                        let value_start = token.value.find('=').unwrap() + 1;
+                        value_token.value = token.value[value_start..].to_owned();
+                        value_token.source = token.source[value_start..].to_vec();
+                        value_token.start = token.source[value_start - 1].end;
+                    }
+                    if let Some(mut found) =
+                        complete_select_field(cursor, columns, std::slice::from_ref(&value_token))
                     {
+                        if inline_option.is_some() {
+                            for completion in &mut found {
+                                completion.replacement = if token.has_shell_quotes {
+                                    format!("{inline_prefix}{}", completion.replacement)
+                                } else {
+                                    format!(
+                                        "{}{}{}",
+                                        &input[token.start..completion.range.start],
+                                        completion.replacement,
+                                        &input[completion.range.end..token.end]
+                                    )
+                                };
+                                completion.range = token.start..token.end;
+                            }
+                        }
                         return found;
                     }
                 }
             }
-            let want_columns = trailing_space
-                || pending_option.is_some()
-                || inline_option.is_some()
-                || (!prior.starts_with('-') && !prior.is_empty());
-            if want_columns && arg_kind == ArgumentKind::Path {
-                candidates.extend(path_completions(
-                    inline_value_prefix.unwrap_or(decoded_prefix),
-                    token_range.clone(),
-                ));
+            let want_values = trailing_space
+                || value_option.is_some()
+                || context.positional_only
+                || !decoded_prefix.starts_with('-')
+                || matches!(arg_kind, ArgumentKind::Column | ArgumentKind::ColumnList);
+            if want_values && arg_kind == ArgumentKind::Path {
+                candidates.extend(
+                    path_completions(value_prefix, token_range.clone())
+                        .into_iter()
+                        .map(|mut completion| {
+                            completion.replacement =
+                                format!("{inline_prefix}{}", completion.replacement);
+                            completion
+                        }),
+                );
             }
-            if want_columns {
+            if want_values {
                 if let ArgumentKind::Choice(choices) = arg_kind {
-                    let option_prefix = inline_option
-                        .map(|_| {
-                            let (name, _) = prior.split_once('=').unwrap();
-                            format!("{name}=")
-                        })
-                        .unwrap_or_default();
                     candidates.extend(choices.iter().map(|choice| Completion {
                         display: (*choice).to_owned(),
-                        replacement: format!("{option_prefix}{choice}"),
+                        replacement: format!("{inline_prefix}{choice}"),
                         range: token_range.clone(),
                         description: "Supported value".into(),
                         kind: CompletionKind::Option,
                     }));
                 }
             }
-            if want_columns && matches!(arg_kind, ArgumentKind::Column | ArgumentKind::ColumnList) {
-                candidates.extend(columns.iter().map(|(name, dtype)| Completion {
-                    display: name.clone(),
-                    replacement: if active_token.is_some_and(|token| token.has_shell_quotes) {
+            if want_values && matches!(arg_kind, ArgumentKind::Column | ArgumentKind::ColumnList) {
+                let needs_dash_end =
+                    !list_slot && !context.positional_only && value_option.is_none();
+                candidates.extend(columns.iter().map(|(name, dtype)| {
+                    let replacement = if active_token.is_some_and(|token| token.has_shell_quotes) {
                         quote_argument(name)
                     } else {
                         quote_column(name, list_slot)
-                    },
-                    range: token_range.clone(),
-                    description: format!("Column · {dtype}"),
-                    kind: CompletionKind::Column,
+                    };
+                    let replacement = if needs_dash_end && name.starts_with('-') {
+                        format!("-- {replacement}")
+                    } else {
+                        replacement
+                    };
+                    Completion {
+                        display: name.clone(),
+                        replacement: format!("{inline_prefix}{replacement}"),
+                        range: token_range.clone(),
+                        description: format!("Column · {dtype}"),
+                        kind: CompletionKind::Column,
+                    }
                 }));
             }
         }
     }
-    let match_prefix = decoded_prefix
-        .split_once('=')
-        .map(|(_, value)| value.to_owned())
-        .unwrap_or_else(|| decoded_prefix.trim_start_matches(['"', '\'']).to_owned());
     candidates
         .into_iter()
-        .filter(|candidate| candidate.display.starts_with(&match_prefix))
+        .filter(|candidate| candidate.display.starts_with(match_prefix))
         .collect()
 }
 
 fn path_completions(prefix: &str, range: Range<usize>) -> Vec<Completion> {
     use std::path::Path;
-    let path = Path::new(prefix);
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let stem = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    let (raw_parent, stem) = prefix
+        .rfind(std::path::is_separator)
+        .map_or(("", prefix), |i| (&prefix[..=i], &prefix[i + 1..]));
+    let parent = if raw_parent.is_empty() {
+        Path::new(".")
+    } else {
+        Path::new(raw_parent)
+    };
     let Ok(entries) = std::fs::read_dir(parent) else {
         return vec![];
     };
     entries
-        .take(256)
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let name = entry.file_name().into_string().ok()?;
@@ -767,11 +801,7 @@ fn path_completions(prefix: &str, range: Range<usize>) -> Vec<Completion> {
                 return None;
             }
             let is_dir = entry.file_type().ok()?.is_dir();
-            let mut value = if parent == Path::new(".") {
-                name
-            } else {
-                format!("{}/{}", parent.display(), name)
-            };
+            let mut value = format!("{raw_parent}{name}");
             if is_dir {
                 value.push('/');
             }
@@ -787,6 +817,7 @@ fn path_completions(prefix: &str, range: Range<usize>) -> Vec<Completion> {
                 kind: CompletionKind::Option,
             })
         })
+        .take(256)
         .collect()
 }
 
@@ -800,13 +831,16 @@ fn builtin_completion(action: &BuiltinAction, range: Range<usize>) -> Completion
     }
 }
 
+struct ArgumentContext<'a> {
+    positional_index: usize,
+    pending_option: Option<&'a crate::controllers::definitions::OptionSpec>,
+    positional_only: bool,
+}
+
 fn preceding_argument_context<'a>(
     spec: &'a crate::controllers::definitions::CommandSpec,
     tokens: &[String],
-) -> (
-    usize,
-    Option<&'a crate::controllers::definitions::OptionSpec>,
-) {
+) -> ArgumentContext<'a> {
     let mut positional = 0;
     let mut pending = None;
     let mut positional_only = false;
@@ -845,7 +879,11 @@ fn preceding_argument_context<'a>(
         }
         positional += 1;
     }
-    (positional, pending)
+    ArgumentContext {
+        positional_index: positional,
+        pending_option: pending,
+        positional_only,
+    }
 }
 
 fn complete_select_field(
@@ -1071,6 +1109,168 @@ mod tests {
                 tokenize(&found.replacement).unwrap().as_slice(),
                 std::slice::from_ref(&found.display)
             );
+        }
+    }
+
+    #[test]
+    fn scalar_dash_column_completions_round_trip_positional_and_option_contexts() {
+        let columns = [("-name".to_owned(), "String".to_owned())];
+        for (draft, cursor, suffix) in [
+            ("contains ", "contains ".len(), " pattern"),
+            ("contains -na", "contains -na".len(), " pattern"),
+            ("contains -namesuffix pattern", "contains -na".len(), ""),
+            ("contains \"-na\" pattern", "contains \"-na".len(), ""),
+            (
+                "contains --ignore-case ",
+                "contains --ignore-case ".len(),
+                " pattern",
+            ),
+            ("contains -- -na pattern", "contains -- -na".len(), ""),
+        ] {
+            let completion = complete(draft, cursor, &columns)
+                .into_iter()
+                .find(|item| item.display == "-name")
+                .unwrap_or_else(|| panic!("missing column completion for {draft}"));
+            let mut completed = draft.to_owned();
+            completed.replace_range(completion.range, &completion.replacement);
+            completed.push_str(suffix);
+            let parsed = parse_commands(&completed).unwrap();
+            assert!(matches!(&parsed[0], TypedCommand::Contains(args)
+                if args.column == "-name" && args.pattern == "pattern"));
+            assert_eq!(
+                tokenize(&completed)
+                    .unwrap()
+                    .iter()
+                    .filter(|word| *word == "--")
+                    .count(),
+                1
+            );
+        }
+
+        for draft in [
+            "sed pattern replacement --column ",
+            "sed pattern replacement --column -na",
+            "sed pattern replacement --column=-na",
+            "sed pattern replacement --column=\"-na\"",
+        ] {
+            let completion = complete(draft, draft.len(), &columns)
+                .into_iter()
+                .find(|item| item.display == "-name")
+                .unwrap();
+            let mut completed = draft.to_owned();
+            completed.replace_range(completion.range, &completion.replacement);
+            let parsed = parse_commands(&completed).unwrap();
+            assert!(matches!(&parsed[0], TypedCommand::Sed(args)
+                if args.column.as_deref() == Some("-name")));
+            assert!(!tokenize(&completed)
+                .unwrap()
+                .iter()
+                .any(|word| word == "--"));
+        }
+    }
+
+    #[test]
+    fn equals_and_quoted_inline_column_completions_preserve_argument_context() {
+        let names = [
+            "x=field",
+            "--epoch-unit=literal",
+            "--column=x=field",
+            "field name",
+        ];
+        let columns = names
+            .iter()
+            .map(|name| (name.to_string(), "String".to_owned()))
+            .collect::<Vec<_>>();
+        for (draft, cursor, name) in [
+            ("cast x=fi string", "cast x=fi".len(), "x=field"),
+            (
+                "cast -- --epoch-unit=li string",
+                "cast -- --epoch-unit=li".len(),
+                "--epoch-unit=literal",
+            ),
+        ] {
+            let completion = complete(draft, cursor, &columns)
+                .into_iter()
+                .find(|item| item.display == name)
+                .unwrap();
+            let mut completed = draft.to_owned();
+            completed.replace_range(completion.range, &completion.replacement);
+            assert!(
+                matches!(&parse_commands(&completed).unwrap()[0], TypedCommand::Cast(args) if args.column == name)
+            );
+        }
+        let draft = "sed pattern replacement --column --column=x=fi";
+        let completion = complete(draft, draft.len(), &columns)
+            .into_iter()
+            .find(|item| item.display == "--column=x=field")
+            .unwrap();
+        let mut completed = draft.to_owned();
+        completed.replace_range(completion.range, &completion.replacement);
+        assert!(
+            matches!(&parse_commands(&completed).unwrap()[0], TypedCommand::Sed(args) if args.column.as_deref() == Some("--column=x=field"))
+        );
+
+        for (draft, selected) in [
+            ("grep pattern --column=x=fi", vec!["x=field"]),
+            ("grep pattern --column=\"x=fi\"", vec!["x=field"]),
+            (
+                "grep pattern --column=x=field,\"field ",
+                vec!["x=field", "field name"],
+            ),
+        ] {
+            let name = *selected.last().unwrap();
+            let completion = complete(draft, draft.len(), &columns)
+                .into_iter()
+                .find(|item| item.display == name)
+                .unwrap();
+            let mut completed = draft.to_owned();
+            completed.replace_range(completion.range, &completion.replacement);
+            assert!(
+                matches!(&parse_commands(&completed).unwrap()[0], TypedCommand::Grep(args)
+                if args.columns.as_ref().unwrap() == &selected)
+            );
+        }
+    }
+
+    #[test]
+    fn path_completion_preserves_raw_prefix_and_inline_option_syntax() {
+        let dir = tempfile::tempdir_in(".").unwrap();
+        let mut filenames = vec!["date=2026.csv", "quote'日本語.csv"];
+        if cfg!(unix) {
+            filenames.push("literal\\name.csv");
+        }
+        for filename in filenames {
+            std::fs::write(dir.path().join(filename), "").unwrap();
+            let prefix = format!(
+                "{}/{}",
+                dir.path().display(),
+                &filename[..filename.len() - 1]
+            );
+            for inline in [false, true] {
+                let draft = if inline {
+                    format!("dump --output={}", quote_argument(&prefix))
+                } else {
+                    format!("load {}", quote_argument(&prefix))
+                };
+                let completion = complete(&draft, draft.len(), &[])
+                    .into_iter()
+                    .find(|item| item.display.ends_with(filename))
+                    .unwrap();
+                assert!(completion
+                    .display
+                    .starts_with(&format!("{}/", dir.path().display())));
+                let mut completed = draft.clone();
+                completed.replace_range(completion.range, &completion.replacement);
+                let parsed = parse_commands(&completed).unwrap();
+                let expected = format!("{}/{filename}", dir.path().display());
+                if inline {
+                    assert!(
+                        matches!(&parsed[0], TypedCommand::Dump(args) if args.output.as_deref() == Some(expected.as_str()))
+                    );
+                } else {
+                    assert_eq!(tokenize(&completed).unwrap(), ["load", expected.as_str()]);
+                }
+            }
         }
     }
 
