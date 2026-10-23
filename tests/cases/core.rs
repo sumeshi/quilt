@@ -411,6 +411,110 @@ fn csv_tsv_and_gzip_feed_the_same_typed_pipeline() {
 }
 
 #[test]
+fn csv_boundaries_reject_lossy_integer_overrides_and_invalid_delimiters() {
+    let root = tempfile::tempdir().unwrap();
+    for number in [
+        "170141183460469231731687303715884105727",
+        "340282366920938463463374607431768211455",
+        "+10000000000000000000000000000000000000001",
+    ] {
+        let source = write(root.path(), "large.csv", format!("id\n{number}\n"));
+        let output = root.path().join("must-not-exist.csv");
+        assert!(failure(&[
+            "load",
+            source.to_str().unwrap(),
+            "--schema",
+            "id=float",
+            "-",
+            "dump",
+            "-o",
+            output.to_str().unwrap()
+        ])
+        .contains("incompatible with Float"));
+        assert!(!output.exists());
+        let config = document(
+            root.path(),
+            "large.yaml",
+            serde_json::json!({
+                "version":2,"stages":[{"name":"input","steps":[
+                    {"load":{"paths":[source],"schema":{"id":"float"}}},
+                    {"dump":{"output":output}}
+                ]}]
+            }),
+        );
+        assert!(failure(&["run", config.to_str().unwrap()]).contains("incompatible with Float"));
+        assert!(!output.exists());
+    }
+    let source = write(
+        root.path(),
+        "exact.csv",
+        "id\n340282366920938463463374607431768211456\n",
+    );
+    let output = frame(&["load", source.to_str().unwrap(), "--schema", "id=float"]);
+    assert_eq!(
+        output.column("id").unwrap().f64().unwrap().get(0),
+        Some(2f64.powi(128))
+    );
+
+    let source = write(
+        root.path(),
+        "records.jsonl",
+        "{\"a\":\"x\\\"y\",\"b\":\"z\"}\n",
+    );
+    for delimiter in ["\"", "\n", "\r"] {
+        let output = root.path().join("invalid.csv");
+        assert!(failure(&[
+            "load",
+            source.to_str().unwrap(),
+            "-",
+            "dump",
+            "-o",
+            output.to_str().unwrap(),
+            "--separator",
+            delimiter
+        ])
+        .contains("Separator"));
+        assert!(!output.exists());
+        let config = document(
+            root.path(),
+            "separator.yaml",
+            serde_json::json!({
+                "version":2,"stages":[{"name":"input","steps":[
+                    {"load":{"paths":[source]}},
+                    {"dump":{"output":output,"separator":delimiter}}
+                ]}]
+            }),
+        );
+        for flags in [vec![], vec!["--check"]] {
+            let mut args = vec!["run", config.to_str().unwrap()];
+            args.extend(flags);
+            assert!(failure(&args).contains("Separator"));
+            assert!(!output.exists());
+        }
+    }
+    let output = root.path().join("valid.tsv");
+    execute(&[
+        "load",
+        source.to_str().unwrap(),
+        "-",
+        "dump",
+        "-o",
+        output.to_str().unwrap(),
+        "--separator",
+        "\t",
+    ])
+    .unwrap();
+    let rows = rows(&text(&[
+        "load",
+        output.to_str().unwrap(),
+        "--separator",
+        "\t",
+    ]));
+    assert_eq!(rows[0]["a"], "x\"y");
+    assert_eq!(rows[0]["b"], "z");
+}
+
+#[test]
 fn delta_retains_small_unsigned_extreme_differences_and_rejects_overflow() {
     let input = df!("id" => [u64::MAX-2, u64::MAX]).unwrap().lazy();
     let result = chainables::delta::delta_with_groups(&input, "id", None, &[])

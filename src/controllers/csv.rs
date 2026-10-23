@@ -17,7 +17,10 @@ const GZIP_BUFFER_SIZE: usize = 16 * 1024 * 1024; // 16MB buffer for gzip (incre
 pub fn separator_byte(separator: &str) -> Result<u8, QuiltError> {
     let mut chars = separator.chars();
     match (chars.next(), chars.next()) {
-        (Some(ch), None) if ch.is_ascii() => Ok(ch as u8),
+        (Some(ch), None) if ch.is_ascii() && !matches!(ch, '"' | '\n' | '\r') => Ok(ch as u8),
+        (Some('"' | '\n' | '\r'), None) => Err(QuiltError::usage(
+            "Separator cannot be a quote or line break",
+        )),
         (None, _) => Err(QuiltError::usage(
             "Separator must be a single ASCII character, got empty string",
         )),
@@ -385,6 +388,15 @@ impl CsvController {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn separator_validation_rejects_csv_quote_and_line_breaks() {
+        assert_eq!(separator_byte("\t").unwrap(), b'\t');
+        assert_eq!(separator_byte("|").unwrap(), b'|');
+        for invalid in ["\"", "\n", "\r", "é", "", "::"] {
+            assert!(separator_byte(invalid).is_err(), "{invalid:?}");
+        }
+    }
 
     #[test]
     fn chunk_size_parser_rejects_zero_malformed_and_overflow() {

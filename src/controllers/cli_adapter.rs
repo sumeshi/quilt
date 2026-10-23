@@ -114,7 +114,7 @@ pub fn parse_typed_commands(argv: &[String]) -> Result<Vec<TypedCommand>, QuiltE
                                     "Error: Flag '--{key}' accepts only true or false"
                                 )));
                             }
-                            value.to_string()
+                            value.to_ascii_lowercase()
                         } else {
                             String::new()
                         }
@@ -321,11 +321,7 @@ fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
                 crate::operations::initializers::stdin::validate_format(&format)?;
             }
             let separator = val(&raw, "separator").unwrap_or_else(|| ",".into());
-            if separator.chars().count() != 1 || !separator.is_ascii() {
-                return Err(QuiltError::usage(
-                    "Error: Separator must be a single ASCII character",
-                ));
-            }
+            let separator = crate::controllers::csv::separator_byte(&separator)? as char;
             Ok(TypedCommand::Load(LoadArgs {
                 paths: a.iter().map(PathBuf::from).collect(),
                 source_column: val(&raw, "source_column"),
@@ -339,7 +335,7 @@ fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
                     .collect::<Result<_, _>>()?,
                 stdin_format: val(&raw, "stdin_format"),
                 rejects: val(&raw, "rejects").map(PathBuf::from),
-                separator: separator.chars().next().unwrap_or(','),
+                separator,
                 low_memory: flag(&raw, "low_memory"),
                 no_headers: flag(&raw, "no_headers"),
                 chunk_size: val(&raw, "chunk_size")
@@ -664,15 +660,11 @@ fn build_typed(mut raw: Raw) -> Result<TypedCommand, QuiltError> {
                 return Err(QuiltError::usage("separator applies only to CSV output"));
             }
             let separator = val(&raw, "separator").unwrap_or_else(|| ",".into());
-            if separator.chars().count() != 1 || !separator.is_ascii() {
-                return Err(QuiltError::usage(
-                    "Error: Separator must be a single ASCII character",
-                ));
-            }
+            let separator = crate::controllers::csv::separator_byte(&separator)? as char;
             Ok(TypedCommand::Dump(DumpArgs {
                 format,
                 output: val(&raw, "output"),
-                separator: separator.chars().next().unwrap_or(','),
+                separator,
             }))
         }
         OperationId::DumpCache => {

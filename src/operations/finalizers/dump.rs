@@ -14,21 +14,12 @@ fn output_path(path: Option<&str>) -> PathBuf {
     })
 }
 
-fn validate_separator(separator: char) -> Result<u8, QuiltError> {
-    if !separator.is_ascii() {
-        return Err(QuiltError::usage(
-            "Error: Separator must be a single ASCII character",
-        ));
-    }
-    Ok(separator as u8)
-}
-
 pub fn dump(
     df: &LazyFrame,
     output_path_opt: Option<&str>,
     separator: char,
 ) -> Result<FinalizerResult, QuiltError> {
-    let separator = validate_separator(separator)?;
+    let separator = crate::controllers::csv::separator_byte(&separator.to_string())?;
     let path = output_path(output_path_opt);
     if path == Path::new("-") {
         return Err(QuiltError::usage(

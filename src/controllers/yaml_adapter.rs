@@ -510,12 +510,7 @@ fn date_config(dt: YDate) -> Result<DateTimeConfig, QuiltError> {
 }
 fn separator(value: Option<String>) -> Result<char, QuiltError> {
     let value = value.unwrap_or_else(|| ",".into());
-    if value.chars().count() != 1 || !value.is_ascii() {
-        return Err(QuiltError::usage(
-            "Error: Separator must be a single ASCII character",
-        ));
-    }
-    Ok(value.chars().next().unwrap())
+    crate::controllers::csv::separator_byte(&value).map(char::from)
 }
 
 /// Parse one canonical run-document record-processing step directly into typed arguments.

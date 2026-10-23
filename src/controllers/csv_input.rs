@@ -108,13 +108,47 @@ fn classify(s: &str) -> Kind {
     }
 }
 fn exact_float(s: &str) -> bool {
-    if let Ok(v) = s.parse::<i128>() {
-        return (v as f64) as i128 == v;
+    let digits = s
+        .strip_prefix('-')
+        .or_else(|| s.strip_prefix('+'))
+        .unwrap_or(s);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return true; // Keep the established decimal/exponent policy.
     }
-    if let Ok(v) = s.parse::<u128>() {
-        return (v as f64) as u128 == v;
+    let significant = digits.trim_start_matches('0');
+    if significant.is_empty() {
+        return true;
     }
-    true
+    if let Ok(value) = digits.parse::<u128>() {
+        return value == 0 || value.trailing_zeros() + 53 >= (128 - value.leading_zeros());
+    }
+    if !s.parse::<f64>().is_ok_and(f64::is_finite) {
+        return false;
+    }
+    // Work in decimal strings so arbitrary-size integer lexemes cannot be
+    // rounded by a saturating float-to-integer cast. An integer is exactly
+    // representable when its odd part needs at most 53 binary digits.
+    let mut decimal = significant.as_bytes().to_vec();
+    loop {
+        let mut carry = 0u8;
+        let mut quotient = Vec::with_capacity(decimal.len());
+        for digit in &decimal {
+            let value = carry * 10 + (*digit - b'0');
+            let q = value / 2;
+            carry = value % 2;
+            if !quotient.is_empty() || q != 0 {
+                quotient.push(b'0' + q);
+            }
+        }
+        if carry != 0 {
+            break;
+        }
+        decimal = quotient;
+    }
+    let largest_mantissa = b"9007199254740991"; // 2^53 - 1
+    decimal.len() < largest_mantissa.len()
+        || (decimal.len() == largest_mantissa.len()
+            && decimal.as_slice() <= largest_mantissa.as_slice())
 }
 fn merge(a: Kind, b: Kind, had_inexact_integer: bool, had_negative: bool, value: &str) -> Kind {
     use Kind::*;
@@ -743,6 +777,33 @@ pub(crate) fn read_csv_lazy(
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn exact_float_checks_integer_lexemes_beyond_128_bits() {
+        for exact in [
+            "9007199254740992",
+            "100000000000000000000",
+            "340282366920938463463374607431768211456",
+            "0",
+            "-0",
+            "+0",
+        ] {
+            assert!(exact_float(exact), "{exact}");
+        }
+        for inexact in [
+            "9007199254740993",
+            "170141183460469231731687303715884105727",
+            "-170141183460469231731687303715884105727",
+            "340282366920938463463374607431768211455",
+            "+340282366920938463463374607431768211455",
+            "+999999999999999999999999999999999999999999",
+            "999999999999999999999999999999999999999999",
+        ] {
+            assert!(!exact_float(inexact), "{inexact}");
+        }
+        assert!(exact_float("1.25"));
+        assert!(exact_float("1e20"));
+    }
 
     fn source(
         bytes: &[u8],
