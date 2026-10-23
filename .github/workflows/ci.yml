@@ -19,7 +19,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -34,7 +34,7 @@ jobs:
     needs: cli
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl
@@ -52,7 +52,7 @@ jobs:
           (cd dist && sha256sum "qlt-linux-x86_64-musl-${GITHUB_SHA}.tar.gz" > "qlt-linux-x86_64-musl-${GITHUB_SHA}.sha256")
       - name: Upload prerelease artifact
         if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: qlt-linux-x86_64-musl-${{ github.sha }}
           path: |

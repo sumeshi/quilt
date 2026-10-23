@@ -29,7 +29,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install musl tools (Linux)
         if: matrix.target == 'x86_64-unknown-linux-musl'
@@ -68,7 +68,7 @@ jobs:
           fi
 
       - name: Upload binary to the release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.release.tag_name }}
           files: ${{ matrix.name }}-${{ github.event.release.tag_name }}*
