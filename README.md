@@ -516,6 +516,8 @@ Membership keys must be scalar; use `flatten` to select a nested field.
 
 Values are parsed using the selected column's numeric or boolean type. Invalid
 typed values are rejected instead of being silently compared as strings.
+An empty argument (`isin col1 ''`) selects no rows; a CSV-quoted empty value
+(`isin col1 '""'`) matches the empty string. YAML `values: []` selects no rows.
 
 ```bash
 $ qlt load data.csv - isin col1 1

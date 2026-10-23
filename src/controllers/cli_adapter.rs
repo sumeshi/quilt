@@ -235,6 +235,9 @@ fn datetime_config(raw: &Raw) -> Result<DateTimeConfig, QuiltError> {
     })
 }
 fn split_values(value: &str) -> Result<Vec<String>, QuiltError> {
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
     parse_list(value, true)
 }
 pub(crate) fn parse_column_list(input: &str) -> Result<Vec<String>, QuiltError> {

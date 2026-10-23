@@ -121,6 +121,7 @@ impl EditorDocument {
 #[cfg(test)]
 mod tests {
     use super::EditorDocument;
+    use crate::controllers::command_model::{IsinArgs, TypedCommand};
     use crate::tui::input::parse_commands;
 
     #[test]
@@ -139,5 +140,23 @@ mod tests {
         assert_eq!(document.commands(), replacement);
         assert_eq!(document.ranges()[1], (1, 1, "head 8".into()));
         assert_eq!(document.ranges()[2], groups[2]);
+    }
+
+    #[test]
+    fn empty_membership_command_keeps_its_group_and_can_be_reparsed() {
+        let command = TypedCommand::Isin(IsinArgs {
+            column: "kind".into(),
+            values: Vec::new(),
+        });
+        let mut document = EditorDocument::from_recipe(vec![command.clone()]).unwrap();
+        let source = document.ranges()[0].2.clone();
+        assert_eq!(
+            parse_commands(&source).unwrap().as_slice(),
+            std::slice::from_ref(&command)
+        );
+
+        document.replace_group(vec![command.clone()], 0, 1, source);
+        assert_eq!(document.commands(), [command]);
+        assert_eq!(document.len(), 1);
     }
 }

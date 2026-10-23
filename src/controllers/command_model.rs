@@ -113,7 +113,7 @@ pub fn render_command_help(name: &str) -> Option<String> {
         "select" => "\nExact existing names take precedence over range syntax; * and ^name$ are literal names. Quote comma-containing names inside the argument, e.g. select '\"a,b\",xmlns:auto-ns3'. YAML columns sequences preserve literal names.\n",
         "grep" | "contains" => "\nNested columns are searched through their JSON representation (keys and values, JSON escaping included); matched rows retain original types. Use flatten for scalar-field search.\n",
         "sed" => "\nGlobal replacement modifies only String columns, preserving numeric, Boolean, temporal and nested columns. An explicit scalar target is converted to String; a nested target is an error. Use flatten to target scalar fields.\n",
-        "isin" => "\nMembership keys must be scalar; nested columns are rejected. Use flatten for a scalar field or grep/contains for JSON text search.\n",
+        "isin" => "\nAn empty values argument selects no rows; CSV-quoted empty values match the empty string. Membership keys must be scalar; nested columns are rejected. Use flatten for a scalar field or grep/contains for JSON text search.\n",
         _ => "",
     };
     let mut options = String::new();

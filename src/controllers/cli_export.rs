@@ -400,4 +400,21 @@ mod tests {
             assert_eq!(parse_typed_commands(&argv).unwrap(), [command]);
         }
     }
+
+    #[test]
+    fn isin_argv_preserves_empty_list_and_literal_empty_value() {
+        let cases = [
+            Vec::new(),
+            vec![String::new()],
+            vec!["a,b".into(), "x\"y".into(), "a:b".into()],
+        ];
+        for values in cases {
+            let command = TypedCommand::Isin(IsinArgs {
+                column: "kind".into(),
+                values,
+            });
+            let argv = command_argv(&command).unwrap();
+            assert_eq!(parse_typed_commands(&argv).unwrap(), [command]);
+        }
+    }
 }
