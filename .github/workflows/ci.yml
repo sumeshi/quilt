@@ -2,7 +2,12 @@ name: CI
 
 on:
   push:
+    branches: [main, develop]
   pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -26,6 +31,7 @@ jobs:
 
   linux-musl-release:
     name: Build and smoke test Linux musl release binary
+    needs: cli
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,6 +42,22 @@ jobs:
       - run: cargo build --locked --release --target x86_64-unknown-linux-musl
       - name: Smoke test release binary
         shell: bash
-        env:
-          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
         run: bash .github/scripts/cli-smoke.sh target/x86_64-unknown-linux-musl/release/qlt
+      - name: Package prerelease artifact
+        if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+        shell: bash
+        run: |
+          mkdir -p dist
+          tar -C target/x86_64-unknown-linux-musl/release -czf "dist/qlt-linux-x86_64-musl-${GITHUB_SHA}.tar.gz" qlt
+          (cd dist && sha256sum "qlt-linux-x86_64-musl-${GITHUB_SHA}.tar.gz" > "qlt-linux-x86_64-musl-${GITHUB_SHA}.sha256")
+      - name: Upload prerelease artifact
+        if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+        uses: actions/upload-artifact@v4
+        with:
+          name: qlt-linux-x86_64-musl-${{ github.sha }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          retention-days: 3
+          compression-level: 0
+          if-no-files-found: error
