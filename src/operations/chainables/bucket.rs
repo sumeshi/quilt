@@ -2,7 +2,7 @@ use crate::controllers::nested::literal_col;
 use crate::error::QuiltError;
 use crate::operations::datetime::{
     floor_datetime_raw, interval_micros, localize, parse_datetime_detailed_with_diagnostics,
-    DateTimeConfig, ParserDiagnostics,
+    validate_config_format, DateTimeConfig, ParserDiagnostics,
 };
 use polars::prelude::*;
 
@@ -28,6 +28,9 @@ pub fn bucket_with_config(
     output: Option<&str>,
     datetime: DateTimeConfig,
 ) -> Result<LazyFrame, QuiltError> {
+    if let Some(format) = datetime.input_format.as_deref() {
+        validate_config_format(format).map_err(QuiltError::usage)?;
+    }
     let diagnostics = ParserDiagnostics::new();
     let interval_micros = interval_micros(interval).map_err(|error| {
         QuiltError::conversion(

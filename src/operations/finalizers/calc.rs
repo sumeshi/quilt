@@ -1,37 +1,10 @@
 use crate::controllers::nested::literal_col;
 use crate::error::QuiltError;
+use crate::operations::chainables::aggregate::{expression, AggregateMode, AggregateSpec};
 use crate::operations::finalizers::FinalizerResult;
 use polars::prelude::*;
 
 pub const MODES: [&str; 6] = ["sum", "avg", "min", "max", "median", "std"];
-
-fn is_numeric_dtype(dtype: &DataType) -> bool {
-    matches!(
-        dtype,
-        DataType::Int8
-            | DataType::Int16
-            | DataType::Int32
-            | DataType::Int64
-            | DataType::UInt8
-            | DataType::UInt16
-            | DataType::UInt32
-            | DataType::UInt64
-            | DataType::Float32
-            | DataType::Float64
-    )
-}
-
-fn integral_sum_dtype(dtype: &DataType) -> Option<DataType> {
-    match dtype {
-        DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
-            Some(DataType::Int64)
-        }
-        DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
-            Some(DataType::UInt64)
-        }
-        _ => None,
-    }
-}
 
 fn scalar_text(value: &AnyValue<'_>) -> String {
     match value {
@@ -57,7 +30,7 @@ pub fn calc(df: &LazyFrame, column: &str, mode: &str) -> Result<FinalizerResult,
             format!("Column '{column}' not found for calc"),
         )
     })?;
-    if !is_numeric_dtype(source_dtype) {
+    if !crate::operations::chainables::aggregate::numeric(source_dtype) {
         return Err(QuiltError::schema(
             "calc",
             Some(column),
@@ -67,31 +40,19 @@ pub fn calc(df: &LazyFrame, column: &str, mode: &str) -> Result<FinalizerResult,
             ),
         ));
     }
-    let expression = match mode {
-        "sum" => {
-            if let Some(public_dtype) = integral_sum_dtype(source_dtype) {
-                // Decimal128 keeps the complete input sum exact. The strict cast
-                // reports totals outside Polars' conventional Int64/UInt64 sum
-                // type instead of silently wrapping them.
-                literal_col(column)
-                    .cast(DataType::Decimal(38, 0))
-                    .sum()
-                    .strict_cast(public_dtype)
-            } else {
-                literal_col(column).sum()
-            }
-        }
-        "avg" => literal_col(column).mean(),
-        "min" => literal_col(column).min(),
-        "max" => literal_col(column).max(),
-        "median" => literal_col(column).quantile(lit(0.5), QuantileMethod::Linear),
-        "std" => literal_col(column)
-            .cast(DataType::Float64)
-            .var(1)
-            .sqrt()
-            .cast(DataType::Float64),
+    let mode_name = mode;
+    let aggregate_mode = match mode_name {
+        "sum" => AggregateMode::Sum,
+        "avg" => AggregateMode::Avg,
+        "min" => AggregateMode::Min,
+        "max" => AggregateMode::Max,
+        "median" => AggregateMode::Median,
+        "std" => AggregateMode::Std,
         _ => unreachable!(),
     };
+    let spec = AggregateSpec::new(aggregate_mode, Some(column.to_owned()), "calc_value");
+    let expression = expression(&spec, &schema)
+        .map_err(|error| QuiltError::schema("calc", Some(column), error.to_string()))?;
     let aggregate = df
         .clone()
         .select([
@@ -114,10 +75,10 @@ pub fn calc(df: &LazyFrame, column: &str, mode: &str) -> Result<FinalizerResult,
         .map_err(|error| QuiltError::operation("calc", error.to_string()))?
         .try_extract::<u32>()
         .unwrap_or(0);
-    if count == 0 || (mode == "std" && count < 2) {
+    if count == 0 || (mode_name == "std" && count < 2) {
         return Ok(FinalizerResult::Scalar("null".into()));
     }
-    let output = if mode == "std" {
+    let output = if mode_name == "std" {
         value
             .try_extract::<f64>()
             .map(|number| number.to_string())
@@ -146,6 +107,31 @@ mod tests {
         assert_eq!(
             calc(&all_null, "n", "sum").unwrap(),
             FinalizerResult::Scalar("null".into())
+        );
+    }
+
+    #[test]
+    fn calc_uses_the_same_safe_sum_expression_as_aggregate() {
+        use crate::operations::chainables::aggregate::{aggregate, AggregateMode, AggregateSpec};
+
+        let frame = df!("n" => [1_000_000_000_000_001i64, 7, 9]).unwrap().lazy();
+        let calc_value = calc(&frame, "n", "sum").unwrap();
+        let aggregate_frame = aggregate(
+            &frame,
+            &[AggregateSpec::new(
+                AggregateMode::Sum,
+                Some("n".into()),
+                "total",
+            )],
+            &[],
+        )
+        .unwrap()
+        .collect()
+        .unwrap();
+        let aggregate_value = aggregate_frame.column("total").unwrap().get(0).unwrap();
+        assert_eq!(
+            calc_value,
+            FinalizerResult::Scalar(aggregate_value.to_string())
         );
     }
 }

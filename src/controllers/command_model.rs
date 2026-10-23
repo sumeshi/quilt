@@ -12,6 +12,21 @@ pub use crate::controllers::yaml_adapter::parse_automation_step;
 /// execution and automation preflight enforce the same static contract.
 pub fn validate_command(command: &TypedCommand) -> Result<(), crate::error::QuiltError> {
     match command {
+        TypedCommand::Grep(args) => {
+            crate::operations::chainables::grep::validate(&args.pattern, args.ignore_case)
+        }
+        TypedCommand::Sed(args) => {
+            crate::operations::chainables::sed::validate(&args.pattern, args.ignore_case)
+        }
+        TypedCommand::Extract(args) => {
+            crate::operations::chainables::extract::validate(&args.pattern)
+        }
+        TypedCommand::Filter(args) => {
+            crate::operations::chainables::filter::validate_syntax(&args.expression)
+        }
+        TypedCommand::Derive(args) => {
+            crate::operations::chainables::filter::validate_syntax(&args.expression)
+        }
         TypedCommand::Aggregate(args) => {
             crate::operations::chainables::aggregate::validate_specs(&args.metrics, &args.by)
         }
@@ -19,10 +34,35 @@ pub fn validate_command(command: &TypedCommand) -> Result<(), crate::error::Quil
             crate::operations::chainables::cast::validate_config(&args.target, &args.datetime)
         }
         TypedCommand::Bucket(args) => {
-            crate::operations::chainables::bucket::validate_interval(&args.interval)
+            crate::operations::chainables::bucket::validate_interval(&args.interval)?;
+            validate_datetime_format(&args.datetime)
+        }
+        TypedCommand::TimeSlice(args) => validate_datetime_format(&args.datetime),
+        TypedCommand::ChangeTz(args) => {
+            if let Some(format) = &args.input_format {
+                crate::operations::datetime::validate_config_format(format)
+                    .map_err(crate::QuiltError::usage)?;
+            }
+            if let Some(format) = &args.output_format {
+                crate::operations::datetime::validate_config_format(format)
+                    .map_err(crate::QuiltError::usage)?;
+            }
+            Ok(())
         }
         _ => Ok(()),
     }
+}
+
+fn validate_datetime_format(
+    config: &crate::operations::datetime::DateTimeConfig,
+) -> Result<(), crate::QuiltError> {
+    config
+        .input_format
+        .as_deref()
+        .map(crate::operations::datetime::validate_config_format)
+        .transpose()
+        .map(|_| ())
+        .map_err(crate::QuiltError::usage)
 }
 
 pub fn render_registry_help() -> String {

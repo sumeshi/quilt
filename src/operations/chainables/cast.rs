@@ -1,7 +1,8 @@
 use crate::controllers::nested::literal_col;
 use crate::error::QuiltError;
 use crate::operations::datetime::{
-    localize, parse_datetime_detailed_with_diagnostics, DateTimeConfig, ParserDiagnostics,
+    localize, parse_datetime_detailed_with_diagnostics, validate_config_format, DateTimeConfig,
+    ParserDiagnostics,
 };
 use polars::prelude::*;
 
@@ -19,6 +20,11 @@ pub fn validate_config(target: &str, datetime: &DateTimeConfig) -> Result<(), Qu
         return Err(QuiltError::usage(
             "datetime parsing options apply only to datetime casts",
         ));
+    }
+    if target == "datetime" {
+        if let Some(format) = datetime.input_format.as_deref() {
+            validate_config_format(format).map_err(QuiltError::usage)?;
+        }
     }
     Ok(())
 }

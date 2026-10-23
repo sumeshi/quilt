@@ -7,5 +7,7 @@ mod core;
 #[path = "cases/jsonl.rs"]
 mod jsonl;
 mod support;
+#[path = "cases/validation.rs"]
+mod validation;
 #[path = "cases/workflows.rs"]
 mod workflows;

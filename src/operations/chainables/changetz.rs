@@ -1,8 +1,8 @@
 use crate::controllers::nested::literal_col;
 use crate::error::QuiltError;
 use crate::operations::datetime::{
-    localize, localize_local, parse_datetime_detailed_with_diagnostics, DateTimeConfig,
-    ParserDiagnostics,
+    localize, localize_local, parse_datetime_detailed_with_diagnostics, validate_config_format,
+    DateTimeConfig, ParserDiagnostics,
 };
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
@@ -41,6 +41,12 @@ pub fn changetz_with_config(
     output_format: Option<&str>,
     config: DateTimeConfig,
 ) -> Result<LazyFrame, QuiltError> {
+    if let Some(format) = config.input_format.as_deref() {
+        validate_config_format(format).map_err(QuiltError::usage)?;
+    }
+    if let Some(format) = output_format {
+        validate_config_format(format).map_err(QuiltError::usage)?;
+    }
     let schema = df
         .clone()
         .collect_schema()
@@ -52,6 +58,7 @@ pub fn changetz_with_config(
             "column not found",
         ));
     }
+    let source_dtype = schema.get(colname).expect("schema lookup checked above");
     if from_tz.parse::<Tz>().is_err() && !from_tz.eq_ignore_ascii_case("local") {
         return Err(QuiltError::usage(format!(
             "invalid source timezone '{from_tz}'"
@@ -67,6 +74,29 @@ pub fn changetz_with_config(
     let output_name = colname.to_string();
     let output_format = output_format.map(ToOwned::to_owned);
     let diagnostics = ParserDiagnostics::new();
+    if let DataType::Datetime(unit, _) = source_dtype {
+        if config.options_present {
+            return Err(QuiltError::usage(
+                "datetime parsing options apply only to string changetz input",
+            ));
+        }
+        let target_zone = TimeZone::opt_try_new(Some(to_tz.as_str()))
+            .map_err(|error| QuiltError::usage(format!("invalid target timezone: {error}")))?
+            .ok_or_else(|| QuiltError::usage("target timezone is required"))?;
+        let default_format = match unit {
+            TimeUnit::Nanoseconds => "%Y-%m-%dT%H:%M:%S%.9f%:z",
+            _ => "%Y-%m-%dT%H:%M:%S%.6f%:z",
+        };
+        let format = output_format.as_deref().unwrap_or(default_format);
+        return Ok(df.clone().with_column(
+            literal_col(colname)
+                .dt()
+                .convert_time_zone(target_zone)
+                .dt()
+                .strftime(format)
+                .alias(colname),
+        ));
+    }
     Ok(df.clone().with_column(
         literal_col(colname)
             .cast(DataType::String)

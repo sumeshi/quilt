@@ -128,7 +128,7 @@ fn datetime_operations_reject_precision_loss_and_keep_epoch_instants() {
         );
     }
 
-    // Parquet datetime columns must not bypass the same precision contract.
+    // Native datetime columns preserve their source precision without reparsing.
     use polars::prelude::*;
     let nanoseconds = Series::new("time".into(), [1_704_067_200_000_000_999i64])
         .cast(&DataType::Datetime(TimeUnit::Nanoseconds, None))
@@ -138,16 +138,50 @@ fn datetime_operations_reject_precision_loss_and_keep_epoch_instants() {
     ParquetWriter::new(std::fs::File::create(&parquet).unwrap())
         .finish(&mut typed)
         .unwrap();
-    assert!(failure(&[
+    assert_eq!(
+        frame(&[
+            "load",
+            parquet.to_str().unwrap(),
+            "-",
+            "timeslice",
+            "time",
+            "--end",
+            "2024-01-01T00:00:00Z"
+        ])
+        .height(),
+        0
+    );
+    let exact = frame(&[
         "load",
         parquet.to_str().unwrap(),
         "-",
         "timeslice",
         "time",
+        "--start",
+        "2024-01-01T00:00:00.000000999Z",
         "--end",
-        "2024-01-01T00:00:00Z"
-    ])
-    .contains("microsecond precision"));
+        "2024-01-01T00:00:00.000000999Z",
+    ]);
+    assert!(exact.equals_missing(&typed));
+    let timezone_args = [
+        "load",
+        parquet.to_str().unwrap(),
+        "-",
+        "changetz",
+        "time",
+        "--from-tz",
+        "UTC",
+        "--to-tz",
+        "Asia/Tokyo",
+    ];
+    let rendered = rows(&text(&timezone_args));
+    assert_eq!(rendered[0]["time"], "2024-01-01T09:00:00.000000999+09:00");
+    let mut custom_args = timezone_args.to_vec();
+    custom_args.extend(["--output-format", "%Y-%m-%d %H:%M:%S%.9f"]);
+    assert_eq!(
+        rows(&text(&custom_args))[0]["time"],
+        "2024-01-01 09:00:00.000000999"
+    );
     let output = frame(&[
         "load",
         parquet.to_str().unwrap(),

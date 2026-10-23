@@ -427,7 +427,7 @@ mod tests {
             vec!["cast", "id", "int"],
             vec!["bucket", "id", "1d"],
             vec!["delta", "id"],
-            vec!["extract", "id", "x"],
+            vec!["extract", "id", "(?P<match>x)"],
             vec!["flatten"],
             vec!["parse-size", "id"],
             vec!["isin", "id", "x"],

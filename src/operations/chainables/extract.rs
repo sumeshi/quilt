@@ -3,7 +3,26 @@ use crate::error::QuiltError;
 use polars::prelude::*;
 use regex::Regex;
 
+pub fn validate(pattern: &str) -> Result<(), QuiltError> {
+    let regex = Regex::new(pattern).map_err(|error| {
+        QuiltError::conversion(
+            "extract",
+            None::<String>,
+            format!("Invalid extract regex: {error}"),
+        )
+    })?;
+    if regex.capture_names().flatten().next().is_none() {
+        return Err(QuiltError::conversion(
+            "extract",
+            None::<String>,
+            "regex must contain at least one named capture group",
+        ));
+    }
+    Ok(())
+}
+
 pub fn extract(df: &LazyFrame, column: &str, pattern: &str) -> Result<LazyFrame, QuiltError> {
+    validate(pattern)?;
     let regex = Regex::new(pattern).map_err(|error| {
         QuiltError::conversion(
             "extract",
@@ -77,4 +96,14 @@ pub fn extract(df: &LazyFrame, column: &str, pattern: &str) -> Result<LazyFrame,
             .alias(group_name)
     });
     Ok(df.clone().with_columns(expressions.collect::<Vec<_>>()))
+}
+
+#[cfg(test)]
+mod validation_tests {
+    #[test]
+    fn extract_requires_valid_named_capture_syntax() {
+        assert!(super::validate("[").is_err());
+        assert!(super::validate("(plain)").is_err());
+        assert!(super::validate("(?P<value>.+)").is_ok());
+    }
 }

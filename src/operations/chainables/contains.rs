@@ -29,11 +29,44 @@ pub fn contains(
     let expr = if ignorecase {
         // For case-insensitive search, use regex with (?i) flag
         let pattern_regex = format!("(?i){}", regex::escape(pattern));
-        searchable.str().contains(lit(pattern_regex), false) // literal=false for regex
+        searchable.str().contains(lit(pattern_regex), true) // strict=true: regex compilation errors propagate
     } else {
         // For case-sensitive search, use literal contains
-        searchable.str().contains(lit(pattern), true) // literal=true for exact string match
+        searchable.str().contains_literal(lit(pattern))
     };
 
     Ok(df.clone().filter(expr))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn case_sensitive_contains_treats_regex_metacharacters_literally() {
+        let df =
+            DataFrame::new_infer_height(vec![
+                Series::new("value".into(), ["a.b", "axb", "a[b"]).into_column()
+            ])
+            .unwrap()
+            .lazy();
+        let result = contains(&df, "value", ".", false)
+            .unwrap()
+            .collect()
+            .unwrap();
+        assert_eq!(result.height(), 1);
+        assert_eq!(
+            result.column("value").unwrap().get(0).unwrap(),
+            AnyValue::String("a.b")
+        );
+        let bracket = contains(&df, "value", "[", false)
+            .unwrap()
+            .collect()
+            .unwrap();
+        assert_eq!(bracket.height(), 1);
+        assert_eq!(
+            bracket.column("value").unwrap().get(0).unwrap(),
+            AnyValue::String("a[b")
+        );
+    }
 }

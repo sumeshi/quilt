@@ -1,6 +1,18 @@
 use crate::controllers::log::LogController;
 use crate::error::QuiltError;
 use polars::prelude::*;
+use regex::Regex;
+
+pub fn validate(pattern: &str, ignorecase: bool) -> Result<(), QuiltError> {
+    let pattern = if ignorecase {
+        format!("(?i){pattern}")
+    } else {
+        pattern.to_string()
+    };
+    Regex::new(&pattern).map(|_| ()).map_err(|e| {
+        QuiltError::conversion("grep", None::<String>, format!("Invalid grep regex: {e}"))
+    })
+}
 
 pub fn grep(
     df: &LazyFrame,
@@ -9,6 +21,7 @@ pub fn grep(
     is_inverted: bool,
     columns: Option<&[String]>,
 ) -> Result<LazyFrame, QuiltError> {
+    validate(pattern, ignorecase)?;
     let schema = df
         .clone()
         .collect_schema()
@@ -59,7 +72,7 @@ pub fn grep(
         .map(|(col_name, helper)| {
             crate::controllers::nested::search_expr(col_name, schema.get(col_name).unwrap())
                 .str()
-                .contains(pattern_lit.clone(), false) // literal=false for regex
+                .contains(pattern_lit.clone(), true) // strict=true; regex is evaluated below via escaped literal
                 .fill_null(lit(false))
                 .alias(helper)
         })
@@ -70,7 +83,7 @@ pub fn grep(
         .map(|col_name| {
             crate::controllers::nested::search_expr(col_name, schema.get(col_name).unwrap())
                 .str()
-                .contains(pattern_lit.clone(), false)
+                .contains(pattern_lit.clone(), true)
                 .fill_null(lit(false))
         });
     let filter_expr = ordinary_exprs
@@ -83,5 +96,15 @@ pub fn grep(
         Ok(searched.filter(filter_expr.not()).drop(cols(helper_names)))
     } else {
         Ok(searched.filter(filter_expr).drop(cols(helper_names)))
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    #[test]
+    fn grep_rejects_invalid_regex_before_schema_or_inversion() {
+        assert!(super::validate("[", false).is_err());
+        assert!(super::validate("[", true).is_err());
+        assert!(super::validate("a+", false).is_ok());
     }
 }

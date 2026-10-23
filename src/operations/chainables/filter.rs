@@ -765,6 +765,16 @@ fn parsed(df: &LazyFrame, expression: &str) -> Result<(Expr, DataType), QuiltErr
     Ok((as_expr(value), typ))
 }
 
+/// Validate expression spelling and grammar without requiring a dataframe schema.
+pub fn validate_syntax(expression: &str) -> Result<(), QuiltError> {
+    Parser {
+        t: lex(expression)?,
+        i: 0,
+    }
+    .parse()
+    .map(|_| ())
+}
+
 pub fn filter(df: &LazyFrame, expression: &str) -> Result<LazyFrame, QuiltError> {
     let (expr, dtype) = parsed(df, expression)?;
     if dtype != DataType::Boolean {

@@ -2,6 +2,18 @@ use crate::controllers::log::LogController;
 use crate::controllers::nested::literal_col;
 use crate::error::QuiltError;
 use polars::prelude::*;
+use regex::Regex;
+
+pub fn validate(pattern: &str, ignorecase: bool) -> Result<(), QuiltError> {
+    let pattern = if ignorecase {
+        format!("(?i){pattern}")
+    } else {
+        pattern.to_string()
+    };
+    Regex::new(&pattern).map(|_| ()).map_err(|e| {
+        QuiltError::conversion("sed", None::<String>, format!("Invalid sed regex: {e}"))
+    })
+}
 
 pub fn sed(
     df: &LazyFrame,
@@ -10,6 +22,7 @@ pub fn sed(
     replacement: &str,
     ignorecase: bool,
 ) -> Result<LazyFrame, QuiltError> {
+    validate(pattern, ignorecase)?;
     let schema = df
         .clone()
         .collect_schema()

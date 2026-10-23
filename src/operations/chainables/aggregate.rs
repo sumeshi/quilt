@@ -43,7 +43,7 @@ impl AggregateSpec {
     }
 }
 
-fn integral_sum_dtype(dtype: &DataType) -> Option<DataType> {
+pub(crate) fn integral_sum_dtype(dtype: &DataType) -> Option<DataType> {
     match dtype {
         DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
             Some(DataType::Int64)
@@ -55,7 +55,7 @@ fn integral_sum_dtype(dtype: &DataType) -> Option<DataType> {
     }
 }
 
-fn numeric(dtype: &DataType) -> bool {
+pub(crate) fn numeric(dtype: &DataType) -> bool {
     matches!(
         dtype,
         DataType::Int8
@@ -71,7 +71,7 @@ fn numeric(dtype: &DataType) -> bool {
     )
 }
 
-fn expression(spec: &AggregateSpec, schema: &Schema) -> Result<Expr, QuiltError> {
+pub(crate) fn expression(spec: &AggregateSpec, schema: &Schema) -> Result<Expr, QuiltError> {
     let Some(column) = spec.column.as_deref() else {
         if spec.mode == AggregateMode::Count {
             return Ok(len().alias(&spec.output));

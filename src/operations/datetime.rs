@@ -10,6 +10,18 @@ use polars::prelude::TimeUnit;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
+/// Validate a user supplied Chrono strftime pattern before it is captured by a
+/// lazy expression. `StrftimeItems` represents unknown directives as
+/// `Item::Error`; formatting such a pattern later can panic.
+pub fn validate_config_format(format: &str) -> Result<(), String> {
+    use chrono::format::{Item, StrftimeItems};
+    if StrftimeItems::new(format).any(|item| matches!(item, Item::Error)) {
+        Err(format!("invalid datetime format '{format}'"))
+    } else {
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EpochUnit {
     Seconds,
@@ -271,6 +283,18 @@ pub fn parse_datetime_detailed_with_diagnostics(
     config: &DateTimeConfig,
     diagnostics: Option<&ParserDiagnostics>,
 ) -> Result<Option<ParsedDateTime>, String> {
+    parse_datetime_detailed_with_precision(value, config, diagnostics, false)
+}
+
+/// Parse a boundary for a typed datetime column without first reducing its
+/// nanosecond precision. String conversion keeps the historical microsecond
+/// precision rule through `parse_datetime_detailed_with_diagnostics`.
+pub fn parse_datetime_detailed_with_precision(
+    value: &str,
+    config: &DateTimeConfig,
+    diagnostics: Option<&ParserDiagnostics>,
+    allow_nanoseconds: bool,
+) -> Result<Option<ParsedDateTime>, String> {
     let value = value.trim();
     if value.is_empty() {
         return Ok(None);
@@ -280,8 +304,12 @@ pub fn parse_datetime_detailed_with_diagnostics(
         let authoritative_offset = DateTime::parse_from_str(value, format).is_ok();
         return parse_format(input, format)
             .and_then(|parsed| {
-                validate_parsed_precision(parsed)?;
-                validate_fractional_width(input, Some(format))?;
+                if !allow_nanoseconds {
+                    validate_parsed_precision(parsed)?;
+                    validate_fractional_width(input, Some(format))?;
+                } else {
+                    validate_fractional_width_with_digits(input, Some(format), 9)?;
+                }
                 if let Some(diagnostics) = diagnostics {
                     diagnostics.record(ParserFamily::ExplicitFormat);
                 }
@@ -293,8 +321,12 @@ pub fn parse_datetime_detailed_with_diagnostics(
             .map_err(|error| format!("input format '{format}' did not match: {error}"));
     }
     if let Ok(value) = DateTime::parse_from_rfc3339(value) {
-        validate_parsed_precision(value.naive_utc())?;
-        validate_fractional_width(input, None)?;
+        if !allow_nanoseconds {
+            validate_parsed_precision(value.naive_utc())?;
+            validate_fractional_width(input, None)?;
+        } else {
+            validate_fractional_width_with_digits(input, None, 9)?;
+        }
         if let Some(diagnostics) = diagnostics {
             diagnostics.record(ParserFamily::Rfc3339);
         }
@@ -308,8 +340,12 @@ pub fn parse_datetime_detailed_with_diagnostics(
         let Some((value, family)) = strict.into_iter().next() else {
             return Err("datetime strict parser produced no interpretation".into());
         };
-        validate_parsed_precision(value)?;
-        validate_fractional_width(input, None)?;
+        if !allow_nanoseconds {
+            validate_parsed_precision(value)?;
+            validate_fractional_width(input, None)?;
+        } else {
+            validate_fractional_width_with_digits(input, None, 9)?;
+        }
         if let Some(diagnostics) = diagnostics {
             diagnostics.record(family);
         }
@@ -340,8 +376,12 @@ pub fn parse_datetime_detailed_with_diagnostics(
     match fuzzy.as_slice() {
         [] => Err("datetime did not match a supported format".into()),
         [(value, family)] => {
-            validate_parsed_precision(*value)?;
-            validate_fractional_width(input, None)?;
+            if !allow_nanoseconds {
+                validate_parsed_precision(*value)?;
+                validate_fractional_width(input, None)?;
+            } else {
+                validate_fractional_width_with_digits(input, None, 9)?;
+            }
             if let Some(diagnostics) = diagnostics {
                 diagnostics.record(*family);
             }
@@ -366,6 +406,14 @@ fn validate_parsed_precision(value: NaiveDateTime) -> Result<(), String> {
 /// Chrono truncates fractional digits after nanoseconds. Inspect the actual
 /// fractional directive so even smaller nonzero digits cannot disappear.
 fn validate_fractional_width(value: &str, format: Option<&str>) -> Result<(), String> {
+    validate_fractional_width_with_digits(value, format, 6)
+}
+
+fn validate_fractional_width_with_digits(
+    value: &str,
+    format: Option<&str>,
+    retained_digits: usize,
+) -> Result<(), String> {
     if let Some(format) = format {
         use chrono::format::{parse_and_remainder, Fixed, Item, Parsed, StrftimeItems};
         let items = StrftimeItems::new(format).collect::<Vec<_>>();
@@ -387,9 +435,13 @@ fn validate_fractional_width(value: &str, format: Option<&str>) -> Result<(), St
                     let after =
                         parse_and_remainder(&mut Parsed::new(), value, items[..=index].iter())
                             .map_err(|error| error.to_string())?;
-                    validate_fractional_width(&remainder[..remainder.len() - after.len()], None)?;
+                    validate_fractional_width_with_digits(
+                        &remainder[..remainder.len() - after.len()],
+                        None,
+                        retained_digits,
+                    )?;
                 } else if let Some(fraction) = remainder.strip_prefix('.') {
-                    validate_fraction_digits(fraction)?;
+                    validate_fraction_digits(fraction, retained_digits)?;
                 }
             }
         }
@@ -402,17 +454,17 @@ fn validate_fractional_width(value: &str, format: Option<&str>) -> Result<(), St
             && bytes[index - 3] == b':'
             && bytes[index - 2..index].iter().all(u8::is_ascii_digit)
         {
-            validate_fraction_digits(&value[index + 1..])?;
+            validate_fraction_digits(&value[index + 1..], retained_digits)?;
         }
     }
     Ok(())
 }
 
-fn validate_fraction_digits(fraction: &str) -> Result<(), String> {
+fn validate_fraction_digits(fraction: &str, retained_digits: usize) -> Result<(), String> {
     if fraction
         .bytes()
         .take_while(u8::is_ascii_digit)
-        .skip(6)
+        .skip(retained_digits)
         .any(|byte| byte != b'0')
     {
         Err("fractional seconds exceed internal microsecond precision".into())

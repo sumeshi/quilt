@@ -2,7 +2,8 @@ use crate::controllers::log::LogController;
 use crate::controllers::nested::literal_col;
 use crate::error::QuiltError;
 use crate::operations::datetime::{
-    localize, parse_datetime_detailed_with_diagnostics, DateTimeConfig, ParserDiagnostics,
+    localize, parse_datetime_detailed_with_diagnostics, parse_datetime_detailed_with_precision,
+    validate_config_format, DateTimeConfig, ParserDiagnostics,
 };
 use polars::prelude::*;
 
@@ -13,6 +14,9 @@ pub fn timeslice(
     end_time: Option<&str>,
     datetime: &DateTimeConfig,
 ) -> Result<LazyFrame, QuiltError> {
+    if let Some(format) = datetime.input_format.as_deref() {
+        validate_config_format(format).map_err(QuiltError::usage)?;
+    }
     let diagnostics = ParserDiagnostics::new();
     let schema = df.clone().collect_schema().map_err(|e| {
         QuiltError::schema(
@@ -37,6 +41,25 @@ pub fn timeslice(
         ));
     }
     LogController::debug("Creating timeslice");
+
+    if let DataType::Datetime(unit, _) = source {
+        let unit = *unit;
+        let lower = start_time
+            .map(|value| datetime_boundary_raw(value, datetime, &diagnostics, unit))
+            .transpose()?;
+        let upper = end_time
+            .map(|value| datetime_boundary_raw(value, datetime, &diagnostics, unit))
+            .transpose()?;
+        let physical = literal_col(time_column).cast(DataType::Int64);
+        let mut result = df.clone();
+        if let Some(lower) = lower {
+            result = result.filter(physical.clone().gt_eq(lit(lower)));
+        }
+        if let Some(upper) = upper {
+            result = result.filter(physical.lt_eq(lit(upper)));
+        }
+        return Ok(result);
+    }
 
     // Start with the original dataframe
     let mut result_df = df.clone();
@@ -149,6 +172,60 @@ pub fn timeslice(
     ))
 }
 
+fn datetime_boundary_raw(
+    value: &str,
+    config: &DateTimeConfig,
+    diagnostics: &ParserDiagnostics,
+    unit: TimeUnit,
+) -> Result<i64, QuiltError> {
+    let parsed = parse_datetime_detailed_with_precision(
+        value,
+        config,
+        Some(diagnostics),
+        unit == TimeUnit::Nanoseconds,
+    )
+    .map_err(|error| QuiltError::conversion("timeslice", None::<String>, error))?
+    .ok_or_else(|| QuiltError::conversion("timeslice", None::<String>, "empty boundary"))?;
+    let instant = if parsed.authoritative_offset {
+        parsed.value.and_utc()
+    } else if let Some(zone) = config.timezone.as_deref() {
+        localize(parsed.value, zone, config.ambiguous, config.nonexistent)
+            .map_err(|error| QuiltError::conversion("timeslice", None::<String>, error))?
+            .with_timezone(&chrono::Utc)
+    } else {
+        parsed.value.and_utc()
+    };
+    match unit {
+        TimeUnit::Nanoseconds => instant.timestamp_nanos_opt().ok_or_else(|| {
+            QuiltError::conversion(
+                "timeslice",
+                None::<String>,
+                "boundary is outside datetime range",
+            )
+        }),
+        TimeUnit::Microseconds => {
+            if instant.timestamp_subsec_nanos() % 1_000 != 0 {
+                return Err(QuiltError::conversion(
+                    "timeslice",
+                    None::<String>,
+                    "boundary precision is finer than the typed datetime unit",
+                ));
+            }
+            Ok(instant.timestamp_micros())
+        }
+        TimeUnit::Milliseconds => {
+            if instant.timestamp_subsec_nanos() % 1_000_000 != 0 {
+                return Err(QuiltError::conversion(
+                    "timeslice",
+                    None::<String>,
+                    "boundary precision is finer than the typed datetime unit",
+                ));
+            }
+            Ok(instant.timestamp_millis())
+        }
+    }
+}
+
 fn parse_datetime_string_canonical(
     time_str: &str,
     config: &DateTimeConfig,
@@ -172,4 +249,41 @@ fn parse_datetime_string_canonical(
             }
         };
     Ok(datetime.map(|datetime| datetime.format("%Y-%m-%d %H:%M:%S%.6f").to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typed_nanosecond_timeslice_keeps_boundary_precision_and_negative_epochs() {
+        let values =
+            Int64Chunked::from_vec("ts".into(), vec![-1, 123_456_788, 123_456_789, 123_456_790])
+                .into_datetime(TimeUnit::Nanoseconds, None)
+                .into_series();
+        let frame = DataFrame::new_infer_height(vec![values.into()])
+            .unwrap()
+            .lazy();
+        let filtered = timeslice(
+            &frame,
+            "ts",
+            Some("1970-01-01T00:00:00.123456789Z"),
+            Some("1970-01-01T00:00:00.123456789Z"),
+            &DateTimeConfig::default(),
+        )
+        .unwrap()
+        .collect()
+        .unwrap();
+        assert_eq!(filtered.height(), 1);
+        assert_eq!(
+            filtered
+                .column("ts")
+                .unwrap()
+                .datetime()
+                .unwrap()
+                .physical()
+                .get(0),
+            Some(123_456_789)
+        );
+    }
 }
