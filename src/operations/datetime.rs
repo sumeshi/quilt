@@ -275,21 +275,26 @@ pub fn parse_datetime_detailed_with_diagnostics(
     if value.is_empty() {
         return Ok(None);
     }
+    let input = value;
     if let Some(format) = &config.input_format {
         let authoritative_offset = DateTime::parse_from_str(value, format).is_ok();
-        return parse_format(value, format)
-            .map(|value| {
+        return parse_format(input, format)
+            .and_then(|parsed| {
+                validate_parsed_precision(parsed)?;
+                validate_fractional_width(input, Some(format))?;
                 if let Some(diagnostics) = diagnostics {
                     diagnostics.record(ParserFamily::ExplicitFormat);
                 }
-                Some(ParsedDateTime {
-                    value,
+                Ok(Some(ParsedDateTime {
+                    value: parsed,
                     authoritative_offset,
-                })
+                }))
             })
             .map_err(|error| format!("input format '{format}' did not match: {error}"));
     }
     if let Ok(value) = DateTime::parse_from_rfc3339(value) {
+        validate_parsed_precision(value.naive_utc())?;
+        validate_fractional_width(input, None)?;
         if let Some(diagnostics) = diagnostics {
             diagnostics.record(ParserFamily::Rfc3339);
         }
@@ -303,6 +308,8 @@ pub fn parse_datetime_detailed_with_diagnostics(
         let Some((value, family)) = strict.into_iter().next() else {
             return Err("datetime strict parser produced no interpretation".into());
         };
+        validate_parsed_precision(value)?;
+        validate_fractional_width(input, None)?;
         if let Some(diagnostics) = diagnostics {
             diagnostics.record(family);
         }
@@ -321,7 +328,8 @@ pub fn parse_datetime_detailed_with_diagnostics(
             }
             Some(ParsedDateTime {
                 value,
-                authoritative_offset: false,
+                // Epoch values are absolute instants, just like RFC3339 values.
+                authoritative_offset: true,
             })
         });
     }
@@ -332,6 +340,8 @@ pub fn parse_datetime_detailed_with_diagnostics(
     match fuzzy.as_slice() {
         [] => Err("datetime did not match a supported format".into()),
         [(value, family)] => {
+            validate_parsed_precision(*value)?;
+            validate_fractional_width(input, None)?;
             if let Some(diagnostics) = diagnostics {
                 diagnostics.record(*family);
             }
@@ -341,6 +351,73 @@ pub fn parse_datetime_detailed_with_diagnostics(
             }))
         }
         _ => Err("datetime is ambiguous; provide --input-format".into()),
+    }
+}
+
+fn validate_parsed_precision(value: NaiveDateTime) -> Result<(), String> {
+    use chrono::Timelike;
+    if !value.nanosecond().is_multiple_of(1_000) {
+        Err("fractional seconds exceed internal microsecond precision".into())
+    } else {
+        Ok(())
+    }
+}
+
+/// Chrono truncates fractional digits after nanoseconds. Inspect the actual
+/// fractional directive so even smaller nonzero digits cannot disappear.
+fn validate_fractional_width(value: &str, format: Option<&str>) -> Result<(), String> {
+    if let Some(format) = format {
+        use chrono::format::{parse_and_remainder, Fixed, Item, Parsed, StrftimeItems};
+        let items = StrftimeItems::new(format).collect::<Vec<_>>();
+        for (index, item) in items.iter().enumerate() {
+            if matches!(
+                item,
+                Item::Fixed(
+                    Fixed::Nanosecond
+                        | Fixed::Nanosecond3
+                        | Fixed::Nanosecond6
+                        | Fixed::Nanosecond9
+                        | Fixed::RFC3339
+                )
+            ) {
+                let remainder =
+                    parse_and_remainder(&mut Parsed::new(), value, items[..index].iter())
+                        .map_err(|error| error.to_string())?;
+                if matches!(item, Item::Fixed(Fixed::RFC3339)) {
+                    let after =
+                        parse_and_remainder(&mut Parsed::new(), value, items[..=index].iter())
+                            .map_err(|error| error.to_string())?;
+                    validate_fractional_width(&remainder[..remainder.len() - after.len()], None)?;
+                } else if let Some(fraction) = remainder.strip_prefix('.') {
+                    validate_fraction_digits(fraction)?;
+                }
+            }
+        }
+        return Ok(());
+    }
+    let bytes = value.as_bytes();
+    // Automatic formats put the fraction directly after clock seconds.
+    for index in 3..bytes.len() {
+        if matches!(bytes[index], b'.' | b',')
+            && bytes[index - 3] == b':'
+            && bytes[index - 2..index].iter().all(u8::is_ascii_digit)
+        {
+            validate_fraction_digits(&value[index + 1..])?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_fraction_digits(fraction: &str) -> Result<(), String> {
+    if fraction
+        .bytes()
+        .take_while(u8::is_ascii_digit)
+        .skip(6)
+        .any(|byte| byte != b'0')
+    {
+        Err("fractional seconds exceed internal microsecond precision".into())
+    } else {
+        Ok(())
     }
 }
 
@@ -457,6 +534,46 @@ mod tests {
                 .time(),
             NaiveTime::MIN
         );
+    }
+
+    #[test]
+    fn rejects_nonzero_precision_beyond_microseconds_but_allows_zero_padding() {
+        let config = DateTimeConfig::default();
+        assert!(parsed_value("2024-01-02T03:04:05.000000999Z", &config)
+            .unwrap_err()
+            .contains("microsecond precision"));
+        assert_eq!(
+            parsed_value("2024-01-02T03:04:05.123456000Z", &config)
+                .unwrap()
+                .unwrap()
+                .time()
+                .nanosecond(),
+            123_456_000
+        );
+        if let Err(error) = parsed_value("2024-01-02T03:04:05,000000999Z", &config) {
+            if error.contains("did not match") {
+                // Some supported Chrono versions reject comma RFC fractions.
+            } else {
+                assert!(error.contains("microsecond precision"));
+            }
+        }
+        let literal = DateTimeConfig {
+            input_format: Some("%Y-%m-%dT%H:%M:%S.123456789".into()),
+            ..Default::default()
+        };
+        assert!(parsed_value("2024-01-02T03:04:05.123456789", &literal).is_ok());
+        let rfc_literal = DateTimeConfig {
+            input_format: Some("%+ literal :00.123456789".into()),
+            ..Default::default()
+        };
+        assert!(parsed_value("2024-01-02T03:04:05Z literal :00.123456789", &rfc_literal).is_ok());
+        let compact = DateTimeConfig {
+            input_format: Some("%Y%m%d%H%M%S%.f".into()),
+            ..Default::default()
+        };
+        assert!(parsed_value("20240102030405.0000000001", &compact)
+            .unwrap_err()
+            .contains("microsecond precision"));
     }
 
     #[test]

@@ -3,6 +3,171 @@ use serde_json::{json, Value};
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
+#[test]
+fn datetime_operations_reject_precision_loss_and_keep_epoch_instants() {
+    let root = tempfile::tempdir().unwrap();
+    let fractional = write(
+        root.path(),
+        "fraction.csv",
+        "time\n2024-01-01T00:00:00.000000999Z\n",
+    );
+    for operation in [
+        vec!["cast", "time", "datetime"],
+        vec!["timeslice", "time", "--end", "2024-01-01T00:00:00Z"],
+        vec!["bucket", "time", "1h"],
+        vec![
+            "changetz",
+            "time",
+            "--from-tz",
+            "UTC",
+            "--to-tz",
+            "Asia/Tokyo",
+        ],
+    ] {
+        let mut args = vec!["load", fractional.to_str().unwrap(), "-"];
+        args.extend(operation);
+        let error = failure(&args);
+        assert!(error.contains("microsecond precision"), "{error}");
+    }
+    let boundary = write(root.path(), "boundary.csv", "time\n2024-01-01T00:00:00Z\n");
+    assert!(failure(&[
+        "load",
+        boundary.to_str().unwrap(),
+        "-",
+        "timeslice",
+        "time",
+        "--end",
+        "2024-01-01T00:00:00.000000001Z"
+    ])
+    .contains("microsecond precision"));
+
+    let epoch = write(root.path(), "epoch.csv", "time\n0\n");
+    for operation in [
+        vec![
+            "cast",
+            "time",
+            "datetime",
+            "--epoch-unit",
+            "s",
+            "--timezone",
+            "Asia/Tokyo",
+            "-",
+            "cast",
+            "time",
+            "int",
+        ],
+        vec![
+            "bucket",
+            "time",
+            "1h",
+            "--epoch-unit",
+            "s",
+            "--timezone",
+            "Asia/Tokyo",
+            "-",
+            "select",
+            "time_bucket",
+            "-",
+            "cast",
+            "time_bucket",
+            "int",
+        ],
+    ] {
+        let mut args = vec!["load", epoch.to_str().unwrap(), "--all-strings", "-"];
+        args.extend(operation);
+        let output = rows(&text(&args));
+        assert_eq!(output[0].values().next().unwrap(), "0");
+    }
+    let converted = rows(&text(&[
+        "load",
+        epoch.to_str().unwrap(),
+        "-",
+        "changetz",
+        "time",
+        "--from-tz",
+        "America/New_York",
+        "--to-tz",
+        "Asia/Tokyo",
+        "--epoch-unit",
+        "s",
+    ]));
+    assert_eq!(converted[0]["time"], "1970-01-01T09:00:00.000000+09:00");
+    let epoch_rows = write(root.path(), "epochs.csv", "time\n-1\n0\n1\n");
+    assert_eq!(
+        rows(&text(&[
+            "load",
+            epoch_rows.to_str().unwrap(),
+            "-",
+            "timeslice",
+            "time",
+            "--end",
+            "1970-01-01T00:00:00Z",
+            "--epoch-unit",
+            "s",
+            "--timezone",
+            "Asia/Tokyo"
+        ]))
+        .len(),
+        2
+    );
+
+    let fuzzy = write(root.path(), "fuzzy.csv", "time\n15 Jan 2024 01:00:00\n");
+    for value in ["false", "FALSE", "False"] {
+        let flag = format!("--strict={value}");
+        assert_eq!(
+            rows(&text(&[
+                "load",
+                fuzzy.to_str().unwrap(),
+                "-",
+                "cast",
+                "time",
+                "datetime",
+                &flag
+            ]))[0]["time"],
+            "2024-01-15T01:00:00.000000"
+        );
+    }
+
+    // Parquet datetime columns must not bypass the same precision contract.
+    use polars::prelude::*;
+    let nanoseconds = Series::new("time".into(), [1_704_067_200_000_000_999i64])
+        .cast(&DataType::Datetime(TimeUnit::Nanoseconds, None))
+        .unwrap();
+    let mut typed = DataFrame::new_infer_height(vec![nanoseconds.into()]).unwrap();
+    let parquet = root.path().join("typed.parquet");
+    ParquetWriter::new(std::fs::File::create(&parquet).unwrap())
+        .finish(&mut typed)
+        .unwrap();
+    assert!(failure(&[
+        "load",
+        parquet.to_str().unwrap(),
+        "-",
+        "timeslice",
+        "time",
+        "--end",
+        "2024-01-01T00:00:00Z"
+    ])
+    .contains("microsecond precision"));
+    let output = frame(&[
+        "load",
+        parquet.to_str().unwrap(),
+        "-",
+        "bucket",
+        "time",
+        "1h",
+    ]);
+    assert_eq!(
+        output
+            .column("time_bucket")
+            .unwrap()
+            .datetime()
+            .unwrap()
+            .physical()
+            .get(0),
+        Some(1_704_067_200_000_000_000)
+    );
+}
+
 fn log_fixture(root: &std::path::Path) -> std::path::PathBuf {
     write(
         root,

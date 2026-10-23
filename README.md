@@ -374,7 +374,7 @@ stores `Datetime[μs]` values. For datetime conversion, these options apply:
 | `--ambiguous error\|earliest\|latest` | `error` | Resolve repeated local times during DST fall-back. |
 | `--nonexistent error\|shift-forward\|shift-backward` | `error` | Resolve nonexistent local times during DST spring-forward. |
 
-Explicit input offsets determine the instant. Without an offset or `--timezone`, values
+Explicit input offsets and Unix epochs determine the instant. Without an offset or `--timezone`, values
 use a UTC-naive timeline; the investigation machine's local timezone is not assumed.
 Datetime parsing options are rejected for non-datetime casts. They are also rejected
 by `bucket` and `timeslice` when their input is already typed datetime.
@@ -385,7 +385,8 @@ numeric dates require `--input-format`. Supported forms include RFC3339,
 ISO-like dates, Apache access-log timestamps, month-name dates, weekday/month
 log forms, and numeric dates with a time. Embedded free-text extraction is not
 supported. Epoch units are never inferred, negatives are accepted, and values
-normalize to microseconds; nanoseconds below one microsecond are rejected.
+normalize to microseconds. Text timestamps and epoch values with nonzero
+submicrosecond digits are rejected; additional trailing zeroes are accepted.
 
 ```bash
 $ qlt load data.csv - cast EventId int - show
