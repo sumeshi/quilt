@@ -1158,6 +1158,10 @@ Within a `run` document, stages can be different types to orchestrate the flow.
 | `join`         | Joins datasets from multiple stages based on keys.         | `name` and `join: {inputs: [...], on: [column], how: inner}`. Use `left-on` and `right-on` for asymmetric keys; `cross` needs no key. Modes: `inner` (default), `left`, `full` (`outer`), `cross`. Optional boolean `coalesce`. |
 | `branch`       | Selects downstream target stages from a `row-count` or `parameter` predicate. | `name` and `branch: {input: stage, when: {row-count: {greater-than: 10}}, then: [target]}` with optional `else: [target]`. |
 
+Join inputs are combined from left to right. Colliding right-hand columns receive
+`_right`, or a numbered suffix when that name already exists. `coalesce: true`
+combines join-key columns.
+
 Every run document must use `version: 2` and a sequence of named stages. The schema is
 strict: unknown document, stage, and step keys are rejected before any input is read.
 Version 1 documents are rejected with migration guidance. Update `version` to `2`,

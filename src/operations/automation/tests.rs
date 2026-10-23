@@ -430,6 +430,88 @@ fn run_fanout_materializes_one_probed_source_evaluation() {
 }
 
 #[test]
+fn full_join_three_inputs_keeps_right_keys_and_collision_free_names() {
+    use super::executor::execute_join_stage;
+    use crate::controllers::pipeline::Pipeline;
+    use crate::operations::automation::model::{JoinNode, JoinStage};
+    let resources = ExecutionResources::new();
+    let mut frames = HashMap::new();
+    for (name, key, payload) in [("a", 1i64, "a"), ("b", 2, "b"), ("c", 3, "c")] {
+        frames.insert(
+            name.to_string(),
+            Pipeline::new(
+                polars::df!("key" => &[key], "value" => &[payload], "value_right" => &["occupied"])
+                    .unwrap()
+                    .lazy(),
+                resources.clone(),
+            ),
+        );
+    }
+    let stage = JoinStage {
+        name: "joined".into(),
+        join: JoinNode {
+            inputs: vec!["a".into(), "b".into(), "c".into()],
+            how: Some("full".into()),
+            left_on: None,
+            right_on: None,
+            on: Some(vec!["key".into()]),
+            coalesce: None,
+        },
+        materialize: Default::default(),
+    };
+    let output = execute_join_stage("joined", &stage, &frames)
+        .unwrap()
+        .collect()
+        .unwrap();
+    let names = output
+        .get_column_names()
+        .iter()
+        .map(|n| n.as_str())
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"key_right_2"));
+    assert!(names.contains(&"key_right_3"));
+    assert!(names.contains(&"value_right"));
+    assert!(names.contains(&"value_right_2"));
+    assert!(names.contains(&"value_right_3"));
+    assert_eq!(output.height(), 3);
+    for (key_column, value) in [("key", 1), ("key_right_2", 2), ("key_right_3", 3)] {
+        assert_eq!(
+            output
+                .column(key_column)
+                .unwrap()
+                .i64()
+                .unwrap()
+                .iter()
+                .flatten()
+                .collect::<Vec<_>>(),
+            [value]
+        );
+    }
+    for pipeline in frames.values_mut() {
+        pipeline.select(&["key".into(), "value".into()]).unwrap();
+    }
+    let two = JoinStage {
+        name: "two".into(),
+        join: JoinNode {
+            inputs: vec!["a".into(), "b".into()],
+            ..stage.join.clone()
+        },
+        materialize: Default::default(),
+    };
+    let two = execute_join_stage("two", &two, &frames)
+        .unwrap()
+        .collect()
+        .unwrap();
+    assert_eq!(
+        two.get_column_names()
+            .iter()
+            .map(|n| n.as_str())
+            .collect::<Vec<_>>(),
+        ["key", "value", "key_right", "value_right"]
+    );
+}
+
+#[test]
 fn yaml_cache_input_survives_chained_steps_and_inherited_stages() {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();

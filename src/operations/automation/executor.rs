@@ -274,21 +274,34 @@ fn join_pair(
     coalesce: bool,
     key_spec: &JoinKeySpec,
 ) -> Result<LazyFrame, String> {
+    let left_schema = left_df
+        .collect_schema()
+        .map_err(|error| error.to_string())?;
+    let right_schema = right_df
+        .collect_schema()
+        .map_err(|error| error.to_string())?;
+    let mut suffix = "_right".to_owned();
+    let mut suffix_number = 2;
+    while right_schema.iter_names().any(|name| {
+        if left_schema.get(name).is_none() {
+            return false;
+        }
+        let candidate = format!("{name}{suffix}");
+        left_schema.get(&candidate).is_some() || right_schema.get(&candidate).is_some()
+    }) {
+        suffix = format!("_right_{suffix_number}");
+        suffix_number += 1;
+    }
     if matches!(key_spec, JoinKeySpec::Cross) {
-        let left_schema = left_df
-            .collect_schema()
-            .map_err(|error| error.to_string())?;
-        let right_schema = right_df
-            .collect_schema()
-            .map_err(|error| error.to_string())?;
         let mut cross_key = "__qlt_run_cross_join_key".to_string();
-        let mut suffix = 0usize;
+        let mut cross_suffix = 0usize;
         while left_schema.get(&cross_key).is_some() || right_schema.get(&cross_key).is_some() {
-            suffix += 1;
-            cross_key = format!("__qlt_run_cross_join_key_{suffix}");
+            cross_suffix += 1;
+            cross_key = format!("__qlt_run_cross_join_key_{cross_suffix}");
         }
         let join_args = polars::prelude::JoinArgs::new(JoinType::Inner)
-            .with_coalesce(polars::prelude::JoinCoalesce::CoalesceColumns);
+            .with_coalesce(polars::prelude::JoinCoalesce::CoalesceColumns)
+            .with_suffix(Some(suffix.into()));
         return Ok(left_df
             .with_column(lit(0u8).alias(&cross_key))
             .join(
@@ -299,7 +312,7 @@ fn join_pair(
             )
             .drop(cols([cross_key])));
     }
-    let mut join_args = polars::prelude::JoinArgs::new(join_type);
+    let mut join_args = polars::prelude::JoinArgs::new(join_type).with_suffix(Some(suffix.into()));
     if matches!(join_args.how, JoinType::Left) {
         join_args.maintain_order = polars::prelude::MaintainOrderJoin::Left;
     }
